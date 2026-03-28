@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "social-pressure-alarm",
+    "name": "Social Pressure Alarm",
     "slug": "social-pressure-alarm",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -27,6 +27,7 @@
     },
     "plugins": [
       "expo-router",
+      "expo-notifications",
       [
         "expo-splash-screen",
         {
@@ -38,7 +39,8 @@
             "backgroundColor": "#000000"
           }
         }
-      ]
+      ],
+      "@react-native-community/datetimepicker"
     ],
     "experiments": {
       "typedRoutes": true,
