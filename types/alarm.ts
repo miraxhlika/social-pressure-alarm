@@ -1,23 +1,56 @@
 export const FREE_ALARM_LIMIT = 3;
-export const DEFAULT_ACCOUNTABILITY_MESSAGE =
-  "I didn't wake up on time. Hold me accountable.";
+export const MAX_FAILURE_HISTORY = 10;
+export const MAX_SUCCESS_HISTORY = 20;
+export const MAX_CHECKPOINT_PRESETS = 8;
+
+export type AlarmOutcome = 'confirmed' | 'missed';
+export type RepeatSchedule = 'once' | 'daily' | 'weekdays';
+
+export type FailureHistoryEntry = {
+  alarmId: string;
+  label: string;
+  scheduledFor?: string;
+  failedAt: string;
+};
+
+export type SuccessHistoryEntry = {
+  alarmId: string;
+  label: string;
+  scheduledFor?: string;
+  confirmedAt: string;
+  timeToScanSeconds: number;
+  gracePeriodSeconds: number;
+};
+
+export type CheckpointPreset = {
+  id: string;
+  label: string;
+  expectedQrPayload: string;
+  createdAt: string;
+  lastUsedAt: string;
+};
 
 export type Alarm = {
   id: string;
   hour: number;
   minute: number;
-  contactName: string;
-  phoneNumber: string;
-  message: string;
+  label: string;
+  expectedQrPayload: string;
+  repeatSchedule: RepeatSchedule;
   gracePeriodSeconds: number;
   isActive: boolean;
   createdAt: string;
   scheduledFor?: string;
-  notificationId?: string;
-  lastOutcome?: 'confirmed' | 'missed';
+  notificationIds?: string[];
+  lastOutcome?: AlarmOutcome;
 };
 
 export type AlarmStore = {
   alarms: Alarm[];
   lifetimeAlarmCreations: number;
+  currentStreak: number;
+  longestStreak: number;
+  failureHistory: FailureHistoryEntry[];
+  successHistory: SuccessHistoryEntry[];
+  checkpointPresets: CheckpointPreset[];
 };

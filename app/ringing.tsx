@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { BarcodeScanningResult, CameraView, useCameraPermissions } from 'expo-camera';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
@@ -9,9 +10,9 @@ import {
   getAlarmById,
   getAlarmDeadlineTimestamp,
   resolveAlarm,
+  updateAlarm,
 } from '@/lib/alarms';
-import { cancelAlarmNotificationAsync } from '@/lib/notifications';
-import { openAccountabilitySmsAsync } from '@/lib/sms';
+import { cancelAlarmNotificationAsync, scheduleAlarmNotificationAsync } from '@/lib/notifications';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { Alarm } from '@/types/alarm';
 
@@ -22,6 +23,13 @@ export default function RingingScreen() {
   const [alarm, setAlarm] = useState<Alarm | null>(null);
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isScannerVisible, setIsScannerVisible] = useState(false);
+  const [scanError, setScanError] = useState('');
+  const [scanEnabled, setScanEnabled] = useState(true);
+  const [permission, requestPermission] = useCameraPermissions();
+  const hasResolvedRef = useRef(false);
+  const hasAutoOpenedScannerRef = useRef(false);
+  const retryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     const loadAlarm = async () => {
@@ -36,6 +44,14 @@ export default function RingingScreen() {
 
     void loadAlarm();
   }, [params.alarmId]);
+
+  useEffect(() => {
+    return () => {
+      if (retryTimeoutRef.current) {
+        clearTimeout(retryTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const deadline = useMemo(() => {
     if (!alarm) {
@@ -61,56 +77,140 @@ export default function RingingScreen() {
     return () => clearInterval(interval);
   }, [deadline]);
 
-  const handleConfirmedAwake = useCallback(async () => {
-    if (!alarm || isSubmitting) {
+  useEffect(() => {
+    if (alarm && permission?.granted && !isScannerVisible && !hasAutoOpenedScannerRef.current) {
+      hasAutoOpenedScannerRef.current = true;
+      setScanEnabled(true);
+      setIsScannerVisible(true);
+    }
+  }, [alarm, isScannerVisible, permission?.granted]);
+
+  const handleScanSuccess = useCallback(async () => {
+    if (!alarm || isSubmitting || hasResolvedRef.current) {
       return;
     }
 
+    hasResolvedRef.current = true;
     setIsSubmitting(true);
+    setScanError('');
 
     try {
-      await cancelAlarmNotificationAsync(alarm.notificationId);
-      await resolveAlarm(alarm.id, 'confirmed');
+      await cancelAlarmNotificationAsync(alarm.notificationIds);
+      const resolvedAlarm = await resolveAlarm(alarm.id, 'confirmed');
+
+      if (alarm.repeatSchedule !== 'once' && resolvedAlarm) {
+        const nextScheduled = await scheduleAlarmNotificationAsync(resolvedAlarm);
+        await updateAlarm({
+          ...resolvedAlarm,
+          isActive: true,
+          notificationIds: nextScheduled.notificationIds,
+          scheduledFor: nextScheduled.scheduledFor,
+        });
+      }
+
       router.replace({
         pathname: '/success',
         params: {
-          contactName: alarm.contactName,
+          alarmId: alarm.id,
+          label: alarm.label,
         },
       });
+    } catch (error) {
+      hasResolvedRef.current = false;
+      setScanEnabled(true);
+
+      const errorMessage =
+        error instanceof Error ? error.message : 'The QR checkpoint could not be confirmed.';
+
+      Alert.alert('Unable to confirm checkpoint', errorMessage);
     } finally {
       setIsSubmitting(false);
     }
   }, [alarm, isSubmitting, router]);
 
   const handleMissedAlarm = useCallback(async () => {
-    if (!alarm || isSubmitting) {
+    if (!alarm || isSubmitting || hasResolvedRef.current) {
       return;
     }
 
+    hasResolvedRef.current = true;
     setIsSubmitting(true);
 
     try {
-      await cancelAlarmNotificationAsync(alarm.notificationId);
-      await resolveAlarm(alarm.id, 'missed');
-      await openAccountabilitySmsAsync(alarm);
+      await cancelAlarmNotificationAsync(alarm.notificationIds);
+      const resolvedAlarm = await resolveAlarm(alarm.id, 'missed');
 
-      Alert.alert(
-        'Accountability message ready',
-        'The SMS composer was opened. Automatic sending is not available in this Expo MVP.'
-      );
+      if (alarm.repeatSchedule !== 'once' && resolvedAlarm) {
+        const nextScheduled = await scheduleAlarmNotificationAsync(resolvedAlarm);
+        await updateAlarm({
+          ...resolvedAlarm,
+          isActive: true,
+          notificationIds: nextScheduled.notificationIds,
+          scheduledFor: nextScheduled.scheduledFor,
+        });
+      }
+
       router.replace('/');
     } catch (error) {
-      const errorMessage =
-        error instanceof Error
-          ? error.message
-          : 'The SMS composer could not be opened on this device.';
+      hasResolvedRef.current = false;
 
-      Alert.alert('SMS unavailable', errorMessage);
-      router.replace('/');
+      const errorMessage =
+        error instanceof Error ? error.message : 'The missed checkpoint could not be recorded.';
+
+      Alert.alert('Unable to record missed alarm', errorMessage);
     } finally {
       setIsSubmitting(false);
     }
   }, [alarm, isSubmitting, router]);
+
+  const handleStartScanner = useCallback(async () => {
+    if (isSubmitting) {
+      return;
+    }
+
+    setScanError('');
+
+    if (!permission?.granted) {
+      const response = await requestPermission();
+
+      if (!response.granted) {
+        setScanError('Camera access is required to scan your QR checkpoint.');
+        return;
+      }
+    }
+
+    setScanEnabled(true);
+    setIsScannerVisible(true);
+  }, [isSubmitting, permission?.granted, requestPermission]);
+
+  const handleBarcodeScanned = useCallback(
+    async ({ data }: BarcodeScanningResult) => {
+      if (!alarm || !scanEnabled || isSubmitting || hasResolvedRef.current) {
+        return;
+      }
+
+      setScanEnabled(false);
+
+      if (data !== alarm.expectedQrPayload) {
+        setScanError(
+          'That QR code does not match this checkpoint. Keep scanning for the correct one.'
+        );
+
+        if (retryTimeoutRef.current) {
+          clearTimeout(retryTimeoutRef.current);
+        }
+
+        retryTimeoutRef.current = setTimeout(() => {
+          setScanEnabled(true);
+        }, 1200);
+
+        return;
+      }
+
+      await handleScanSuccess();
+    },
+    [alarm, handleScanSuccess, isSubmitting, scanEnabled]
+  );
 
   useEffect(() => {
     if (alarm && remainingSeconds === 0 && !isSubmitting) {
@@ -147,7 +247,8 @@ export default function RingingScreen() {
           {formatAlarmTime(alarm.hour, alarm.minute)}
         </Text>
         <Text style={[styles.subtitle, { color: '#d4d4d8' }]}>
-          Wake up now or the app will prepare a text to {alarm.contactName}.
+          Scan the {alarm.label} QR checkpoint before time expires. The alarm only clears when the
+          scanned payload exactly matches the saved checkpoint value.
         </Text>
 
         <View
@@ -164,10 +265,27 @@ export default function RingingScreen() {
           </Text>
         </View>
 
+        {isScannerVisible && permission?.granted ? (
+          <View style={styles.scannerSection}>
+            <CameraView
+              barcodeScannerSettings={{
+                barcodeTypes: ['qr'],
+              }}
+              onBarcodeScanned={scanEnabled ? handleBarcodeScanned : undefined}
+              style={styles.camera}
+            />
+            <Text style={styles.scannerHint}>
+              Point the camera at the QR code in the other room.
+            </Text>
+          </View>
+        ) : null}
+
+        {scanError ? <Text style={[styles.errorText, { color: '#fca5a5' }]}>{scanError}</Text> : null}
+
         <Pressable
           accessibilityRole="button"
           disabled={isSubmitting}
-          onPress={handleConfirmedAwake}
+          onPress={handleStartScanner}
           style={[
             styles.awakeButton,
             {
@@ -175,24 +293,24 @@ export default function RingingScreen() {
               opacity: isSubmitting ? 0.7 : 1,
             },
           ]}>
-          <Text style={[styles.awakeButtonText, { color: colors.primaryText }]}>I&apos;M AWAKE</Text>
+          <Text style={[styles.awakeButtonText, { color: colors.primaryText }]}>Scan QR code</Text>
         </Pressable>
 
-        <Pressable
-          accessibilityRole="button"
-          disabled={isSubmitting}
-          onPress={handleMissedAlarm}
-          style={[
-            styles.secondaryButton,
-            {
-              borderColor: '#3f3f46',
-              opacity: isSubmitting ? 0.7 : 1,
-            },
-          ]}>
-          <Text style={[styles.secondaryButtonText, { color: '#ffffff' }]}>
-            Open accountability SMS now
-          </Text>
-        </Pressable>
+        {isScannerVisible ? (
+          <Pressable
+            accessibilityRole="button"
+            disabled={isSubmitting}
+            onPress={() => setIsScannerVisible(false)}
+            style={[
+              styles.secondaryButton,
+              {
+                borderColor: '#3f3f46',
+                opacity: isSubmitting ? 0.7 : 1,
+              },
+            ]}>
+            <Text style={[styles.secondaryButtonText, { color: '#ffffff' }]}>Hide scanner</Text>
+          </Pressable>
+        ) : null}
       </View>
     </SafeAreaView>
   );
@@ -226,6 +344,22 @@ const styles = StyleSheet.create({
     marginTop: 12,
     textAlign: 'center',
   },
+  scannerSection: {
+    marginTop: 24,
+  },
+  camera: {
+    borderRadius: 24,
+    height: 300,
+    overflow: 'hidden',
+    width: '100%',
+  },
+  scannerHint: {
+    color: '#a1a1aa',
+    fontSize: 14,
+    lineHeight: 20,
+    marginTop: 12,
+    textAlign: 'center',
+  },
   countdownCard: {
     alignItems: 'center',
     borderRadius: 24,
@@ -242,6 +376,13 @@ const styles = StyleSheet.create({
     fontSize: 44,
     fontWeight: '800',
     marginTop: 10,
+  },
+  errorText: {
+    fontSize: 14,
+    fontWeight: '600',
+    lineHeight: 20,
+    marginTop: 18,
+    textAlign: 'center',
   },
   awakeButton: {
     alignItems: 'center',
