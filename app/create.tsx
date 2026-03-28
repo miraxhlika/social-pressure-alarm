@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Platform,
@@ -10,22 +10,25 @@ import {
   View,
 } from 'react-native';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
+import { BarcodeScanningResult, CameraView, useCameraPermissions } from 'expo-camera';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { getAppColors } from '@/constants/theme';
-import { readAlarmStore, saveNewAlarm } from '@/lib/alarms';
+import { readAlarmStore, saveNewAlarm, updateAlarm } from '@/lib/alarms';
 import {
   cancelAlarmNotificationAsync,
   ensureNotificationPermissionsAsync,
   scheduleAlarmNotificationAsync,
 } from '@/lib/notifications';
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import {
-  Alarm,
-  DEFAULT_ACCOUNTABILITY_MESSAGE,
-  FREE_ALARM_LIMIT,
-} from '@/types/alarm';
+import { Alarm, CheckpointPreset, FREE_ALARM_LIMIT, RepeatSchedule } from '@/types/alarm';
+
+const REPEAT_OPTIONS: { value: RepeatSchedule; label: string; help: string }[] = [
+  { value: 'once', label: 'Once', help: 'One scheduled run' },
+  { value: 'daily', label: 'Daily', help: 'Every day' },
+  { value: 'weekdays', label: 'Weekdays', help: 'Mon to Fri' },
+];
 
 function createInitialTime() {
   const now = new Date();
@@ -33,20 +36,25 @@ function createInitialTime() {
   return now;
 }
 
-function isValidPhoneNumber(phoneNumber: string) {
-  const digits = phoneNumber.replace(/\D/g, '');
-  return digits.length >= 7 && digits.length <= 15;
-}
-
 export default function CreateAlarmScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams<{ alarmId?: string; mode?: string }>();
   const colors = getAppColors(useColorScheme());
   const [time, setTime] = useState(createInitialTime);
-  const [contactName, setContactName] = useState('');
-  const [phoneNumber, setPhoneNumber] = useState('');
-  const [message, setMessage] = useState(DEFAULT_ACCOUNTABILITY_MESSAGE);
+  const [label, setLabel] = useState('');
+  const [expectedQrPayload, setExpectedQrPayload] = useState('');
+  const [repeatSchedule, setRepeatSchedule] = useState<RepeatSchedule>('once');
   const [gracePeriodSeconds, setGracePeriodSeconds] = useState('120');
   const [isSaving, setIsSaving] = useState(false);
+  const [isScannerVisible, setIsScannerVisible] = useState(false);
+  const [scannerMessage, setScannerMessage] = useState('');
+  const [isScannerEnabled, setIsScannerEnabled] = useState(true);
+  const [savedPresets, setSavedPresets] = useState<CheckpointPreset[]>([]);
+  const [sourceAlarm, setSourceAlarm] = useState<Alarm | null>(null);
+  const [permission, requestPermission] = useCameraPermissions();
+  const scannerTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isEditMode = params.mode === 'edit' && typeof params.alarmId === 'string';
+  const isReuseMode = params.mode === 'reuse' && typeof params.alarmId === 'string';
 
   const formattedTime = useMemo(
     () =>
@@ -65,24 +73,110 @@ export default function CreateAlarmScreen() {
     setTime(selectedDate);
   };
 
+  useEffect(() => {
+    const loadFormData = async () => {
+      const store = await readAlarmStore();
+      setSavedPresets(store.checkpointPresets);
+
+      if (!params.alarmId || (!isEditMode && !isReuseMode)) {
+        setSourceAlarm(null);
+        return;
+      }
+
+      const alarm = store.alarms.find((candidate) => candidate.id === params.alarmId) ?? null;
+
+      if (!alarm) {
+        setSourceAlarm(null);
+        return;
+      }
+
+      const nextTime = createInitialTime();
+      nextTime.setHours(alarm.hour, alarm.minute, 0, 0);
+
+      setSourceAlarm(alarm);
+      setTime(nextTime);
+      setLabel(alarm.label);
+      setExpectedQrPayload(alarm.expectedQrPayload);
+      setRepeatSchedule(alarm.repeatSchedule);
+      setGracePeriodSeconds(String(alarm.gracePeriodSeconds));
+    };
+
+    void loadFormData();
+  }, [isEditMode, isReuseMode, params.alarmId]);
+
+  useEffect(() => {
+    return () => {
+      if (scannerTimeoutRef.current) {
+        clearTimeout(scannerTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const handleOpenScanner = useCallback(async () => {
+    setScannerMessage('');
+
+    if (!permission?.granted) {
+      const response = await requestPermission();
+
+      if (!response.granted) {
+        setScannerMessage('Camera access is required to scan a QR code into this field.');
+        return;
+      }
+    }
+
+    setIsScannerEnabled(true);
+    setIsScannerVisible(true);
+  }, [permission?.granted, requestPermission]);
+
+  const handleBarcodeScanned = useCallback(
+    ({ data }: BarcodeScanningResult) => {
+      if (!isScannerEnabled) {
+        return;
+      }
+
+      setIsScannerEnabled(false);
+      setExpectedQrPayload(data);
+      setScannerMessage('QR payload captured. You can still edit the value manually if needed.');
+      setIsScannerVisible(false);
+
+      if (scannerTimeoutRef.current) {
+        clearTimeout(scannerTimeoutRef.current);
+      }
+
+      scannerTimeoutRef.current = setTimeout(() => {
+        setIsScannerEnabled(true);
+      }, 500);
+    },
+    [isScannerEnabled]
+  );
+
+  const screenTitle = isEditMode
+    ? 'Edit checkpoint alarm'
+    : isReuseMode
+      ? 'Reuse checkpoint alarm'
+      : 'Create checkpoint alarm';
+  const screenSubtitle = isEditMode
+    ? 'Update the schedule, checkpoint, and repeat pattern without rebuilding the alarm from scratch.'
+    : isReuseMode
+      ? 'Start from an existing alarm, then tweak the time or checkpoint before saving a new copy.'
+      : "Set a wake-up time, then enter the exact QR payload for a code you'll place in another room.";
+  const primaryActionLabel = isEditMode ? 'Save changes' : 'Save Checkpoint Alarm';
+
   const handleSave = async () => {
-    const trimmedName = contactName.trim();
-    const trimmedPhoneNumber = phoneNumber.trim();
-    const trimmedMessage = message.trim();
+    const trimmedLabel = label.trim();
+    const trimmedExpectedQrPayload = expectedQrPayload.trim();
     const gracePeriod = Number.parseInt(gracePeriodSeconds, 10);
 
-    if (!trimmedName) {
-      Alert.alert('Contact name required', 'Add the person who should keep you accountable.');
+    if (!trimmedLabel) {
+      Alert.alert('Checkpoint label required', 'Give this alarm a label so it is easy to recognize.');
       return;
     }
 
-    if (!isValidPhoneNumber(trimmedPhoneNumber)) {
-      Alert.alert('Invalid phone number', 'Enter a phone number with 7 to 15 digits.');
-      return;
-    }
-
-    if (!trimmedMessage) {
-      Alert.alert('Message required', 'Add the accountability message that will be prepared.');
+    if (!trimmedExpectedQrPayload) {
+      Alert.alert(
+        'QR payload required',
+        'Enter the exact QR payload that must be scanned when the alarm rings.'
+      );
       return;
     }
 
@@ -93,14 +187,14 @@ export default function CreateAlarmScreen() {
 
     const store = await readAlarmStore();
 
-    if (store.lifetimeAlarmCreations >= FREE_ALARM_LIMIT) {
+    if (!isEditMode && store.lifetimeAlarmCreations >= FREE_ALARM_LIMIT) {
       router.replace('/paywall');
       return;
     }
 
     setIsSaving(true);
 
-    let scheduledNotificationId: string | undefined;
+    let scheduledNotificationIds: string[] | undefined;
 
     try {
       const hasNotificationPermission = await ensureNotificationPermissionsAsync();
@@ -113,32 +207,43 @@ export default function CreateAlarmScreen() {
         return;
       }
 
-      const alarmId = `${Date.now()}`;
+      const alarmId = isEditMode && sourceAlarm ? sourceAlarm.id : `${Date.now()}`;
       const baseAlarm: Alarm = {
         id: alarmId,
         hour: time.getHours(),
         minute: time.getMinutes(),
-        contactName: trimmedName,
-        phoneNumber: trimmedPhoneNumber,
-        message: trimmedMessage,
+        label: trimmedLabel,
+        expectedQrPayload: trimmedExpectedQrPayload,
+        repeatSchedule,
         gracePeriodSeconds: gracePeriod,
         isActive: true,
-        createdAt: new Date().toISOString(),
+        createdAt: isEditMode && sourceAlarm ? sourceAlarm.createdAt : new Date().toISOString(),
+        lastOutcome: undefined,
       };
 
       const scheduled = await scheduleAlarmNotificationAsync(baseAlarm);
-      scheduledNotificationId = scheduled.notificationId;
+      scheduledNotificationIds = scheduled.notificationIds;
 
-      await saveNewAlarm({
+      if (isEditMode && sourceAlarm?.notificationIds) {
+        await cancelAlarmNotificationAsync(sourceAlarm.notificationIds);
+      }
+
+      const nextAlarm: Alarm = {
         ...baseAlarm,
-        notificationId: scheduled.notificationId,
+        notificationIds: scheduled.notificationIds,
         scheduledFor: scheduled.scheduledFor,
-      });
+      };
+
+      if (isEditMode && sourceAlarm) {
+        await updateAlarm(nextAlarm);
+      } else {
+        await saveNewAlarm(nextAlarm);
+      }
 
       router.replace('/');
     } catch (error) {
-      if (scheduledNotificationId) {
-        await cancelAlarmNotificationAsync(scheduledNotificationId);
+      if (scheduledNotificationIds) {
+        await cancelAlarmNotificationAsync(scheduledNotificationIds);
       }
 
       const errorMessage =
@@ -154,11 +259,48 @@ export default function CreateAlarmScreen() {
     <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.canvas }]}>
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         <View style={styles.header}>
-          <Text style={[styles.title, { color: colors.text }]}>Create alarm</Text>
-          <Text style={[styles.subtitle, { color: colors.muted }]}>
-            Pick a time, pick a person, and define how long you get to prove you&apos;re awake.
-          </Text>
+          <Text style={[styles.title, { color: colors.text }]}>{screenTitle}</Text>
+          <Text style={[styles.subtitle, { color: colors.muted }]}>{screenSubtitle}</Text>
         </View>
+
+        {savedPresets.length ? (
+          <View
+            style={[
+              styles.section,
+              {
+                backgroundColor: colors.card,
+                borderColor: colors.border,
+              },
+            ]}>
+            <Text style={[styles.label, { color: colors.text }]}>Saved checkpoints</Text>
+            <Text style={[styles.helperText, { color: colors.muted }]}>
+              Reuse a checkpoint preset to skip manual entry.
+            </Text>
+            <View style={styles.presetList}>
+              {savedPresets.map((preset) => (
+                <Pressable
+                  key={preset.id}
+                  accessibilityRole="button"
+                  onPress={() => {
+                    setLabel(preset.label);
+                    setExpectedQrPayload(preset.expectedQrPayload);
+                    setScannerMessage(`Loaded the ${preset.label} checkpoint preset.`);
+                  }}
+                  style={[
+                    styles.presetChip,
+                    {
+                      backgroundColor: `${colors.primary}14`,
+                    },
+                  ]}>
+                  <Text style={[styles.presetLabel, { color: colors.primary }]}>{preset.label}</Text>
+                  <Text style={[styles.presetPayload, { color: colors.muted }]}>
+                    {preset.expectedQrPayload}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+        ) : null}
 
         <View
           style={[
@@ -186,11 +328,11 @@ export default function CreateAlarmScreen() {
               borderColor: colors.border,
             },
           ]}>
-          <Text style={[styles.label, { color: colors.text }]}>Contact name</Text>
+          <Text style={[styles.label, { color: colors.text }]}>Checkpoint label</Text>
           <TextInput
             autoCapitalize="words"
-            onChangeText={setContactName}
-            placeholder="Jamie"
+            onChangeText={setLabel}
+            placeholder="Bathroom sink"
             placeholderTextColor={colors.muted}
             style={[
               styles.input,
@@ -199,14 +341,15 @@ export default function CreateAlarmScreen() {
                 color: colors.text,
               },
             ]}
-            value={contactName}
+            value={label}
           />
 
-          <Text style={[styles.label, { color: colors.text }]}>Phone number</Text>
+          <Text style={[styles.label, { color: colors.text }]}>Expected QR payload</Text>
           <TextInput
-            keyboardType="phone-pad"
-            onChangeText={setPhoneNumber}
-            placeholder="+1 555 123 4567"
+            autoCapitalize="none"
+            autoCorrect={false}
+            onChangeText={setExpectedQrPayload}
+            placeholder="bathroom-checkpoint"
             placeholderTextColor={colors.muted}
             style={[
               styles.input,
@@ -215,24 +358,103 @@ export default function CreateAlarmScreen() {
                 color: colors.text,
               },
             ]}
-            value={phoneNumber}
+            value={expectedQrPayload}
           />
 
-          <Text style={[styles.label, { color: colors.text }]}>Accountability message</Text>
-          <TextInput
-            multiline
-            onChangeText={setMessage}
-            placeholderTextColor={colors.muted}
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => {
+              void handleOpenScanner();
+            }}
             style={[
-              styles.input,
-              styles.messageInput,
+              styles.scanButton,
               {
                 borderColor: colors.border,
-                color: colors.text,
               },
-            ]}
-            value={message}
-          />
+            ]}>
+            <Text style={[styles.scanButtonText, { color: colors.text }]}>
+              {expectedQrPayload ? 'Rescan QR code' : 'Scan QR code'}
+            </Text>
+          </Pressable>
+
+          {isScannerVisible && permission?.granted ? (
+            <View style={styles.scannerSection}>
+              <CameraView
+                barcodeScannerSettings={{
+                  barcodeTypes: ['qr'],
+                }}
+                onBarcodeScanned={isScannerEnabled ? handleBarcodeScanned : undefined}
+                style={styles.camera}
+              />
+              <Text style={[styles.scannerHint, { color: colors.muted }]}>
+                Scan the QR code you want this alarm to require.
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => setIsScannerVisible(false)}
+                style={[
+                  styles.hideScannerButton,
+                  {
+                    borderColor: colors.border,
+                  },
+                ]}>
+                <Text style={[styles.hideScannerButtonText, { color: colors.text }]}>
+                  Hide scanner
+                </Text>
+              </Pressable>
+            </View>
+          ) : null}
+
+          {scannerMessage ? (
+            <Text
+              style={[
+                styles.helperText,
+                {
+                  color: permission?.granted === false ? colors.danger : colors.muted,
+                },
+              ]}>
+              {scannerMessage}
+            </Text>
+          ) : null}
+
+          <Text style={[styles.helperText, { color: colors.muted }]}>
+            Use the exact string encoded inside the QR code. The alarm only clears when that scan
+            matches perfectly.
+          </Text>
+
+          <Text style={[styles.label, { color: colors.text }]}>Repeat</Text>
+          <View style={styles.repeatRow}>
+            {REPEAT_OPTIONS.map((option) => {
+              const isSelected = repeatSchedule === option.value;
+
+              return (
+                <Pressable
+                  key={option.value}
+                  accessibilityRole="button"
+                  onPress={() => setRepeatSchedule(option.value)}
+                  style={[
+                    styles.repeatButton,
+                    {
+                      backgroundColor: isSelected ? `${colors.primary}14` : 'transparent',
+                      borderColor: isSelected ? colors.primary : colors.border,
+                    },
+                  ]}>
+                  <Text
+                    style={[
+                      styles.repeatButtonLabel,
+                      {
+                        color: isSelected ? colors.primary : colors.text,
+                      },
+                    ]}>
+                    {option.label}
+                  </Text>
+                  <Text style={[styles.repeatButtonHelp, { color: colors.muted }]}>
+                    {option.help}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
 
           <Text style={[styles.label, { color: colors.text }]}>Grace period in seconds</Text>
           <TextInput
@@ -261,9 +483,8 @@ export default function CreateAlarmScreen() {
           ]}>
           <Text style={[styles.infoTitle, { color: colors.text }]}>How the MVP alarm works</Text>
           <Text style={[styles.infoText, { color: colors.muted }]}>
-            This version asks for notification permission, schedules a local notification, and then
-            routes to the ringing screen when the app receives the notification or the user reopens
-            the app after the scheduled time.
+            This version schedules the alarm, supports recurring daily routines, and gives you a
+            short window to scan the matching QR checkpoint before each run is marked as missed.
           </Text>
         </View>
 
@@ -279,7 +500,7 @@ export default function CreateAlarmScreen() {
             },
           ]}>
           <Text style={[styles.primaryButtonText, { color: colors.primaryText }]}>
-            {isSaving ? 'Saving...' : 'Save Alarm'}
+            {isSaving ? 'Saving...' : primaryActionLabel}
           </Text>
         </Pressable>
 
@@ -335,9 +556,75 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 12,
   },
-  messageInput: {
-    minHeight: 100,
-    textAlignVertical: 'top',
+  scanButton: {
+    alignItems: 'center',
+    borderRadius: 14,
+    borderWidth: 1,
+    paddingVertical: 12,
+  },
+  scanButtonText: {
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  presetList: {
+    gap: 10,
+  },
+  presetChip: {
+    borderRadius: 16,
+    gap: 4,
+    padding: 14,
+  },
+  presetLabel: {
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  presetPayload: {
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  scannerSection: {
+    gap: 10,
+  },
+  camera: {
+    borderRadius: 18,
+    height: 240,
+    overflow: 'hidden',
+    width: '100%',
+  },
+  scannerHint: {
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  hideScannerButton: {
+    alignItems: 'center',
+    borderRadius: 14,
+    borderWidth: 1,
+    paddingVertical: 12,
+  },
+  hideScannerButtonText: {
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  helperText: {
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  repeatRow: {
+    gap: 10,
+  },
+  repeatButton: {
+    borderRadius: 16,
+    borderWidth: 1,
+    gap: 2,
+    padding: 14,
+  },
+  repeatButtonLabel: {
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  repeatButtonHelp: {
+    fontSize: 13,
+    lineHeight: 18,
   },
   infoCard: {
     borderRadius: 20,

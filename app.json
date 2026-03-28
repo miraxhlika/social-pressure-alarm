@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Social Pressure Alarm",
+    "name": "QR Checkpoint Alarm",
     "slug": "social-pressure-alarm",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -28,6 +28,12 @@
     "plugins": [
       "expo-router",
       "expo-notifications",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow $(PRODUCT_NAME) to access your camera so you can scan QR checkpoints."
+        }
+      ],
       [
         "expo-splash-screen",
         {

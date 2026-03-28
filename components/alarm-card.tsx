@@ -1,24 +1,27 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { getAlarmPhase, formatAlarmTime, formatScheduledFor } from '@/lib/alarms';
+import { getAlarmPhase, formatAlarmTime, formatRepeatSchedule, formatScheduledFor } from '@/lib/alarms';
 import { getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { Alarm } from '@/types/alarm';
 
 type AlarmCardProps = {
   alarm: Alarm;
+  onEdit: (alarm: Alarm) => void;
+  onReschedule: (alarm: Alarm) => void;
+  onReuse: (alarm: Alarm) => void;
   onDelete: (alarm: Alarm) => void;
 };
 
 const STATUS_COPY = {
-  inactive: 'Completed',
+  inactive: 'Cleared',
   missed: 'Missed',
-  ringing: 'Needs confirmation',
+  ringing: 'Scan checkpoint',
   scheduled: 'Scheduled',
   unscheduled: 'Draft',
 } as const;
 
-export function AlarmCard({ alarm, onDelete }: AlarmCardProps) {
+export function AlarmCard({ alarm, onDelete, onEdit, onReschedule, onReuse }: AlarmCardProps) {
   const colors = getAppColors(useColorScheme());
   const phase = getAlarmPhase(alarm);
 
@@ -54,21 +57,52 @@ export function AlarmCard({ alarm, onDelete }: AlarmCardProps) {
         </View>
       </View>
 
-      <Text style={[styles.contactName, { color: colors.text }]}>{alarm.contactName}</Text>
-      <Text style={[styles.meta, { color: colors.muted }]}>{alarm.phoneNumber}</Text>
+      <Text style={[styles.label, { color: colors.text }]}>{alarm.label}</Text>
+      <Text style={[styles.meta, { color: colors.muted }]}>
+        QR payload: {alarm.expectedQrPayload || 'Needs update'}
+      </Text>
       <Text style={[styles.meta, { color: colors.muted }]}>
         Grace period: {alarm.gracePeriodSeconds} seconds
       </Text>
       <Text style={[styles.meta, { color: colors.muted }]}>
+        Repeat: {formatRepeatSchedule(alarm.repeatSchedule)}
+      </Text>
+      <Text style={[styles.meta, { color: colors.muted }]}>
         Next trigger: {formatScheduledFor(alarm.scheduledFor)}
       </Text>
+      <Text style={[styles.meta, { color: colors.muted }]}>
+        Last run: {alarm.lastOutcome === 'missed' ? 'Missed' : alarm.lastOutcome === 'confirmed' ? 'Cleared' : 'Not completed yet'}
+      </Text>
 
-      <Pressable
-        accessibilityRole="button"
-        onPress={() => onDelete(alarm)}
-        style={[styles.deleteButton, { borderColor: colors.border }]}>
-        <Text style={[styles.deleteText, { color: colors.danger }]}>Delete</Text>
-      </Pressable>
+      <View style={styles.actionRow}>
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => onEdit(alarm)}
+          style={[styles.utilityButton, { borderColor: colors.border }]}>
+          <Text style={[styles.utilityButtonText, { color: colors.text }]}>Edit</Text>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => onReschedule(alarm)}
+          style={[styles.utilityButton, { borderColor: colors.border }]}>
+          <Text style={[styles.utilityButtonText, { color: colors.text }]}>Reschedule</Text>
+        </Pressable>
+      </View>
+
+      <View style={styles.actionRow}>
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => onReuse(alarm)}
+          style={[styles.utilityButton, { borderColor: colors.border }]}>
+          <Text style={[styles.utilityButtonText, { color: colors.text }]}>Reuse</Text>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => onDelete(alarm)}
+          style={[styles.utilityButton, { borderColor: colors.border }]}>
+          <Text style={[styles.utilityButtonText, { color: colors.danger }]}>Delete</Text>
+        </Pressable>
+      </View>
     </View>
   );
 }
@@ -99,21 +133,26 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     textTransform: 'uppercase',
   },
-  contactName: {
+  label: {
     fontSize: 18,
     fontWeight: '600',
   },
   meta: {
     fontSize: 14,
   },
-  deleteButton: {
+  actionRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  utilityButton: {
     alignItems: 'center',
     borderRadius: 12,
     borderWidth: 1,
+    flex: 1,
     marginTop: 8,
     paddingVertical: 12,
   },
-  deleteText: {
+  utilityButtonText: {
     fontSize: 15,
     fontWeight: '600',
   },
