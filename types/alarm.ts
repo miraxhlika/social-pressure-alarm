@@ -6,6 +6,40 @@ export const MAX_CHECKPOINT_PRESETS = 8;
 export type AlarmOutcome = 'confirmed' | 'missed';
 export type RepeatSchedule = 'once' | 'daily' | 'weekdays';
 
+export type AlarmSocialSettings = {
+  circleId?: string;
+  shareSuccesses: boolean;
+  shareMisses: boolean;
+};
+
+export type AlarmEventSharePayload = {
+  currentStreak: number;
+  longestStreak: number;
+  gracePeriodSeconds: number;
+  timeToScanSeconds?: number;
+  weeklyCompletionRate: number;
+  weeklySuccesses: number;
+  weeklyFailures: number;
+};
+
+export type AlarmEventRecord = {
+  id: string;
+  alarmId: string;
+  alarmLabel: string;
+  scheduledFor?: string;
+  outcome: AlarmOutcome;
+  resolvedAt: string;
+  source: 'device';
+  socialSettings?: AlarmSocialSettings;
+  sharePayload: AlarmEventSharePayload;
+};
+
+export type QueuedAlarmEvent = AlarmEventRecord & {
+  attempts: number;
+  lastAttemptAt?: string;
+  lastSyncError?: string;
+};
+
 export type FailureHistoryEntry = {
   alarmId: string;
   label: string;
@@ -42,6 +76,7 @@ export type Alarm = {
   createdAt: string;
   scheduledFor?: string;
   notificationIds?: string[];
+  socialSettings?: AlarmSocialSettings;
   lastOutcome?: AlarmOutcome;
 };
 

@@ -218,6 +218,7 @@ export default function CreateAlarmScreen() {
         gracePeriodSeconds: gracePeriod,
         isActive: true,
         createdAt: isEditMode && sourceAlarm ? sourceAlarm.createdAt : new Date().toISOString(),
+        socialSettings: sourceAlarm?.socialSettings,
         lastOutcome: undefined,
       };
 
