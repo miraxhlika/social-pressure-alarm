@@ -2,7 +2,9 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import {
   Alarm,
+  AlarmEventRecord,
   AlarmOutcome,
+  AlarmSocialSettings,
   AlarmStore,
   CheckpointPreset,
   FREE_ALARM_LIMIT,
@@ -13,6 +15,8 @@ import {
   RepeatSchedule,
   SuccessHistoryEntry,
 } from '@/types/alarm';
+import { getWeeklyCompletionStats } from '@/lib/progress';
+import { enqueueAlarmEvent, flushAlarmEventQueue } from '@/lib/social/queue';
 
 const STORAGE_KEY = 'social-pressure-alarm/store';
 
@@ -68,6 +72,26 @@ function getRepeatSchedule(value: unknown): RepeatSchedule {
   return value === 'daily' || value === 'weekdays' ? value : 'once';
 }
 
+function normalizeSocialSettings(value: unknown): AlarmSocialSettings | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const circleId = getTrimmedString(value.circleId);
+  const shareSuccesses = typeof value.shareSuccesses === 'boolean' ? value.shareSuccesses : false;
+  const shareMisses = typeof value.shareMisses === 'boolean' ? value.shareMisses : false;
+
+  if (!circleId && !shareSuccesses && !shareMisses) {
+    return undefined;
+  }
+
+  return {
+    circleId,
+    shareSuccesses,
+    shareMisses,
+  };
+}
+
 function normalizeAlarm(rawAlarm: unknown): Alarm | null {
   if (!isRecord(rawAlarm)) {
     return null;
@@ -113,6 +137,7 @@ function normalizeAlarm(rawAlarm: unknown): Alarm | null {
       : getTrimmedString(legacyAlarm.notificationId)
         ? [getTrimmedString(legacyAlarm.notificationId) as string]
         : undefined,
+    socialSettings: normalizeSocialSettings(legacyAlarm.socialSettings),
     lastOutcome,
   };
 }
@@ -406,7 +431,30 @@ export async function resolveAlarm(id: string, outcome: AlarmOutcome) {
       : store.successHistory,
   };
 
+  const weeklyStats = getWeeklyCompletionStats(nextStore, resolvedTimestamp);
+  const eventRecord: AlarmEventRecord = {
+    id: `${alarm.id}-${resolvedAt}`,
+    alarmId: alarm.id,
+    alarmLabel: alarm.label,
+    scheduledFor: alarm.scheduledFor,
+    outcome,
+    resolvedAt,
+    source: 'device',
+    socialSettings: alarm.socialSettings,
+    sharePayload: {
+      currentStreak: nextStore.currentStreak,
+      longestStreak: nextStore.longestStreak,
+      gracePeriodSeconds: alarm.gracePeriodSeconds,
+      timeToScanSeconds: successEntry?.timeToScanSeconds,
+      weeklyCompletionRate: weeklyStats.completionRate,
+      weeklySuccesses: weeklyStats.successes,
+      weeklyFailures: weeklyStats.failures,
+    },
+  };
+
   await writeAlarmStore(nextStore);
+  await enqueueAlarmEvent(eventRecord);
+  void flushAlarmEventQueue();
   return updatedAlarm;
 }
 

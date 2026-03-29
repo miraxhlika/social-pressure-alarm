@@ -8,7 +8,10 @@ import { getAppColors } from '@/constants/theme';
 import { deleteAlarm, readAlarmStore, resetAlarmStore, updateAlarm } from '@/lib/alarms';
 import { cancelAlarmNotificationAsync, scheduleAlarmNotificationAsync } from '@/lib/notifications';
 import { getProgressSummary, ProgressSummary } from '@/lib/progress';
+import { getSocialRuntimeSnapshot, resetSocialSyncState } from '@/lib/social/queue';
+import { SocialRuntimeSnapshot } from '@/lib/social/types';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { useSocialSession } from '@/providers/social-session-provider';
 import { Alarm, FailureHistoryEntry, FREE_ALARM_LIMIT, SuccessHistoryEntry } from '@/types/alarm';
 
 function formatFailureTimestamp(timestamp: string) {
@@ -29,9 +32,23 @@ function formatSuccessTimestamp(timestamp: string) {
   });
 }
 
+function formatSocialTimestamp(timestamp?: string) {
+  if (!timestamp) {
+    return 'Not yet';
+  }
+
+  return new Date(timestamp).toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
 export default function HomeScreen() {
   const router = useRouter();
   const colors = getAppColors(useColorScheme());
+  const { isLoading: isSocialSessionLoading, profile, user } = useSocialSession();
   const [alarms, setAlarms] = useState<Alarm[]>([]);
   const [lifetimeAlarmCreations, setLifetimeAlarmCreations] = useState(0);
   const [currentStreak, setCurrentStreak] = useState(0);
@@ -39,9 +56,14 @@ export default function HomeScreen() {
   const [failureHistory, setFailureHistory] = useState<FailureHistoryEntry[]>([]);
   const [successHistory, setSuccessHistory] = useState<SuccessHistoryEntry[]>([]);
   const [progressSummary, setProgressSummary] = useState<ProgressSummary | null>(null);
+  const [socialRuntime, setSocialRuntime] = useState<SocialRuntimeSnapshot | null>(null);
 
   const loadData = useCallback(async () => {
-    const store = await readAlarmStore();
+    const [store, socialSnapshot] = await Promise.all([
+      readAlarmStore(),
+      getSocialRuntimeSnapshot(),
+    ]);
+
     setAlarms(store.alarms);
     setLifetimeAlarmCreations(store.lifetimeAlarmCreations);
     setCurrentStreak(store.currentStreak);
@@ -49,6 +71,7 @@ export default function HomeScreen() {
     setFailureHistory(store.failureHistory);
     setSuccessHistory(store.successHistory);
     setProgressSummary(getProgressSummary(store));
+    setSocialRuntime(socialSnapshot);
   }, []);
 
   useFocusEffect(
@@ -148,13 +171,23 @@ export default function HomeScreen() {
             await Promise.all(
               alarms.map((alarm) => cancelAlarmNotificationAsync(alarm.notificationIds))
             );
-            await resetAlarmStore();
+            await Promise.all([resetAlarmStore(), resetSocialSyncState()]);
             await loadData();
           },
         },
       ]
     );
   };
+
+  const socialAccountButtonLabel = !socialRuntime?.configured
+    ? 'Supabase setup required'
+    : isSocialSessionLoading
+      ? 'Loading account...'
+      : user
+        ? profile?.handle
+          ? `Signed in as @${profile.handle}`
+          : 'Finish your profile'
+        : 'Create or sign in';
 
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.canvas }]}>
@@ -241,6 +274,66 @@ export default function HomeScreen() {
               ? `You have ${progressSummary.weeklyStats.successes} clean clears and ${progressSummary.weeklyStats.failures} misses in the last 7 days.`
               : 'Your weekly stats will appear after your first completed checkpoint.'}
           </Text>
+        </View>
+
+        <View
+          style={[
+            styles.weekCard,
+            {
+              backgroundColor: colors.card,
+              borderColor: colors.border,
+            },
+          ]}>
+          <Text style={[styles.weekTitle, { color: colors.text }]}>Social accountability layer</Text>
+          <Text style={[styles.weekHelp, { color: colors.muted }]}>
+            {!socialRuntime?.configured
+              ? 'Supabase is not configured yet. Alarm outcomes will stay local and queue safely until social credentials are added.'
+              : !socialRuntime.authenticated
+                ? 'Supabase is configured, but there is no signed-in session yet. Alarm outcomes will queue on-device until auth is connected.'
+                : 'Supabase is configured and authenticated. Alarm outcomes are being retried through the local sync queue.'}
+          </Text>
+          <View style={styles.weekRow}>
+            <View style={styles.weekMetric}>
+              <Text style={[styles.weekValue, { color: colors.primary }]}>
+                {socialRuntime?.queue.pendingCount ?? 0}
+              </Text>
+              <Text style={[styles.weekLabel, { color: colors.muted }]}>Queued events</Text>
+            </View>
+            <View style={styles.weekMetric}>
+              <Text
+                style={[
+                  styles.weekValue,
+                  { color: (socialRuntime?.queue.failedCount ?? 0) > 0 ? colors.danger : colors.text },
+                ]}>
+                {socialRuntime?.queue.failedCount ?? 0}
+              </Text>
+              <Text style={[styles.weekLabel, { color: colors.muted }]}>Failed syncs</Text>
+            </View>
+          </View>
+          <Text style={[styles.weekHelp, { color: colors.muted }]}>
+            Last attempt: {formatSocialTimestamp(socialRuntime?.queue.lastAttemptAt)}
+          </Text>
+          <Text style={[styles.weekHelp, { color: colors.muted }]}>
+            Last delivered sync: {formatSocialTimestamp(socialRuntime?.queue.lastSuccessfulSyncAt)}
+          </Text>
+          {socialRuntime?.queue.latestError ? (
+            <Text style={[styles.weekHelp, { color: colors.danger }]}>
+              Latest sync error: {socialRuntime.queue.latestError}
+            </Text>
+          ) : null}
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => router.push('/account')}
+            style={[
+              styles.inlineActionButton,
+              {
+                borderColor: colors.border,
+              },
+            ]}>
+            <Text style={[styles.inlineActionButtonText, { color: colors.text }]}>
+              {socialAccountButtonLabel}
+            </Text>
+          </Pressable>
         </View>
 
         <Pressable
@@ -549,6 +642,17 @@ const styles = StyleSheet.create({
   primaryButtonText: {
     fontSize: 16,
     fontWeight: '700',
+  },
+  inlineActionButton: {
+    alignItems: 'center',
+    borderRadius: 14,
+    borderWidth: 1,
+    marginTop: 4,
+    paddingVertical: 12,
+  },
+  inlineActionButtonText: {
+    fontSize: 15,
+    fontWeight: '600',
   },
   devButton: {
     alignItems: 'center',
