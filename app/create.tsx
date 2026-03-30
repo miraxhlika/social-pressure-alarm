@@ -5,6 +5,7 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   View,
@@ -21,7 +22,10 @@ import {
   ensureNotificationPermissionsAsync,
   scheduleAlarmNotificationAsync,
 } from '@/lib/notifications';
+import { listMySocialCircles } from '@/lib/social/circles';
+import { SocialCircleSummary } from '@/lib/social/types';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { useSocialSession } from '@/providers/social-session-provider';
 import { Alarm, CheckpointPreset, FREE_ALARM_LIMIT, RepeatSchedule } from '@/types/alarm';
 
 const REPEAT_OPTIONS: { value: RepeatSchedule; label: string; help: string }[] = [
@@ -40,6 +44,7 @@ export default function CreateAlarmScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ alarmId?: string; mode?: string }>();
   const colors = getAppColors(useColorScheme());
+  const { configured, isProfileComplete, user } = useSocialSession();
   const [time, setTime] = useState(createInitialTime);
   const [label, setLabel] = useState('');
   const [expectedQrPayload, setExpectedQrPayload] = useState('');
@@ -50,6 +55,11 @@ export default function CreateAlarmScreen() {
   const [scannerMessage, setScannerMessage] = useState('');
   const [isScannerEnabled, setIsScannerEnabled] = useState(true);
   const [savedPresets, setSavedPresets] = useState<CheckpointPreset[]>([]);
+  const [availableCircles, setAvailableCircles] = useState<SocialCircleSummary[]>([]);
+  const [isSocialOptionsLoading, setIsSocialOptionsLoading] = useState(false);
+  const [selectedCircleId, setSelectedCircleId] = useState('');
+  const [shareSuccesses, setShareSuccesses] = useState(false);
+  const [shareMisses, setShareMisses] = useState(false);
   const [sourceAlarm, setSourceAlarm] = useState<Alarm | null>(null);
   const [permission, requestPermission] = useCameraPermissions();
   const scannerTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -80,6 +90,9 @@ export default function CreateAlarmScreen() {
 
       if (!params.alarmId || (!isEditMode && !isReuseMode)) {
         setSourceAlarm(null);
+        setSelectedCircleId('');
+        setShareSuccesses(false);
+        setShareMisses(false);
         return;
       }
 
@@ -87,6 +100,9 @@ export default function CreateAlarmScreen() {
 
       if (!alarm) {
         setSourceAlarm(null);
+        setSelectedCircleId('');
+        setShareSuccesses(false);
+        setShareMisses(false);
         return;
       }
 
@@ -99,10 +115,56 @@ export default function CreateAlarmScreen() {
       setExpectedQrPayload(alarm.expectedQrPayload);
       setRepeatSchedule(alarm.repeatSchedule);
       setGracePeriodSeconds(String(alarm.gracePeriodSeconds));
+      setSelectedCircleId(alarm.socialSettings?.circleId ?? '');
+      setShareSuccesses(alarm.socialSettings?.shareSuccesses ?? false);
+      setShareMisses(alarm.socialSettings?.shareMisses ?? false);
     };
 
     void loadFormData();
   }, [isEditMode, isReuseMode, params.alarmId]);
+
+  useEffect(() => {
+    if (!configured || !user || !isProfileComplete) {
+      setAvailableCircles([]);
+      setSelectedCircleId('');
+      setShareSuccesses(false);
+      setShareMisses(false);
+      setIsSocialOptionsLoading(false);
+      return;
+    }
+
+    let isMounted = true;
+    setIsSocialOptionsLoading(true);
+
+    const loadCircles = async () => {
+      try {
+        const circles = await listMySocialCircles();
+
+        if (!isMounted) {
+          return;
+        }
+
+        setAvailableCircles(circles);
+        setSelectedCircleId((currentCircleId) =>
+          currentCircleId && circles.some((circle) => circle.id === currentCircleId) ? currentCircleId : ''
+        );
+      } catch {
+        if (isMounted) {
+          setAvailableCircles([]);
+        }
+      } finally {
+        if (isMounted) {
+          setIsSocialOptionsLoading(false);
+        }
+      }
+    };
+
+    void loadCircles();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [configured, isProfileComplete, user]);
 
   useEffect(() => {
     return () => {
@@ -218,7 +280,13 @@ export default function CreateAlarmScreen() {
         gracePeriodSeconds: gracePeriod,
         isActive: true,
         createdAt: isEditMode && sourceAlarm ? sourceAlarm.createdAt : new Date().toISOString(),
-        socialSettings: sourceAlarm?.socialSettings,
+        socialSettings: selectedCircleId
+          ? {
+              circleId: selectedCircleId,
+              shareSuccesses,
+              shareMisses,
+            }
+          : undefined,
         lastOutcome: undefined,
       };
 
@@ -476,6 +544,153 @@ export default function CreateAlarmScreen() {
 
         <View
           style={[
+            styles.section,
+            {
+              backgroundColor: colors.card,
+              borderColor: colors.border,
+            },
+          ]}>
+          <Text style={[styles.label, { color: colors.text }]}>Social accountability</Text>
+          {!configured ? (
+            <Text style={[styles.helperText, { color: colors.muted }]}>
+              Connect Supabase on the account screen to attach alarms to circles and sync social outcomes.
+            </Text>
+          ) : !user || !isProfileComplete ? (
+            <>
+              <Text style={[styles.helperText, { color: colors.muted }]}>
+                Sign in and finish your profile before making an alarm social.
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => router.push('/account')}
+                style={[
+                  styles.scanButton,
+                  {
+                    borderColor: colors.border,
+                  },
+                ]}>
+                <Text style={[styles.scanButtonText, { color: colors.text }]}>Open account</Text>
+              </Pressable>
+            </>
+          ) : isSocialOptionsLoading ? (
+            <Text style={[styles.helperText, { color: colors.muted }]}>Loading your circles...</Text>
+          ) : (
+            <>
+              <Text style={[styles.helperText, { color: colors.muted }]}>
+                Pick a circle if this alarm should feed into accountability updates. Leaving it private keeps all outcomes local-only.
+              </Text>
+              <View style={styles.circleList}>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => {
+                    setSelectedCircleId('');
+                    setShareSuccesses(false);
+                    setShareMisses(false);
+                  }}
+                  style={[
+                    styles.circleOption,
+                    {
+                      backgroundColor: !selectedCircleId ? `${colors.primary}14` : 'transparent',
+                      borderColor: !selectedCircleId ? colors.primary : colors.border,
+                    },
+                  ]}>
+                  <Text
+                    style={[
+                      styles.circleOptionTitle,
+                      {
+                        color: !selectedCircleId ? colors.primary : colors.text,
+                      },
+                    ]}>
+                    Keep this alarm private
+                  </Text>
+                  <Text style={[styles.circleOptionText, { color: colors.muted }]}>
+                    The alarm still works normally, but it will not be attached to a circle.
+                  </Text>
+                </Pressable>
+
+                {availableCircles.map((circle) => {
+                  const isSelected = selectedCircleId === circle.id;
+
+                  return (
+                    <Pressable
+                      key={circle.id}
+                      accessibilityRole="button"
+                      onPress={() => setSelectedCircleId(circle.id)}
+                      style={[
+                        styles.circleOption,
+                        {
+                          backgroundColor: isSelected ? `${colors.primary}14` : 'transparent',
+                          borderColor: isSelected ? colors.primary : colors.border,
+                        },
+                      ]}>
+                      <Text
+                        style={[
+                          styles.circleOptionTitle,
+                          {
+                            color: isSelected ? colors.primary : colors.text,
+                          },
+                        ]}>
+                        {circle.name}
+                      </Text>
+                      <Text style={[styles.circleOptionText, { color: colors.muted }]}>
+                        {circle.memberCount} member{circle.memberCount === 1 ? '' : 's'} in this circle
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              {availableCircles.length === 0 ? (
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => router.push('/circles' as never)}
+                  style={[
+                    styles.scanButton,
+                    {
+                      borderColor: colors.border,
+                    },
+                  ]}>
+                  <Text style={[styles.scanButtonText, { color: colors.text }]}>Create or join a circle</Text>
+                </Pressable>
+              ) : (
+                <>
+                  <View style={[styles.preferenceRow, { borderColor: colors.border }]}>
+                    <View style={styles.preferenceCopy}>
+                      <Text style={[styles.preferenceTitle, { color: colors.text }]}>Share successful clears</Text>
+                      <Text style={[styles.preferenceText, { color: colors.muted }]}>
+                        Post a circle event when this alarm is completed in time.
+                      </Text>
+                    </View>
+                    <Switch
+                      disabled={!selectedCircleId}
+                      onValueChange={setShareSuccesses}
+                      trackColor={{ false: colors.border, true: colors.primary }}
+                      value={selectedCircleId ? shareSuccesses : false}
+                    />
+                  </View>
+
+                  <View style={[styles.preferenceRow, { borderColor: colors.border }]}>
+                    <View style={styles.preferenceCopy}>
+                      <Text style={[styles.preferenceTitle, { color: colors.text }]}>Share missed alarms</Text>
+                      <Text style={[styles.preferenceText, { color: colors.muted }]}>
+                        Let the social sync layer send the miss outcome to the selected circle.
+                      </Text>
+                    </View>
+                    <Switch
+                      disabled={!selectedCircleId}
+                      onValueChange={setShareMisses}
+                      trackColor={{ false: colors.border, true: colors.primary }}
+                      value={selectedCircleId ? shareMisses : false}
+                    />
+                  </View>
+                </>
+              )}
+            </>
+          )}
+        </View>
+
+        <View
+          style={[
             styles.infoCard,
             {
               backgroundColor: colors.card,
@@ -570,6 +785,23 @@ const styles = StyleSheet.create({
   presetList: {
     gap: 10,
   },
+  circleList: {
+    gap: 10,
+  },
+  circleOption: {
+    borderRadius: 16,
+    borderWidth: 1,
+    gap: 4,
+    padding: 14,
+  },
+  circleOptionTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  circleOptionText: {
+    fontSize: 13,
+    lineHeight: 18,
+  },
   presetChip: {
     borderRadius: 16,
     gap: 4,
@@ -607,6 +839,27 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   helperText: {
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  preferenceRow: {
+    alignItems: 'center',
+    borderRadius: 16,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 14,
+    justifyContent: 'space-between',
+    padding: 14,
+  },
+  preferenceCopy: {
+    flex: 1,
+    gap: 4,
+  },
+  preferenceTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  preferenceText: {
     fontSize: 13,
     lineHeight: 18,
   },

@@ -37,6 +37,7 @@ export default function RootLayout() {
           <Stack.Screen name="success" />
           <Stack.Screen name="paywall" />
           <Stack.Screen name="account" />
+          <Stack.Screen name="circles" />
         </Stack>
         <StatusBar style={colorScheme === 'dark' ? 'light' : 'dark'} />
       </ThemeProvider>
