@@ -6,14 +6,22 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { getAppColors } from '@/constants/theme';
 import { readAlarmStore } from '@/lib/alarms';
 import { getProgressSummary, ProgressSummary } from '@/lib/progress';
+import { getSocialQueueSummary } from '@/lib/social/queue';
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { SuccessHistoryEntry } from '@/types/alarm';
+import { Alarm, SuccessHistoryEntry } from '@/types/alarm';
 
 type SuccessState = {
   currentStreak: number;
   longestStreak: number;
   summary: ProgressSummary;
   successEntry: SuccessHistoryEntry | null;
+  shareStatus: SuccessShareStatus | null;
+};
+
+type SuccessShareStatus = {
+  tone: 'private' | 'queued' | 'shared';
+  title: string;
+  copy: string;
 };
 
 function formatTimeToScan(successEntry: SuccessHistoryEntry | null) {
@@ -24,6 +32,40 @@ function formatTimeToScan(successEntry: SuccessHistoryEntry | null) {
   return `${successEntry.timeToScanSeconds}s`;
 }
 
+function getSuccessShareStatus(
+  alarm: Alarm | null,
+  successEntry: SuccessHistoryEntry | null,
+  queuedEvent: { lastSyncError?: string } | null
+): SuccessShareStatus | null {
+  if (!alarm || !successEntry) {
+    return null;
+  }
+
+  if (!alarm.socialSettings?.circleId || !alarm.socialSettings.shareSuccesses) {
+    return {
+      tone: 'private',
+      title: 'Stayed private',
+      copy: 'This successful clear updated your own progress only and was not posted to a circle.',
+    };
+  }
+
+  if (queuedEvent) {
+    return {
+      tone: 'queued',
+      title: 'Queued for your circle',
+      copy: queuedEvent.lastSyncError
+        ? 'Sharing hit a sync issue, so the app kept it in the retry queue and will try again automatically.'
+        : 'This successful clear is waiting in the local sync queue and will appear in the circle feed after delivery.',
+    };
+  }
+
+  return {
+    tone: 'shared',
+    title: 'Shared to your circle',
+    copy: 'This successful clear has already moved past the local queue and is ready for the circle activity feed.',
+  };
+}
+
 export default function SuccessScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ alarmId?: string; label?: string }>();
@@ -32,16 +74,22 @@ export default function SuccessScreen() {
 
   useEffect(() => {
     const loadProgress = async () => {
-      const store = await readAlarmStore();
+      const [store, socialQueue] = await Promise.all([readAlarmStore(), getSocialQueueSummary()]);
       const summary = getProgressSummary(store);
+      const alarm = store.alarms.find((entry) => entry.id === params.alarmId) ?? null;
       const successEntry =
         store.successHistory.find((entry) => entry.alarmId === params.alarmId) ?? summary.latestSuccess;
+      const eventId =
+        params.alarmId && successEntry ? `${params.alarmId}-${successEntry.confirmedAt}` : null;
+      const queuedEvent =
+        eventId ? socialQueue.queuedEvents.find((entry) => entry.id === eventId) ?? null : null;
 
       setSuccessState({
         currentStreak: store.currentStreak,
         longestStreak: store.longestStreak,
         summary,
         successEntry,
+        shareStatus: getSuccessShareStatus(alarm, successEntry, queuedEvent),
       });
     };
 
@@ -56,6 +104,12 @@ export default function SuccessScreen() {
     return `${Math.max(8, Math.round(successState.summary.milestoneProgress.progressRatio * 100))}%` as DimensionValue;
   }, [successState]);
   const badgeList = successState?.summary.activeBadges ?? [];
+  const shareAccentColor =
+    successState?.shareStatus?.tone === 'shared'
+      ? colors.success
+      : successState?.shareStatus?.tone === 'queued'
+        ? colors.primary
+        : colors.text;
 
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.canvas }]}>
@@ -84,6 +138,25 @@ export default function SuccessScreen() {
             {successState?.summary.nextGoalCopy ?? 'Keep stacking clears to unlock the next milestone.'}
           </Text>
         </View>
+
+        {successState?.shareStatus ? (
+          <View
+            style={[
+              styles.shareCard,
+              {
+                backgroundColor: colors.card,
+                borderColor: colors.border,
+              },
+            ]}>
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>Social result</Text>
+            <Text style={[styles.shareTitle, { color: shareAccentColor }]}>
+              {successState.shareStatus.title}
+            </Text>
+            <Text style={[styles.shareCopy, { color: colors.muted }]}>
+              {successState.shareStatus.copy}
+            </Text>
+          </View>
+        ) : null}
 
         <View style={styles.statsRow}>
           <View
@@ -240,6 +313,20 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   heroHelp: {
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  shareCard: {
+    borderRadius: 22,
+    borderWidth: 1,
+    gap: 8,
+    padding: 20,
+  },
+  shareTitle: {
+    fontSize: 22,
+    fontWeight: '800',
+  },
+  shareCopy: {
     fontSize: 14,
     lineHeight: 20,
   },

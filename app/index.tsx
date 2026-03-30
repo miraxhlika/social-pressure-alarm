@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
 
@@ -8,8 +8,10 @@ import { getAppColors } from '@/constants/theme';
 import { deleteAlarm, readAlarmStore, resetAlarmStore, updateAlarm } from '@/lib/alarms';
 import { cancelAlarmNotificationAsync, scheduleAlarmNotificationAsync } from '@/lib/notifications';
 import { getProgressSummary, ProgressSummary } from '@/lib/progress';
+import { listMySocialCircles } from '@/lib/social/circles';
+import { listVisibleSocialFeed } from '@/lib/social/feed';
 import { getSocialRuntimeSnapshot, resetSocialSyncState } from '@/lib/social/queue';
-import { SocialRuntimeSnapshot } from '@/lib/social/types';
+import { SocialFeedItem, SocialRuntimeSnapshot } from '@/lib/social/types';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useSocialSession } from '@/providers/social-session-provider';
 import { Alarm, FailureHistoryEntry, FREE_ALARM_LIMIT, SuccessHistoryEntry } from '@/types/alarm';
@@ -45,10 +47,30 @@ function formatSocialTimestamp(timestamp?: string) {
   });
 }
 
+function formatFeedInsight(item: SocialFeedItem) {
+  if (item.outcome === 'confirmed') {
+    const parts = [] as string[];
+
+    if (typeof item.sharePayload.timeToScanSeconds === 'number') {
+      parts.push(`${item.sharePayload.timeToScanSeconds}s scan`);
+    }
+
+    parts.push(`streak ${item.sharePayload.currentStreak}`);
+    return parts.join(' · ');
+  }
+
+  return `${item.sharePayload.weeklyCompletionRate}% weekly completion`;
+}
+
 export default function HomeScreen() {
   const router = useRouter();
   const colors = getAppColors(useColorScheme());
-  const { isLoading: isSocialSessionLoading, profile, user } = useSocialSession();
+  const {
+    configured: isSocialConfigured,
+    isLoading: isSocialSessionLoading,
+    profile,
+    user,
+  } = useSocialSession();
   const [alarms, setAlarms] = useState<Alarm[]>([]);
   const [lifetimeAlarmCreations, setLifetimeAlarmCreations] = useState(0);
   const [currentStreak, setCurrentStreak] = useState(0);
@@ -57,22 +79,41 @@ export default function HomeScreen() {
   const [successHistory, setSuccessHistory] = useState<SuccessHistoryEntry[]>([]);
   const [progressSummary, setProgressSummary] = useState<ProgressSummary | null>(null);
   const [socialRuntime, setSocialRuntime] = useState<SocialRuntimeSnapshot | null>(null);
+  const [socialFeed, setSocialFeed] = useState<SocialFeedItem[]>([]);
+  const [socialCircleCount, setSocialCircleCount] = useState(0);
+  const [isSocialFeedLoading, setIsSocialFeedLoading] = useState(false);
 
   const loadData = useCallback(async () => {
-    const [store, socialSnapshot] = await Promise.all([
-      readAlarmStore(),
-      getSocialRuntimeSnapshot(),
-    ]);
+    const shouldLoadSocialActivity = Boolean(isSocialConfigured && user);
 
-    setAlarms(store.alarms);
-    setLifetimeAlarmCreations(store.lifetimeAlarmCreations);
-    setCurrentStreak(store.currentStreak);
-    setLongestStreak(store.longestStreak);
-    setFailureHistory(store.failureHistory);
-    setSuccessHistory(store.successHistory);
-    setProgressSummary(getProgressSummary(store));
-    setSocialRuntime(socialSnapshot);
-  }, []);
+    setIsSocialFeedLoading(shouldLoadSocialActivity);
+
+    try {
+      const [store, socialSnapshot, socialActivity] = await Promise.all([
+        readAlarmStore(),
+        getSocialRuntimeSnapshot(),
+        shouldLoadSocialActivity
+          ? Promise.all([
+              listMySocialCircles().catch(() => []),
+              listVisibleSocialFeed(6).catch(() => []),
+            ])
+          : Promise.resolve([[], []]),
+      ]);
+
+      setAlarms(store.alarms);
+      setLifetimeAlarmCreations(store.lifetimeAlarmCreations);
+      setCurrentStreak(store.currentStreak);
+      setLongestStreak(store.longestStreak);
+      setFailureHistory(store.failureHistory);
+      setSuccessHistory(store.successHistory);
+      setProgressSummary(getProgressSummary(store));
+      setSocialRuntime(socialSnapshot);
+      setSocialCircleCount(socialActivity[0].length);
+      setSocialFeed(socialActivity[1]);
+    } finally {
+      setIsSocialFeedLoading(false);
+    }
+  }, [isSocialConfigured, user]);
 
   useFocusEffect(
     useCallback(() => {
@@ -188,6 +229,7 @@ export default function HomeScreen() {
           ? `Signed in as @${profile.handle}`
           : 'Finish your profile'
         : 'Create or sign in';
+  const showCirclesButton = Boolean(isSocialConfigured && user && profile?.handle);
 
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.canvas }]}>
@@ -284,13 +326,137 @@ export default function HomeScreen() {
               borderColor: colors.border,
             },
           ]}>
-          <Text style={[styles.weekTitle, { color: colors.text }]}>Social accountability layer</Text>
+          <Text style={[styles.weekTitle, { color: colors.text }]}>Circle activity</Text>
+          {!isSocialConfigured ? (
+            <>
+              <Text style={[styles.weekHelp, { color: colors.muted }]}>
+                Add Supabase first so wake-up results can sync into accountability circles.
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => router.push('/account')}
+                style={[styles.inlineActionButton, { borderColor: colors.border }]}>
+                <Text style={[styles.inlineActionButtonText, { color: colors.text }]}>
+                  {socialAccountButtonLabel}
+                </Text>
+              </Pressable>
+            </>
+          ) : isSocialSessionLoading ? (
+            <View style={styles.loadingState}>
+              <ActivityIndicator color={colors.primary} />
+              <Text style={[styles.weekHelp, { color: colors.muted }]}>Loading social activity...</Text>
+            </View>
+          ) : !user ? (
+            <>
+              <Text style={[styles.weekHelp, { color: colors.muted }]}>
+                Sign in to see your circle feed and let other members see the alarms you choose to share.
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => router.push('/account')}
+                style={[styles.inlineActionButton, { borderColor: colors.border }]}>
+                <Text style={[styles.inlineActionButtonText, { color: colors.text }]}>
+                  {socialAccountButtonLabel}
+                </Text>
+              </Pressable>
+            </>
+          ) : isSocialFeedLoading ? (
+            <View style={styles.loadingState}>
+              <ActivityIndicator color={colors.primary} />
+              <Text style={[styles.weekHelp, { color: colors.muted }]}>Refreshing recent circle activity...</Text>
+            </View>
+          ) : socialCircleCount === 0 ? (
+            <>
+              <Text style={[styles.weekHelp, { color: colors.muted }]}>
+                You have not joined any circles yet. Create one or join from an invite link before attaching alarms to it.
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => router.push('/circles' as never)}
+                style={[styles.inlineActionButton, { borderColor: colors.border }]}>
+                <Text style={[styles.inlineActionButtonText, { color: colors.text }]}>Create or join circles</Text>
+              </Pressable>
+            </>
+          ) : socialFeed.length === 0 ? (
+            <>
+              <Text style={[styles.weekHelp, { color: colors.muted }]}>
+                Your circles are ready, but nobody has shared a wake-up result yet. Attach an alarm to a circle and enable success or miss sharing to start the feed.
+              </Text>
+              {showCirclesButton ? (
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => router.push('/circles' as never)}
+                  style={[styles.inlineActionButton, { borderColor: colors.border }]}>
+                  <Text style={[styles.inlineActionButtonText, { color: colors.text }]}>Manage circles</Text>
+                </Pressable>
+              ) : null}
+            </>
+          ) : (
+            <View style={styles.feedList}>
+              {socialFeed.map((item) => (
+                <View
+                  key={item.id}
+                  style={[
+                    styles.feedCard,
+                    {
+                      backgroundColor: colors.canvas,
+                      borderColor: colors.border,
+                    },
+                  ]}>
+                  <View style={styles.feedHeader}>
+                    <View style={styles.feedIdentity}>
+                      <Text style={[styles.feedActorName, { color: colors.text }]}>
+                        {item.isOwnEvent ? 'You' : item.actorDisplayName}
+                      </Text>
+                      <Text style={[styles.feedActorMeta, { color: colors.muted }]}>
+                        @{item.actorHandle} · {item.circleName}
+                      </Text>
+                    </View>
+                    <View
+                      style={[
+                        styles.feedOutcomeBadge,
+                        {
+                          backgroundColor:
+                            item.outcome === 'confirmed' ? `${colors.success}16` : `${colors.danger}16`,
+                        },
+                      ]}>
+                      <Text
+                        style={[
+                          styles.feedOutcomeText,
+                          { color: item.outcome === 'confirmed' ? colors.success : colors.danger },
+                        ]}>
+                        {item.outcome === 'confirmed' ? 'Cleared' : 'Missed'}
+                      </Text>
+                    </View>
+                  </View>
+                  <Text style={[styles.feedAlarmLabel, { color: colors.text }]}>{item.alarmLabel}</Text>
+                  <Text style={[styles.feedEventMeta, { color: colors.muted }]}>
+                    {formatFeedInsight(item)}
+                  </Text>
+                  <Text style={[styles.feedEventMeta, { color: colors.muted }]}>
+                    {formatSocialTimestamp(item.resolvedAt)}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          )}
+        </View>
+
+        <View
+          style={[
+            styles.weekCard,
+            {
+              backgroundColor: colors.card,
+              borderColor: colors.border,
+            },
+          ]}>
+          <Text style={[styles.weekTitle, { color: colors.text }]}>Social sync status</Text>
           <Text style={[styles.weekHelp, { color: colors.muted }]}>
             {!socialRuntime?.configured
-              ? 'Supabase is not configured yet. Alarm outcomes will stay local and queue safely until social credentials are added.'
+              ? 'Social syncing is disabled until Supabase is configured.'
               : !socialRuntime.authenticated
-                ? 'Supabase is configured, but there is no signed-in session yet. Alarm outcomes will queue on-device until auth is connected.'
-                : 'Supabase is configured and authenticated. Alarm outcomes are being retried through the local sync queue.'}
+                ? 'Alarm outcomes will stay queued on-device until you sign in.'
+                : 'Shared outcomes are retried through the local sync queue so alarms still work offline.'}
           </Text>
           <View style={styles.weekRow}>
             <View style={styles.weekMetric}>
@@ -334,6 +500,21 @@ export default function HomeScreen() {
               {socialAccountButtonLabel}
             </Text>
           </Pressable>
+          {showCirclesButton ? (
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => router.push('/circles' as never)}
+              style={[
+                styles.inlineActionButton,
+                {
+                  borderColor: colors.border,
+                },
+              ]}>
+              <Text style={[styles.inlineActionButtonText, { color: colors.text }]}>
+                Manage circles
+              </Text>
+            </Pressable>
+          ) : null}
         </View>
 
         <Pressable
@@ -634,6 +815,11 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 20,
   },
+  loadingState: {
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 8,
+  },
   primaryButton: {
     alignItems: 'center',
     borderRadius: 16,
@@ -653,6 +839,51 @@ const styles = StyleSheet.create({
   inlineActionButtonText: {
     fontSize: 15,
     fontWeight: '600',
+  },
+  feedList: {
+    gap: 12,
+  },
+  feedCard: {
+    borderRadius: 18,
+    borderWidth: 1,
+    gap: 8,
+    padding: 14,
+  },
+  feedHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  feedIdentity: {
+    flex: 1,
+    gap: 2,
+    marginRight: 12,
+  },
+  feedActorName: {
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  feedActorMeta: {
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  feedOutcomeBadge: {
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  feedOutcomeText: {
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+  },
+  feedAlarmLabel: {
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  feedEventMeta: {
+    fontSize: 13,
+    lineHeight: 18,
   },
   devButton: {
     alignItems: 'center',
