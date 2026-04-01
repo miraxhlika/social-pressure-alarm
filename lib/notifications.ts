@@ -40,12 +40,15 @@ export async function ensureNotificationPermissionsAsync() {
   return requested.granted;
 }
 
-export async function scheduleAlarmNotificationAsync(alarm: Alarm) {
-  const scheduledFor = createNextAlarmDateForSchedule(
-    alarm.hour,
-    alarm.minute,
-    alarm.repeatSchedule
-  );
+export async function scheduleAlarmNotificationAsync(
+  alarm: Alarm,
+  options?: {
+    scheduledFor?: string;
+  }
+) {
+  const scheduledFor = options?.scheduledFor
+    ? new Date(options.scheduledFor)
+    : createNextAlarmDateForSchedule(alarm.hour, alarm.minute, alarm.repeatSchedule);
 
   const primaryNotificationId = await Notifications.scheduleNotificationAsync({
     content: {

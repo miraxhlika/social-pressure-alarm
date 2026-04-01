@@ -1,7 +1,10 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
-
 import { getSocialSession, getSupabaseClient } from '@/lib/social/client';
 import { hasSocialBackendConfig } from '@/lib/social/config';
+import {
+  readScopedStorageValue,
+  removeScopedStorageValue,
+  writeScopedStorageValue,
+} from '@/lib/storage';
 import { SocialQueueSummary, SocialRuntimeSnapshot } from '@/lib/social/types';
 import {
   AlarmEventRecord,
@@ -150,7 +153,8 @@ function normalizeSocialSyncMeta(value: unknown): SocialSyncMeta {
 }
 
 async function readAlarmEventQueueStorage() {
-  const rawValue = await AsyncStorage.getItem(ALARM_EVENT_QUEUE_KEY);
+  const scopedQueue = await readScopedStorageValue(ALARM_EVENT_QUEUE_KEY);
+  const rawValue = scopedQueue.value;
 
   if (!rawValue) {
     return [] as QueuedAlarmEvent[];
@@ -169,11 +173,12 @@ async function readAlarmEventQueueStorage() {
 }
 
 async function writeAlarmEventQueueStorage(queue: QueuedAlarmEvent[]) {
-  await AsyncStorage.setItem(ALARM_EVENT_QUEUE_KEY, JSON.stringify(queue));
+  await writeScopedStorageValue(ALARM_EVENT_QUEUE_KEY, JSON.stringify(queue));
 }
 
 async function readSocialSyncMetaStorage() {
-  const rawValue = await AsyncStorage.getItem(SOCIAL_SYNC_META_KEY);
+  const scopedMeta = await readScopedStorageValue(SOCIAL_SYNC_META_KEY);
+  const rawValue = scopedMeta.value;
 
   if (!rawValue) {
     return {} as SocialSyncMeta;
@@ -187,7 +192,7 @@ async function readSocialSyncMetaStorage() {
 }
 
 async function writeSocialSyncMetaStorage(meta: SocialSyncMeta) {
-  await AsyncStorage.setItem(SOCIAL_SYNC_META_KEY, JSON.stringify(meta));
+  await writeScopedStorageValue(SOCIAL_SYNC_META_KEY, JSON.stringify(meta));
 }
 
 function mapQueuedAlarmEventForSync(event: QueuedAlarmEvent, userId: string) {
@@ -205,6 +210,47 @@ function mapQueuedAlarmEventForSync(event: QueuedAlarmEvent, userId: string) {
     share_misses: event.socialSettings?.shareMisses ?? false,
     metadata: event.sharePayload,
   };
+}
+
+function shouldCreateProofShare(event: QueuedAlarmEvent) {
+  return Boolean(
+    event.socialSettings?.circleId &&
+      ((event.outcome === 'confirmed' && event.socialSettings.shareSuccesses) ||
+        (event.outcome === 'missed' && event.socialSettings.shareMisses))
+  );
+}
+
+async function upsertProofShareForEvent(event: QueuedAlarmEvent, userId: string) {
+  const client = getSupabaseClient();
+  const circleId = event.socialSettings?.circleId;
+
+  if (!client || !circleId || !shouldCreateProofShare(event)) {
+    return;
+  }
+
+  const { error } = await client.from('proof_shares').upsert(
+    {
+      alarm_event_id: event.id,
+      user_id: userId,
+      circle_id: circleId,
+      payload: {
+        alarmId: event.alarmId,
+        alarmLabel: event.alarmLabel,
+        scheduledFor: event.scheduledFor ?? null,
+        outcome: event.outcome,
+        resolvedAt: event.resolvedAt,
+        sharePayload: event.sharePayload,
+      },
+    },
+    {
+      onConflict: 'alarm_event_id,circle_id',
+      ignoreDuplicates: true,
+    }
+  );
+
+  if (error) {
+    throw error;
+  }
 }
 
 export async function enqueueAlarmEvent(event: AlarmEventRecord) {
@@ -314,6 +360,8 @@ export async function flushAlarmEventQueue(): Promise<FlushAlarmEventQueueResult
         throw error;
       }
 
+      await upsertProofShareForEvent(event, session.user.id);
+
       deliveredCount += 1;
     } catch (error) {
       latestError = error instanceof Error ? error.message : 'Alarm event sync failed.';
@@ -352,7 +400,7 @@ export async function flushAlarmEventQueue(): Promise<FlushAlarmEventQueueResult
 
 export async function resetSocialSyncState() {
   await Promise.all([
-    AsyncStorage.removeItem(ALARM_EVENT_QUEUE_KEY),
-    AsyncStorage.removeItem(SOCIAL_SYNC_META_KEY),
+    removeScopedStorageValue(ALARM_EVENT_QUEUE_KEY),
+    removeScopedStorageValue(SOCIAL_SYNC_META_KEY),
   ]);
 }

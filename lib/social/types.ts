@@ -70,3 +70,28 @@ export type SocialRuntimeSnapshot = {
   authenticated: boolean;
   queue: SocialQueueSummary;
 };
+
+export type SocialChallengeSummary = {
+  id: string;
+  title: string;
+  description: string;
+  progressLabel: string;
+  progressRatio: number;
+  isCompleted: boolean;
+};
+
+export type SocialLeaderboardEntry = {
+  userId: string;
+  displayName: string;
+  handle: string;
+  wins: number;
+  misses: number;
+  completionRate: number;
+  bestStreak: number;
+  isMe: boolean;
+};
+
+export type SocialDashboardInsights = {
+  challenges: SocialChallengeSummary[];
+  leaderboard: SocialLeaderboardEntry[];
+};

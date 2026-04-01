@@ -1,9 +1,9 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
-
 import {
   Alarm,
+  AlarmDefinition,
   AlarmEventRecord,
   AlarmOutcome,
+  AlarmRuntimeMetadata,
   AlarmSocialSettings,
   AlarmStore,
   CheckpointPreset,
@@ -16,9 +16,25 @@ import {
   SuccessHistoryEntry,
 } from '@/types/alarm';
 import { getWeeklyCompletionStats } from '@/lib/progress';
+import { hasSocialBackendConfig } from '@/lib/social/config';
+import {
+  clearMyRemoteAlarms,
+  deleteMyRemoteAlarm,
+  listMyRemoteAlarms,
+  upsertMyRemoteAlarm,
+  upsertMyRemoteAlarms,
+} from '@/lib/social/alarms';
+import { getMyAccountProgressState } from '@/lib/social/progress';
 import { enqueueAlarmEvent, flushAlarmEventQueue } from '@/lib/social/queue';
+import {
+  getActiveStorageScope,
+  readScopedStorageValue,
+  removeScopedStorageValue,
+  writeScopedStorageValue,
+} from '@/lib/storage';
 
 const STORAGE_KEY = 'social-pressure-alarm/store';
+const RUNTIME_STORAGE_KEY = 'social-pressure-alarm/runtime';
 
 type LegacyAlarmInput = Partial<Alarm> & {
   title?: unknown;
@@ -26,6 +42,12 @@ type LegacyAlarmInput = Partial<Alarm> & {
   contactName?: unknown;
   message?: unknown;
   notificationId?: unknown;
+};
+
+type AlarmRuntimeStore = {
+  alarms: Record<string, AlarmRuntimeMetadata>;
+  pendingUpserts: string[];
+  pendingDeletes: string[];
 };
 
 function createDefaultStore(): AlarmStore {
@@ -37,6 +59,14 @@ function createDefaultStore(): AlarmStore {
     failureHistory: [],
     successHistory: [],
     checkpointPresets: [],
+  };
+}
+
+function createDefaultRuntimeStore(): AlarmRuntimeStore {
+  return {
+    alarms: {},
+    pendingUpserts: [],
+    pendingDeletes: [],
   };
 }
 
@@ -139,6 +169,60 @@ function normalizeAlarm(rawAlarm: unknown): Alarm | null {
         : undefined,
     socialSettings: normalizeSocialSettings(legacyAlarm.socialSettings),
     lastOutcome,
+  };
+}
+
+function normalizeRuntimeMetadata(rawValue: unknown): AlarmRuntimeMetadata | null {
+  if (!isRecord(rawValue)) {
+    return null;
+  }
+
+  const scheduledFor = getOptionalIsoString(rawValue.scheduledFor);
+  const notificationIds = Array.isArray(rawValue.notificationIds)
+    ? rawValue.notificationIds
+        .map((value) => getTrimmedString(value))
+        .filter((value): value is string => Boolean(value))
+    : [];
+
+  if (notificationIds.length === 0 && !scheduledFor) {
+    return null;
+  }
+
+  return {
+    notificationIds,
+    scheduledFor,
+  };
+}
+
+function normalizeRuntimeStore(rawValue: unknown): AlarmRuntimeStore {
+  if (!isRecord(rawValue)) {
+    return createDefaultRuntimeStore();
+  }
+
+  const alarms = isRecord(rawValue.alarms)
+    ? Object.entries(rawValue.alarms).reduce<Record<string, AlarmRuntimeMetadata>>((result, [alarmId, value]) => {
+        const normalizedMetadata = normalizeRuntimeMetadata(value);
+
+        if (normalizedMetadata) {
+          result[alarmId] = normalizedMetadata;
+        }
+
+        return result;
+      }, {})
+    : {};
+
+  return {
+    alarms,
+    pendingUpserts: Array.isArray(rawValue.pendingUpserts)
+      ? rawValue.pendingUpserts
+          .map((value) => getTrimmedString(value))
+          .filter((value): value is string => Boolean(value))
+      : [],
+    pendingDeletes: Array.isArray(rawValue.pendingDeletes)
+      ? rawValue.pendingDeletes
+          .map((value) => getTrimmedString(value))
+          .filter((value): value is string => Boolean(value))
+      : [],
   };
 }
 
@@ -262,19 +346,41 @@ function upsertCheckpointPreset(existingPresets: CheckpointPreset[], alarmLike: 
   ]);
 }
 
-async function writeAlarmStore(store: AlarmStore) {
-  await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+function stripAlarmRuntimeMetadata(alarm: Alarm): AlarmDefinition {
+  const { notificationIds: _notificationIds, ...alarmDefinition } = alarm;
+  return alarmDefinition;
 }
 
-export async function readAlarmStore(): Promise<AlarmStore> {
-  const rawValue = await AsyncStorage.getItem(STORAGE_KEY);
+function mergeAlarmWithRuntimeMetadata(alarm: AlarmDefinition, runtimeMetadata?: AlarmRuntimeMetadata): Alarm {
+  return {
+    ...alarm,
+    notificationIds: runtimeMetadata?.notificationIds,
+  };
+}
 
-  if (!rawValue) {
+async function writeAlarmStore(store: AlarmStore) {
+  await writeScopedStorageValue(
+    STORAGE_KEY,
+    JSON.stringify({
+      ...store,
+      alarms: store.alarms.map(stripAlarmRuntimeMetadata),
+    })
+  );
+}
+
+async function writeRuntimeStore(runtimeStore: AlarmRuntimeStore) {
+  await writeScopedStorageValue(RUNTIME_STORAGE_KEY, JSON.stringify(runtimeStore));
+}
+
+async function readPersistedAlarmStore() {
+  const scopedStore = await readScopedStorageValue(STORAGE_KEY);
+
+  if (!scopedStore.value) {
     return createDefaultStore();
   }
 
   try {
-    const parsed = JSON.parse(rawValue) as Partial<AlarmStore>;
+    const parsed = JSON.parse(scopedStore.value) as Partial<AlarmStore>;
     const normalizedAlarms = Array.isArray(parsed.alarms)
       ? parsed.alarms.map(normalizeAlarm).filter((alarm): alarm is Alarm => alarm !== null)
       : [];
@@ -309,13 +415,310 @@ export async function readAlarmStore(): Promise<AlarmStore> {
   }
 }
 
+async function readPersistedRuntimeStore() {
+  const scopedRuntime = await readScopedStorageValue(RUNTIME_STORAGE_KEY);
+
+  if (!scopedRuntime.value) {
+    return createDefaultRuntimeStore();
+  }
+
+  try {
+    return normalizeRuntimeStore(JSON.parse(scopedRuntime.value));
+  } catch {
+    return createDefaultRuntimeStore();
+  }
+}
+
+async function readLocalAlarmState() {
+  const [store, runtimeStore] = await Promise.all([readPersistedAlarmStore(), readPersistedRuntimeStore()]);
+  let nextRuntimeStore = runtimeStore;
+  let didMigrateRuntimeMetadata = false;
+
+  const nextStore: AlarmStore = {
+    ...store,
+    alarms: sortAlarms(
+      store.alarms.map((alarm) => {
+        if (alarm.notificationIds?.length) {
+          nextRuntimeStore = {
+            ...nextRuntimeStore,
+            alarms: {
+              ...nextRuntimeStore.alarms,
+              [alarm.id]: {
+                notificationIds: alarm.notificationIds,
+                scheduledFor: alarm.scheduledFor,
+              },
+            },
+          };
+          didMigrateRuntimeMetadata = true;
+        }
+
+        return mergeAlarmWithRuntimeMetadata(
+          stripAlarmRuntimeMetadata(alarm),
+          nextRuntimeStore.alarms[alarm.id]
+        );
+      })
+    ),
+  };
+
+  if (didMigrateRuntimeMetadata) {
+    await Promise.all([writeAlarmStore(nextStore), writeRuntimeStore(nextRuntimeStore)]);
+  }
+
+  return {
+    store: nextStore,
+    runtimeStore: nextRuntimeStore,
+  };
+}
+
+async function writeLocalAlarmState(store: AlarmStore, runtimeStore: AlarmRuntimeStore) {
+  await Promise.all([writeAlarmStore(store), writeRuntimeStore(runtimeStore)]);
+}
+
+function shouldSyncRemoteAlarms() {
+  return hasSocialBackendConfig();
+}
+
+async function flushPendingAlarmSync(store: AlarmStore, runtimeStore: AlarmRuntimeStore) {
+  if (!shouldSyncRemoteAlarms()) {
+    return runtimeStore;
+  }
+
+  let nextRuntimeStore = runtimeStore;
+
+  for (const alarmId of runtimeStore.pendingDeletes) {
+    try {
+      await deleteMyRemoteAlarm(alarmId);
+      nextRuntimeStore = {
+        ...nextRuntimeStore,
+        pendingDeletes: nextRuntimeStore.pendingDeletes.filter((candidate) => candidate !== alarmId),
+      };
+    } catch {
+      // Keep pending deletes for the next sync attempt.
+    }
+  }
+
+  for (const alarmId of runtimeStore.pendingUpserts) {
+    const alarm = store.alarms.find((candidate) => candidate.id === alarmId);
+
+    if (!alarm) {
+      nextRuntimeStore = {
+        ...nextRuntimeStore,
+        pendingUpserts: nextRuntimeStore.pendingUpserts.filter((candidate) => candidate !== alarmId),
+      };
+      continue;
+    }
+
+    try {
+      await upsertMyRemoteAlarm(stripAlarmRuntimeMetadata(alarm));
+      nextRuntimeStore = {
+        ...nextRuntimeStore,
+        pendingUpserts: nextRuntimeStore.pendingUpserts.filter((candidate) => candidate !== alarmId),
+      };
+    } catch {
+      // Keep pending upserts for the next sync attempt.
+    }
+  }
+
+  if (
+    nextRuntimeStore.pendingDeletes.length !== runtimeStore.pendingDeletes.length ||
+    nextRuntimeStore.pendingUpserts.length !== runtimeStore.pendingUpserts.length
+  ) {
+    await writeRuntimeStore(nextRuntimeStore);
+  }
+
+  return nextRuntimeStore;
+}
+
+async function reconcileAlarmSchedules(store: AlarmStore, runtimeStore: AlarmRuntimeStore) {
+  const { cancelAlarmNotificationAsync, scheduleAlarmNotificationAsync } = await import('@/lib/notifications');
+  const knownAlarmIds = new Set(store.alarms.map((alarm) => alarm.id));
+  let nextRuntimeStore: AlarmRuntimeStore = {
+    ...runtimeStore,
+    alarms: { ...runtimeStore.alarms },
+  };
+  let nextAlarms = [...store.alarms];
+  const alarmsToSyncRemotely = [] as AlarmDefinition[];
+  const now = Date.now();
+
+  for (const [alarmId, metadata] of Object.entries(runtimeStore.alarms)) {
+    if (knownAlarmIds.has(alarmId)) {
+      continue;
+    }
+
+    if (metadata.notificationIds?.length) {
+      await cancelAlarmNotificationAsync(metadata.notificationIds);
+    }
+
+    delete nextRuntimeStore.alarms[alarmId];
+  }
+
+  for (const alarm of nextAlarms) {
+    const runtimeMetadata = nextRuntimeStore.alarms[alarm.id];
+
+    if (!alarm.isActive) {
+      if (runtimeMetadata?.notificationIds?.length) {
+        await cancelAlarmNotificationAsync(runtimeMetadata.notificationIds);
+      }
+
+      delete nextRuntimeStore.alarms[alarm.id];
+      continue;
+    }
+
+    const scheduledForTimestamp = alarm.scheduledFor ? new Date(alarm.scheduledFor).getTime() : null;
+
+    if (scheduledForTimestamp !== null && scheduledForTimestamp <= now) {
+      continue;
+    }
+
+    if (runtimeMetadata?.notificationIds?.length) {
+      if (runtimeMetadata.scheduledFor === alarm.scheduledFor) {
+        continue;
+      }
+
+      await cancelAlarmNotificationAsync(runtimeMetadata.notificationIds);
+    }
+
+    const scheduled = await scheduleAlarmNotificationAsync(alarm, {
+      scheduledFor: alarm.scheduledFor,
+    });
+
+    nextRuntimeStore.alarms[alarm.id] = {
+      notificationIds: scheduled.notificationIds,
+      scheduledFor: scheduled.scheduledFor,
+    };
+
+    if (scheduled.scheduledFor !== alarm.scheduledFor) {
+      const nextAlarm = {
+        ...alarm,
+        scheduledFor: scheduled.scheduledFor,
+      };
+
+      nextAlarms = nextAlarms.map((candidate) => (candidate.id === alarm.id ? nextAlarm : candidate));
+      alarmsToSyncRemotely.push(stripAlarmRuntimeMetadata(nextAlarm));
+    }
+  }
+
+  if (alarmsToSyncRemotely.length > 0 && shouldSyncRemoteAlarms()) {
+    try {
+      await upsertMyRemoteAlarms(alarmsToSyncRemotely);
+    } catch {
+      nextRuntimeStore = {
+        ...nextRuntimeStore,
+        pendingUpserts: [
+          ...new Set([...nextRuntimeStore.pendingUpserts, ...alarmsToSyncRemotely.map((alarm) => alarm.id)]),
+        ],
+      };
+    }
+  }
+
+  return {
+    store: {
+      ...store,
+      alarms: sortAlarms(nextAlarms),
+    },
+    runtimeStore: nextRuntimeStore,
+  };
+}
+
+function applyRemoteProgressState(
+  store: AlarmStore,
+  progressState: Awaited<ReturnType<typeof getMyAccountProgressState>> | null
+) {
+  if (!progressState) {
+    return store;
+  }
+
+  if (progressState.successHistory.length === 0 && progressState.failureHistory.length === 0) {
+    return store;
+  }
+
+  return {
+    ...store,
+    currentStreak: progressState.currentStreak,
+    longestStreak: progressState.longestStreak,
+    failureHistory: progressState.failureHistory,
+    successHistory: progressState.successHistory,
+  };
+}
+
+export async function hydrateAlarmRuntimeForCurrentUser() {
+  const localState = await readLocalAlarmState();
+
+  if (!shouldSyncRemoteAlarms()) {
+    const reconciledState = await reconcileAlarmSchedules(localState.store, localState.runtimeStore);
+    await writeLocalAlarmState(reconciledState.store, reconciledState.runtimeStore);
+    return reconciledState.store;
+  }
+
+  let nextRuntimeStore = await flushPendingAlarmSync(localState.store, localState.runtimeStore);
+
+  try {
+    let remoteAlarms = await listMyRemoteAlarms();
+
+    if (remoteAlarms.length === 0 && localState.store.alarms.length > 0) {
+      try {
+        remoteAlarms = await upsertMyRemoteAlarms(localState.store.alarms.map(stripAlarmRuntimeMetadata));
+        nextRuntimeStore = {
+          ...nextRuntimeStore,
+          pendingUpserts: nextRuntimeStore.pendingUpserts.filter(
+            (alarmId) => !remoteAlarms.some((alarm) => alarm.id === alarmId)
+          ),
+        };
+      } catch {
+        remoteAlarms = localState.store.alarms.map(stripAlarmRuntimeMetadata);
+      }
+    }
+
+    const remoteProgress = await getMyAccountProgressState().catch(() => null);
+    const mergedStore = applyRemoteProgressState(
+      {
+        ...localState.store,
+        alarms: sortAlarms(remoteAlarms),
+      },
+      remoteProgress
+    );
+    const reconciledState = await reconcileAlarmSchedules(mergedStore, nextRuntimeStore);
+    await writeLocalAlarmState(reconciledState.store, reconciledState.runtimeStore);
+    return reconciledState.store;
+  } catch {
+    const reconciledState = await reconcileAlarmSchedules(localState.store, nextRuntimeStore);
+    await writeLocalAlarmState(reconciledState.store, reconciledState.runtimeStore);
+    return reconciledState.store;
+  }
+}
+
+export async function readAlarmStore(): Promise<AlarmStore> {
+  const localState = await readLocalAlarmState();
+
+  if (!shouldSyncRemoteAlarms()) {
+    return localState.store;
+  }
+
+  const activeScope = await getActiveStorageScope();
+
+  if (activeScope === 'guest' || localState.store.alarms.length > 0) {
+    return localState.store;
+  }
+
+  return hydrateAlarmRuntimeForCurrentUser();
+}
+
 export async function getAlarms() {
   const store = await readAlarmStore();
   return sortAlarms(store.alarms);
 }
 
 export async function resetAlarmStore() {
-  await AsyncStorage.removeItem(STORAGE_KEY);
+  await Promise.all([removeScopedStorageValue(STORAGE_KEY), removeScopedStorageValue(RUNTIME_STORAGE_KEY)]);
+
+  if (shouldSyncRemoteAlarms()) {
+    try {
+      await clearMyRemoteAlarms();
+    } catch {
+      // Clearing local demo data should still succeed offline.
+    }
+  }
+
   return createDefaultStore();
 }
 
@@ -325,7 +728,7 @@ export async function getAlarmById(id: string) {
 }
 
 export async function saveNewAlarm(alarm: Alarm) {
-  const store = await readAlarmStore();
+  const { store, runtimeStore } = await readLocalAlarmState();
 
   if (store.lifetimeAlarmCreations >= FREE_ALARM_LIMIT) {
     throw new Error('Free alarm limit reached.');
@@ -333,44 +736,130 @@ export async function saveNewAlarm(alarm: Alarm) {
 
   const nextStore: AlarmStore = {
     ...store,
-    alarms: sortAlarms([alarm, ...store.alarms]),
+    alarms: sortAlarms([stripAlarmRuntimeMetadata(alarm), ...store.alarms]),
     lifetimeAlarmCreations: store.lifetimeAlarmCreations + 1,
     checkpointPresets: upsertCheckpointPreset(store.checkpointPresets, alarm),
   };
+  let nextRuntimeStore: AlarmRuntimeStore = {
+    ...runtimeStore,
+    alarms: {
+      ...runtimeStore.alarms,
+      [alarm.id]: {
+        notificationIds: alarm.notificationIds,
+        scheduledFor: alarm.scheduledFor,
+      },
+    },
+    pendingUpserts: shouldSyncRemoteAlarms()
+      ? [...new Set([...runtimeStore.pendingUpserts, alarm.id])]
+      : runtimeStore.pendingUpserts,
+    pendingDeletes: runtimeStore.pendingDeletes.filter((candidate) => candidate !== alarm.id),
+  };
 
-  await writeAlarmStore(nextStore);
+  await writeLocalAlarmState(nextStore, nextRuntimeStore);
+
+  if (shouldSyncRemoteAlarms()) {
+    try {
+      await upsertMyRemoteAlarm(stripAlarmRuntimeMetadata(alarm));
+      nextRuntimeStore = {
+        ...nextRuntimeStore,
+        pendingUpserts: nextRuntimeStore.pendingUpserts.filter((candidate) => candidate !== alarm.id),
+      };
+      await writeRuntimeStore(nextRuntimeStore);
+    } catch {
+      // Keep the alarm cached locally and retry its remote write later.
+    }
+  }
+
   return nextStore;
 }
 
 export async function updateAlarm(updatedAlarm: Alarm) {
-  const store = await readAlarmStore();
+  const { store, runtimeStore } = await readLocalAlarmState();
 
   const nextStore: AlarmStore = {
     ...store,
     alarms: sortAlarms(
-      store.alarms.map((alarm) => (alarm.id === updatedAlarm.id ? updatedAlarm : alarm))
+      store.alarms.map((alarm) =>
+        alarm.id === updatedAlarm.id ? stripAlarmRuntimeMetadata(updatedAlarm) : alarm
+      )
     ),
     checkpointPresets: upsertCheckpointPreset(store.checkpointPresets, updatedAlarm),
   };
+  let nextRuntimeStore: AlarmRuntimeStore = {
+    ...runtimeStore,
+    alarms: {
+      ...runtimeStore.alarms,
+      [updatedAlarm.id]: {
+        notificationIds: updatedAlarm.notificationIds,
+        scheduledFor: updatedAlarm.scheduledFor,
+      },
+    },
+    pendingUpserts: shouldSyncRemoteAlarms()
+      ? [...new Set([...runtimeStore.pendingUpserts, updatedAlarm.id])]
+      : runtimeStore.pendingUpserts,
+    pendingDeletes: runtimeStore.pendingDeletes.filter((candidate) => candidate !== updatedAlarm.id),
+  };
 
-  await writeAlarmStore(nextStore);
+  if (!updatedAlarm.notificationIds?.length) {
+    delete nextRuntimeStore.alarms[updatedAlarm.id];
+  }
+
+  await writeLocalAlarmState(nextStore, nextRuntimeStore);
+
+  if (shouldSyncRemoteAlarms()) {
+    try {
+      await upsertMyRemoteAlarm(stripAlarmRuntimeMetadata(updatedAlarm));
+      nextRuntimeStore = {
+        ...nextRuntimeStore,
+        pendingUpserts: nextRuntimeStore.pendingUpserts.filter((candidate) => candidate !== updatedAlarm.id),
+      };
+      await writeRuntimeStore(nextRuntimeStore);
+    } catch {
+      // Keep the update queued for the next hydration pass.
+    }
+  }
+
   return updatedAlarm;
 }
 
 export async function deleteAlarm(id: string) {
-  const store = await readAlarmStore();
+  const { store, runtimeStore } = await readLocalAlarmState();
 
   const nextStore: AlarmStore = {
     ...store,
     alarms: store.alarms.filter((alarm) => alarm.id !== id),
   };
+  let nextRuntimeStore: AlarmRuntimeStore = {
+    ...runtimeStore,
+    alarms: Object.fromEntries(
+      Object.entries(runtimeStore.alarms).filter(([alarmId]) => alarmId !== id)
+    ),
+    pendingUpserts: runtimeStore.pendingUpserts.filter((candidate) => candidate !== id),
+    pendingDeletes: shouldSyncRemoteAlarms()
+      ? [...new Set([...runtimeStore.pendingDeletes, id])]
+      : runtimeStore.pendingDeletes,
+  };
 
-  await writeAlarmStore(nextStore);
+  await writeLocalAlarmState(nextStore, nextRuntimeStore);
+
+  if (shouldSyncRemoteAlarms()) {
+    try {
+      await deleteMyRemoteAlarm(id);
+      nextRuntimeStore = {
+        ...nextRuntimeStore,
+        pendingDeletes: nextRuntimeStore.pendingDeletes.filter((candidate) => candidate !== id),
+      };
+      await writeRuntimeStore(nextRuntimeStore);
+    } catch {
+      // Keep the delete queued for future hydration.
+    }
+  }
+
   return nextStore;
 }
 
 export async function resolveAlarm(id: string, outcome: AlarmOutcome) {
-  const store = await readAlarmStore();
+  const { store, runtimeStore } = await readLocalAlarmState();
   const alarm = store.alarms.find((candidate) => candidate.id === id) ?? null;
 
   if (!alarm) {
@@ -419,7 +908,9 @@ export async function resolveAlarm(id: string, outcome: AlarmOutcome) {
   const nextStore: AlarmStore = {
     ...store,
     alarms: sortAlarms(
-      store.alarms.map((candidate) => (candidate.id === updatedAlarm.id ? updatedAlarm : candidate))
+      store.alarms.map((candidate) =>
+        candidate.id === updatedAlarm.id ? stripAlarmRuntimeMetadata(updatedAlarm) : candidate
+      )
     ),
     currentStreak: nextCurrentStreak,
     longestStreak: outcome === 'confirmed' ? Math.max(store.longestStreak, nextCurrentStreak) : store.longestStreak,
@@ -430,6 +921,23 @@ export async function resolveAlarm(id: string, outcome: AlarmOutcome) {
       ? sortSuccessHistory([successEntry, ...store.successHistory])
       : store.successHistory,
   };
+  let nextRuntimeStore: AlarmRuntimeStore = {
+    ...runtimeStore,
+    alarms: {
+      ...runtimeStore.alarms,
+      [updatedAlarm.id]: {
+        notificationIds: updatedAlarm.notificationIds,
+        scheduledFor: updatedAlarm.scheduledFor,
+      },
+    },
+    pendingUpserts: shouldSyncRemoteAlarms()
+      ? [...new Set([...runtimeStore.pendingUpserts, updatedAlarm.id])]
+      : runtimeStore.pendingUpserts,
+  };
+
+  if (!updatedAlarm.notificationIds?.length) {
+    delete nextRuntimeStore.alarms[updatedAlarm.id];
+  }
 
   const weeklyStats = getWeeklyCompletionStats(nextStore, resolvedTimestamp);
   const eventRecord: AlarmEventRecord = {
@@ -452,7 +960,21 @@ export async function resolveAlarm(id: string, outcome: AlarmOutcome) {
     },
   };
 
-  await writeAlarmStore(nextStore);
+  await writeLocalAlarmState(nextStore, nextRuntimeStore);
+
+  if (shouldSyncRemoteAlarms()) {
+    try {
+      await upsertMyRemoteAlarm(stripAlarmRuntimeMetadata(updatedAlarm));
+      nextRuntimeStore = {
+        ...nextRuntimeStore,
+        pendingUpserts: nextRuntimeStore.pendingUpserts.filter((candidate) => candidate !== updatedAlarm.id),
+      };
+      await writeRuntimeStore(nextRuntimeStore);
+    } catch {
+      // Keep the remote alarm state dirty while the local alarm flow continues.
+    }
+  }
+
   await enqueueAlarmEvent(eventRecord);
   void flushAlarmEventQueue();
   return updatedAlarm;

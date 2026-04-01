@@ -64,7 +64,7 @@ export type CheckpointPreset = {
   lastUsedAt: string;
 };
 
-export type Alarm = {
+export type AlarmDefinition = {
   id: string;
   hour: number;
   minute: number;
@@ -75,10 +75,16 @@ export type Alarm = {
   isActive: boolean;
   createdAt: string;
   scheduledFor?: string;
-  notificationIds?: string[];
   socialSettings?: AlarmSocialSettings;
   lastOutcome?: AlarmOutcome;
 };
+
+export type AlarmRuntimeMetadata = {
+  notificationIds?: string[];
+  scheduledFor?: string;
+};
+
+export type Alarm = AlarmDefinition & AlarmRuntimeMetadata;
 
 export type AlarmStore = {
   alarms: Alarm[];

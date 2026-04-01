@@ -9,6 +9,7 @@ import {
   formatAlarmTime,
   getAlarmById,
   getAlarmDeadlineTimestamp,
+  hydrateAlarmRuntimeForCurrentUser,
   resolveAlarm,
   updateAlarm,
 } from '@/lib/alarms';
@@ -38,6 +39,7 @@ export default function RingingScreen() {
         return;
       }
 
+      await hydrateAlarmRuntimeForCurrentUser().catch(() => null);
       const foundAlarm = await getAlarmById(params.alarmId);
       setAlarm(foundAlarm);
     };

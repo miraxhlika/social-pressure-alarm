@@ -5,13 +5,21 @@ import { useFocusEffect, useRouter } from 'expo-router';
 
 import { AlarmCard } from '@/components/alarm-card';
 import { getAppColors } from '@/constants/theme';
-import { deleteAlarm, readAlarmStore, resetAlarmStore, updateAlarm } from '@/lib/alarms';
+import { deleteAlarm, hydrateAlarmRuntimeForCurrentUser, readAlarmStore, resetAlarmStore, updateAlarm } from '@/lib/alarms';
 import { cancelAlarmNotificationAsync, scheduleAlarmNotificationAsync } from '@/lib/notifications';
 import { getProgressSummary, ProgressSummary } from '@/lib/progress';
 import { listMySocialCircles } from '@/lib/social/circles';
 import { listVisibleSocialFeed } from '@/lib/social/feed';
+import { getSocialDashboardInsights } from '@/lib/social/insights';
 import { getSocialRuntimeSnapshot, resetSocialSyncState } from '@/lib/social/queue';
-import { SocialFeedItem, SocialRuntimeSnapshot } from '@/lib/social/types';
+import {
+  SocialCircleSummary,
+  SocialChallengeSummary,
+  SocialDashboardInsights,
+  SocialFeedItem,
+  SocialLeaderboardEntry,
+  SocialRuntimeSnapshot,
+} from '@/lib/social/types';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useSocialSession } from '@/providers/social-session-provider';
 import { Alarm, FailureHistoryEntry, FREE_ALARM_LIMIT, SuccessHistoryEntry } from '@/types/alarm';
@@ -62,6 +70,8 @@ function formatFeedInsight(item: SocialFeedItem) {
   return `${item.sharePayload.weeklyCompletionRate}% weekly completion`;
 }
 
+type SocialActivityPayload = [SocialCircleSummary[], SocialFeedItem[], SocialDashboardInsights];
+
 export default function HomeScreen() {
   const router = useRouter();
   const colors = getAppColors(useColorScheme());
@@ -82,6 +92,8 @@ export default function HomeScreen() {
   const [socialFeed, setSocialFeed] = useState<SocialFeedItem[]>([]);
   const [socialCircleCount, setSocialCircleCount] = useState(0);
   const [isSocialFeedLoading, setIsSocialFeedLoading] = useState(false);
+  const [socialChallenges, setSocialChallenges] = useState<SocialChallengeSummary[]>([]);
+  const [socialLeaderboard, setSocialLeaderboard] = useState<SocialLeaderboardEntry[]>([]);
 
   const loadData = useCallback(async () => {
     const shouldLoadSocialActivity = Boolean(isSocialConfigured && user);
@@ -89,6 +101,8 @@ export default function HomeScreen() {
     setIsSocialFeedLoading(shouldLoadSocialActivity);
 
     try {
+      await hydrateAlarmRuntimeForCurrentUser().catch(() => null);
+
       const [store, socialSnapshot, socialActivity] = await Promise.all([
         readAlarmStore(),
         getSocialRuntimeSnapshot(),
@@ -96,9 +110,21 @@ export default function HomeScreen() {
           ? Promise.all([
               listMySocialCircles().catch(() => []),
               listVisibleSocialFeed(6).catch(() => []),
+              getSocialDashboardInsights().catch(() => ({
+                challenges: [] as SocialChallengeSummary[],
+                leaderboard: [] as SocialLeaderboardEntry[],
+              })),
             ])
-          : Promise.resolve([[], []]),
+          : Promise.resolve<SocialActivityPayload>([
+              [],
+              [],
+              {
+                challenges: [] as SocialChallengeSummary[],
+                leaderboard: [] as SocialLeaderboardEntry[],
+              },
+            ]),
       ]);
+      const [circles, feed, insights] = socialActivity as SocialActivityPayload;
 
       setAlarms(store.alarms);
       setLifetimeAlarmCreations(store.lifetimeAlarmCreations);
@@ -108,8 +134,10 @@ export default function HomeScreen() {
       setSuccessHistory(store.successHistory);
       setProgressSummary(getProgressSummary(store));
       setSocialRuntime(socialSnapshot);
-      setSocialCircleCount(socialActivity[0].length);
-      setSocialFeed(socialActivity[1]);
+      setSocialCircleCount(circles.length);
+      setSocialFeed(feed);
+      setSocialChallenges(insights.challenges);
+      setSocialLeaderboard(insights.leaderboard);
     } finally {
       setIsSocialFeedLoading(false);
     }
@@ -199,7 +227,7 @@ export default function HomeScreen() {
   const handleResetDemoData = () => {
     Alert.alert(
       'Reset demo data?',
-      'This clears saved alarms, resets the free limit, and cancels scheduled alarm notifications on this device.',
+      'This clears saved alarms, resets the free limit, and cancels scheduled alarm notifications for the current local profile. If you are signed in, it also clears synced account alarms.',
       [
         {
           text: 'Cancel',
@@ -436,6 +464,111 @@ export default function HomeScreen() {
                   <Text style={[styles.feedEventMeta, { color: colors.muted }]}>
                     {formatSocialTimestamp(item.resolvedAt)}
                   </Text>
+                </View>
+              ))}
+            </View>
+          )}
+        </View>
+
+        <View
+          style={[
+            styles.weekCard,
+            {
+              backgroundColor: colors.card,
+              borderColor: colors.border,
+            },
+          ]}>
+          <Text style={[styles.weekTitle, { color: colors.text }]}>Active challenges</Text>
+          {!user ? (
+            <Text style={[styles.weekHelp, { color: colors.muted }]}>
+              Sign in to turn your account-scoped wake-up history into challenge progress.
+            </Text>
+          ) : socialChallenges.length === 0 ? (
+            <Text style={[styles.weekHelp, { color: colors.muted }]}>
+              Complete a few alarms to unlock your first social challenge snapshot.
+            </Text>
+          ) : (
+            <View style={styles.socialChallengeList}>
+              {socialChallenges.map((challenge) => (
+                <View
+                  key={challenge.id}
+                  style={[
+                    styles.socialChallengeCard,
+                    {
+                      backgroundColor: colors.canvas,
+                      borderColor: colors.border,
+                    },
+                  ]}>
+                  <Text style={[styles.feedActorName, { color: colors.text }]}>{challenge.title}</Text>
+                  <Text style={[styles.weekHelp, { color: colors.muted }]}>{challenge.description}</Text>
+                  <View style={[styles.socialProgressTrack, { backgroundColor: colors.border }]}>
+                    <View
+                      style={[
+                        styles.socialProgressFill,
+                        {
+                          backgroundColor: challenge.isCompleted ? colors.success : colors.primary,
+                          width: `${Math.max(10, Math.round(challenge.progressRatio * 100))}%`,
+                        },
+                      ]}
+                    />
+                  </View>
+                  <Text
+                    style={[
+                      styles.feedEventMeta,
+                      {
+                        color: challenge.isCompleted ? colors.success : colors.muted,
+                      },
+                    ]}>
+                    {challenge.progressLabel}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          )}
+        </View>
+
+        <View
+          style={[
+            styles.weekCard,
+            {
+              backgroundColor: colors.card,
+              borderColor: colors.border,
+            },
+          ]}>
+          <Text style={[styles.weekTitle, { color: colors.text }]}>Leaderboard snapshot</Text>
+          {!user ? (
+            <Text style={[styles.weekHelp, { color: colors.muted }]}>
+              Sign in and share into a circle to compare streaks and weekly wins.
+            </Text>
+          ) : socialLeaderboard.length === 0 ? (
+            <Text style={[styles.weekHelp, { color: colors.muted }]}>
+              Shared alarm events will turn into a circle leaderboard after a few wake-up results land.
+            </Text>
+          ) : (
+            <View style={styles.leaderboardList}>
+              {socialLeaderboard.map((entry, index) => (
+                <View
+                  key={entry.userId}
+                  style={[
+                    styles.leaderboardRow,
+                    {
+                      backgroundColor: colors.canvas,
+                      borderColor: colors.border,
+                    },
+                  ]}>
+                  <Text style={[styles.leaderboardRank, { color: colors.primary }]}>#{index + 1}</Text>
+                  <View style={styles.leaderboardIdentity}>
+                    <Text style={[styles.feedActorName, { color: colors.text }]}>
+                      {entry.isMe ? 'You' : entry.displayName}
+                    </Text>
+                    <Text style={[styles.feedActorMeta, { color: colors.muted }]}>@{entry.handle}</Text>
+                  </View>
+                  <View style={styles.leaderboardStats}>
+                    <Text style={[styles.feedActorName, { color: colors.text }]}>{entry.wins} wins</Text>
+                    <Text style={[styles.feedEventMeta, { color: colors.muted }]}>
+                      {entry.bestStreak} streak · {entry.completionRate}%
+                    </Text>
+                  </View>
                 </View>
               ))}
             </View>
@@ -884,6 +1017,48 @@ const styles = StyleSheet.create({
   feedEventMeta: {
     fontSize: 13,
     lineHeight: 18,
+  },
+  socialChallengeList: {
+    gap: 12,
+  },
+  socialChallengeCard: {
+    borderRadius: 18,
+    borderWidth: 1,
+    gap: 8,
+    padding: 14,
+  },
+  socialProgressTrack: {
+    borderRadius: 999,
+    height: 8,
+    overflow: 'hidden',
+  },
+  socialProgressFill: {
+    borderRadius: 999,
+    height: '100%',
+  },
+  leaderboardList: {
+    gap: 10,
+  },
+  leaderboardRow: {
+    alignItems: 'center',
+    borderRadius: 18,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 12,
+    padding: 14,
+  },
+  leaderboardRank: {
+    fontSize: 18,
+    fontWeight: '800',
+    width: 30,
+  },
+  leaderboardIdentity: {
+    flex: 1,
+    gap: 2,
+  },
+  leaderboardStats: {
+    alignItems: 'flex-end',
+    gap: 2,
   },
   devButton: {
     alignItems: 'center',

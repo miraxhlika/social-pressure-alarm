@@ -16,7 +16,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { getAppColors } from '@/constants/theme';
-import { readAlarmStore, saveNewAlarm, updateAlarm } from '@/lib/alarms';
+import { hydrateAlarmRuntimeForCurrentUser, readAlarmStore, saveNewAlarm, updateAlarm } from '@/lib/alarms';
 import {
   cancelAlarmNotificationAsync,
   ensureNotificationPermissionsAsync,
@@ -85,6 +85,7 @@ export default function CreateAlarmScreen() {
 
   useEffect(() => {
     const loadFormData = async () => {
+      await hydrateAlarmRuntimeForCurrentUser().catch(() => null);
       const store = await readAlarmStore();
       setSavedPresets(store.checkpointPresets);
 
