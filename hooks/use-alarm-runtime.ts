@@ -3,8 +3,9 @@ import { AppState } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import { useRouter } from 'expo-router';
 
-import { getAlarms, getNextActionableAlarm } from '@/lib/alarms';
+import { getAlarms, getNextActionableAlarm, hydrateAlarmRuntimeForCurrentUser } from '@/lib/alarms';
 import { configureNotificationsAsync } from '@/lib/notifications';
+import { getSupabaseClient } from '@/lib/social/client';
 
 function getAlarmIdFromNotification(
   notification:
@@ -39,7 +40,8 @@ export function useAlarmRuntime() {
       });
     };
 
-    const checkForDueAlarms = async () => {
+    const hydrateAndCheckForDueAlarms = async () => {
+      await hydrateAlarmRuntimeForCurrentUser();
       const alarms = await getAlarms();
       const dueAlarm = getNextActionableAlarm(alarms);
 
@@ -52,7 +54,7 @@ export function useAlarmRuntime() {
     };
 
     void configureNotificationsAsync();
-    void checkForDueAlarms();
+    void hydrateAndCheckForDueAlarms();
 
     void Notifications.getLastNotificationResponseAsync().then((response) => {
       const alarmId = getAlarmIdFromNotification(response);
@@ -80,14 +82,19 @@ export function useAlarmRuntime() {
 
     const appStateSubscription = AppState.addEventListener('change', (state) => {
       if (state === 'active') {
-        void checkForDueAlarms();
+        void hydrateAndCheckForDueAlarms();
       }
+    });
+    const client = getSupabaseClient();
+    const authSubscription = client?.auth.onAuthStateChange(() => {
+      void hydrateAlarmRuntimeForCurrentUser();
     });
 
     return () => {
       receivedSubscription.remove();
       responseSubscription.remove();
       appStateSubscription.remove();
+      authSubscription?.data.subscription.unsubscribe();
     };
   }, [router]);
 }
