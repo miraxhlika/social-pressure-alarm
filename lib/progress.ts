@@ -5,32 +5,32 @@ const WEEK_IN_MS = 7 * 24 * 60 * 60 * 1000;
 const STREAK_MILESTONES = [
   {
     threshold: 3,
-    title: 'Momentum Builder',
-    description: 'Lock in 3 wake-ups in a row.',
+    title: 'Building Rhythm',
+    description: '3 clears in a row.',
   },
   {
     threshold: 7,
-    title: 'Weekly Warrior',
-    description: 'Hold the line for a full week of wins.',
+    title: 'One Week',
+    description: '7 clears in a row.',
   },
   {
     threshold: 14,
-    title: 'Consistency Machine',
-    description: 'Two weeks of follow-through.',
+    title: 'Consistent',
+    description: '14 clears in a row.',
   },
   {
     threshold: 30,
-    title: 'Checkpoint Legend',
-    description: 'Thirty straight clears is elite.',
+    title: 'Locked In',
+    description: '30 clears in a row.',
   },
 ] as const;
 
 const TITLE_LEVELS = [
-  { threshold: 0, title: 'Rookie Scanner' },
-  { threshold: 3, title: 'Momentum Builder' },
-  { threshold: 7, title: 'Weekly Warrior' },
-  { threshold: 14, title: 'Consistency Machine' },
-  { threshold: 30, title: 'Checkpoint Legend' },
+  { threshold: 0, title: 'Getting Started' },
+  { threshold: 3, title: 'Building Rhythm' },
+  { threshold: 7, title: 'One Week' },
+  { threshold: 14, title: 'Consistent' },
+  { threshold: 30, title: 'Locked In' },
 ] as const;
 
 export type ProgressBadge = {
@@ -131,8 +131,8 @@ export function getProgressBadges(store: AlarmStore, now = Date.now()): Progress
   if (store.failureHistory.length > 0 && store.currentStreak >= 2) {
     badges.push({
       id: 'comeback',
-      label: 'Comeback Streak',
-      description: `You bounced back with ${store.currentStreak} wins after your last miss.`,
+      label: 'Bounce Back',
+      description: `${store.currentStreak} wins since the last miss.`,
     });
   }
 
@@ -142,7 +142,7 @@ export function getProgressBadges(store: AlarmStore, now = Date.now()): Progress
   ) {
     badges.push({
       id: 'fast-finish',
-      label: 'Fast Finish',
+      label: 'Quick Clear',
       description: `Cleared in ${latestSuccess.timeToScanSeconds}s.`,
     });
   }
@@ -172,6 +172,6 @@ export function getProgressSummary(store: AlarmStore, now = Date.now()): Progres
       ? `${milestoneProgress.remainingWins} more ${
           milestoneProgress.remainingWins === 1 ? 'win' : 'wins'
         } to reach ${nextStreakMilestone.title}.`
-      : 'You have cleared every current milestone. Time to protect the legend run.',
+      : 'You are in the highest streak tier.',
   };
 }

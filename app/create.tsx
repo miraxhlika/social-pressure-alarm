@@ -1,21 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  Alert,
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Switch,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
+import { Alert, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { BarcodeScanningResult, CameraView, useCameraPermissions } from 'expo-camera';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
-import { getAppColors } from '@/constants/theme';
+import { AppButton } from '@/components/ui/app-button';
+import { AppCard } from '@/components/ui/app-card';
+import { AppInput } from '@/components/ui/app-input';
+import { SectionHeader } from '@/components/ui/section-header';
+import { StatusPill } from '@/components/ui/status-pill';
+import { Fonts, getAppColors, Radius, Spacing, TextPresets, Type } from '@/constants/theme';
+import { useColorScheme } from '@/hooks/use-color-scheme';
 import { hydrateAlarmRuntimeForCurrentUser, readAlarmStore, saveNewAlarm, updateAlarm } from '@/lib/alarms';
 import {
   cancelAlarmNotificationAsync,
@@ -24,7 +20,6 @@ import {
 } from '@/lib/notifications';
 import { listMySocialCircles } from '@/lib/social/circles';
 import { SocialCircleSummary } from '@/lib/social/types';
-import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useSocialSession } from '@/providers/social-session-provider';
 import { Alarm, CheckpointPreset, FREE_ALARM_LIMIT, RepeatSchedule } from '@/types/alarm';
 
@@ -38,6 +33,18 @@ function createInitialTime() {
   const now = new Date();
   now.setHours(now.getHours() + 1, 0, 0, 0);
   return now;
+}
+
+function getModeLabel(isEditMode: boolean, isReuseMode: boolean) {
+  if (isEditMode) {
+    return 'Edit';
+  }
+
+  if (isReuseMode) {
+    return 'Reuse';
+  }
+
+  return 'New';
 }
 
 export default function CreateAlarmScreen() {
@@ -74,6 +81,25 @@ export default function CreateAlarmScreen() {
       }),
     [time]
   );
+  const gracePreviewSeconds = useMemo(() => {
+    const parsedValue = Number.parseInt(gracePeriodSeconds, 10);
+    return Number.isFinite(parsedValue) ? Math.max(parsedValue, 0) : 0;
+  }, [gracePeriodSeconds]);
+
+  const screenTitle = isEditMode
+    ? 'Edit alarm'
+    : isReuseMode
+      ? 'Reuse alarm'
+      : 'New alarm';
+  const screenSubtitle = isEditMode
+    ? 'Update time, checkpoint, or sharing.'
+    : isReuseMode
+      ? 'Start from an existing setup.'
+      : 'Set time, QR code, and rules.';
+  const primaryActionLabel = isEditMode ? 'Save changes' : 'Save alarm';
+  const socialEnabled = configured && user && isProfileComplete;
+  const selectedCircle = availableCircles.find((circle) => circle.id === selectedCircleId) ?? null;
+  const setupSummary = selectedCircle ? `Shares with ${selectedCircle.name}` : 'Private by default';
 
   const handleTimeChange = (_event: DateTimePickerEvent, selectedDate?: Date) => {
     if (!selectedDate) {
@@ -125,7 +151,7 @@ export default function CreateAlarmScreen() {
   }, [isEditMode, isReuseMode, params.alarmId]);
 
   useEffect(() => {
-    if (!configured || !user || !isProfileComplete) {
+    if (!socialEnabled) {
       setAvailableCircles([]);
       setSelectedCircleId('');
       setShareSuccesses(false);
@@ -165,7 +191,7 @@ export default function CreateAlarmScreen() {
     return () => {
       isMounted = false;
     };
-  }, [configured, isProfileComplete, user]);
+  }, [socialEnabled]);
 
   useEffect(() => {
     return () => {
@@ -213,38 +239,23 @@ export default function CreateAlarmScreen() {
     [isScannerEnabled]
   );
 
-  const screenTitle = isEditMode
-    ? 'Edit checkpoint alarm'
-    : isReuseMode
-      ? 'Reuse checkpoint alarm'
-      : 'Create checkpoint alarm';
-  const screenSubtitle = isEditMode
-    ? 'Update the schedule, checkpoint, and repeat pattern without rebuilding the alarm from scratch.'
-    : isReuseMode
-      ? 'Start from an existing alarm, then tweak the time or checkpoint before saving a new copy.'
-      : "Set a wake-up time, then enter the exact QR payload for a code you'll place in another room.";
-  const primaryActionLabel = isEditMode ? 'Save changes' : 'Save Checkpoint Alarm';
-
   const handleSave = async () => {
     const trimmedLabel = label.trim();
     const trimmedExpectedQrPayload = expectedQrPayload.trim();
     const gracePeriod = Number.parseInt(gracePeriodSeconds, 10);
 
     if (!trimmedLabel) {
-      Alert.alert('Checkpoint label required', 'Give this alarm a label so it is easy to recognize.');
+      alertLabelRequired();
       return;
     }
 
     if (!trimmedExpectedQrPayload) {
-      Alert.alert(
-        'QR payload required',
-        'Enter the exact QR payload that must be scanned when the alarm rings.'
-      );
+      alertPayloadRequired();
       return;
     }
 
     if (Number.isNaN(gracePeriod) || gracePeriod < 15) {
-      Alert.alert('Grace period required', 'Set a grace period of at least 15 seconds.');
+      alertGraceRequired();
       return;
     }
 
@@ -263,10 +274,7 @@ export default function CreateAlarmScreen() {
       const hasNotificationPermission = await ensureNotificationPermissionsAsync();
 
       if (!hasNotificationPermission) {
-        Alert.alert(
-          'Notification permission needed',
-          'This MVP relies on local notifications to trigger the alarm confirmation flow.'
-        );
+        alertNotificationPermission();
         return;
       }
 
@@ -327,29 +335,66 @@ export default function CreateAlarmScreen() {
 
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.canvas }]}>
-      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-        <View style={styles.header}>
-          <Text style={[styles.title, { color: colors.text }]}>{screenTitle}</Text>
-          <Text style={[styles.subtitle, { color: colors.muted }]}>{screenSubtitle}</Text>
-        </View>
+      <View pointerEvents="none" style={[styles.backdropOrb, styles.backdropTop, { backgroundColor: colors.primary }]} />
+      <View pointerEvents="none" style={[styles.backdropOrb, styles.backdropBottom, { backgroundColor: colors.accent }]} />
+      <ScrollView
+        contentContainerStyle={styles.content}
+        contentInsetAdjustmentBehavior="automatic"
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}>
+        <AppCard elevated tone="primary" style={styles.heroCard}>
+          <View style={styles.heroHeader}>
+            <View style={styles.heroCopy}>
+              <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Checkpoint builder</Text>
+              <Text style={[styles.heroTitle, { color: colors.text }]}>{screenTitle}</Text>
+              <Text style={[TextPresets.body, { color: colors.textSoft }]}>{screenSubtitle}</Text>
+            </View>
+            <StatusPill label={getModeLabel(isEditMode, isReuseMode)} tone="primary" />
+          </View>
 
-        {savedPresets.length ? (
-          <View
-            style={[
-              styles.section,
-              {
-                backgroundColor: colors.card,
-                borderColor: colors.border,
-              },
-            ]}>
-            <Text style={[styles.label, { color: colors.text }]}>Saved checkpoints</Text>
-            <Text style={[styles.helperText, { color: colors.muted }]}>
-              Reuse a checkpoint preset to skip manual entry.
+          <View style={[styles.heroPreview, { backgroundColor: colors.elevated, borderColor: colors.ring }]}>
+            <Text style={[TextPresets.label, { color: colors.muted }]}>Preview</Text>
+            <Text style={[styles.heroTime, { color: colors.text }]}>{formattedTime}</Text>
+            <View style={styles.previewStats}>
+              <View style={styles.previewMetric}>
+                <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>Repeat</Text>
+                <Text style={[TextPresets.label, { color: colors.text }]}>{REPEAT_OPTIONS.find((option) => option.value === repeatSchedule)?.label ?? 'Once'}</Text>
+              </View>
+              <View style={styles.previewMetric}>
+                <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>Grace</Text>
+                <Text style={[TextPresets.label, { color: colors.text }]}>{gracePreviewSeconds || '--'}s</Text>
+              </View>
+              <View style={styles.previewMetric}>
+                <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>Visibility</Text>
+                <Text numberOfLines={1} style={[TextPresets.label, { color: colors.text }]}>{setupSummary}</Text>
+              </View>
+            </View>
+          </View>
+        </AppCard>
+
+        {sourceAlarm ? (
+          <AppCard tone="muted">
+            <Text style={[TextPresets.label, { color: colors.text }]}>Current base alarm</Text>
+            <Text style={[styles.sourceTitle, { color: colors.text }]}>{sourceAlarm.label}</Text>
+            <Text style={[TextPresets.body, { color: colors.muted }]}>
+              {isEditMode
+                ? 'Editing the current alarm.'
+                : 'Creating a new copy from this alarm.'}
             </Text>
-            <View style={styles.presetList}>
-              {savedPresets.map((preset) => (
-                <Pressable
-                  key={preset.id}
+          </AppCard>
+        ) : null}
+
+        {savedPresets.length > 0 ? (
+        <AppCard elevated>
+          <SectionHeader
+            kicker="Fast path"
+            title="Saved checkpoints"
+            description="Reuse a saved QR target."
+          />
+          <View style={styles.selectionList}>
+            {savedPresets.map((preset) => (
+              <Pressable
+                key={preset.id}
                   accessibilityRole="button"
                   onPress={() => {
                     setLabel(preset.label);
@@ -357,95 +402,83 @@ export default function CreateAlarmScreen() {
                     setScannerMessage(`Loaded the ${preset.label} checkpoint preset.`);
                   }}
                   style={[
-                    styles.presetChip,
+                    styles.selectionCard,
                     {
-                      backgroundColor: `${colors.primary}14`,
+                      backgroundColor: colors.elevated,
+                      borderColor: colors.border,
                     },
                   ]}>
-                  <Text style={[styles.presetLabel, { color: colors.primary }]}>{preset.label}</Text>
-                  <Text style={[styles.presetPayload, { color: colors.muted }]}>
-                    {preset.expectedQrPayload}
-                  </Text>
+                  <Text style={[TextPresets.label, { color: colors.text }]}>{preset.label}</Text>
+                  <Text style={[TextPresets.body, { color: colors.muted }]}>{preset.expectedQrPayload}</Text>
                 </Pressable>
               ))}
             </View>
-          </View>
+          </AppCard>
         ) : null}
 
-        <View
-          style={[
-            styles.section,
-            {
-              backgroundColor: colors.card,
-              borderColor: colors.border,
-            },
-          ]}>
-          <Text style={[styles.label, { color: colors.text }]}>Alarm time</Text>
-          <Text style={[styles.timePreview, { color: colors.primary }]}>{formattedTime}</Text>
+        <AppCard elevated>
+          <SectionHeader
+            kicker="Step 1"
+            title="Schedule"
+            description="Set the time."
+          />
+          <View style={styles.timePanel}>
+            <Text style={[styles.timeValue, { color: colors.primary }]}>{formattedTime}</Text>
+            <Text style={[TextPresets.body, { color: colors.muted }]}>
+              Pick the actual wake-up time.
+            </Text>
+          </View>
           <DateTimePicker
-            display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+            display={Platform.OS === 'ios' ? 'compact' : 'default'}
             mode="time"
             onChange={handleTimeChange}
             value={time}
           />
-        </View>
+        </AppCard>
 
-        <View
-          style={[
-            styles.section,
-            {
-              backgroundColor: colors.card,
-              borderColor: colors.border,
-            },
-          ]}>
-          <Text style={[styles.label, { color: colors.text }]}>Checkpoint label</Text>
-          <TextInput
+        <AppCard elevated>
+          <SectionHeader
+            kicker="Step 2"
+            title="Checkpoint"
+            description="Set the label and QR value."
+          />
+
+          <AppInput
             autoCapitalize="words"
+            label="Checkpoint label"
             onChangeText={setLabel}
             placeholder="Bathroom sink"
-            placeholderTextColor={colors.muted}
-            style={[
-              styles.input,
-              {
-                borderColor: colors.border,
-                color: colors.text,
-              },
-            ]}
             value={label}
           />
 
-          <Text style={[styles.label, { color: colors.text }]}>Expected QR payload</Text>
-          <TextInput
+          <AppInput
             autoCapitalize="none"
             autoCorrect={false}
+            helper="The alarm only clears when the scanned value matches this payload exactly."
+            label="Expected QR payload"
             onChangeText={setExpectedQrPayload}
             placeholder="bathroom-checkpoint"
-            placeholderTextColor={colors.muted}
-            style={[
-              styles.input,
-              {
-                borderColor: colors.border,
-                color: colors.text,
-              },
-            ]}
             value={expectedQrPayload}
           />
 
-          <Pressable
-            accessibilityRole="button"
-            onPress={() => {
-              void handleOpenScanner();
-            }}
-            style={[
-              styles.scanButton,
-              {
-                borderColor: colors.border,
-              },
-            ]}>
-            <Text style={[styles.scanButtonText, { color: colors.text }]}>
-              {expectedQrPayload ? 'Rescan QR code' : 'Scan QR code'}
-            </Text>
-          </Pressable>
+          <View style={styles.actionRow}>
+            <AppButton
+              label={expectedQrPayload ? 'Rescan QR code' : 'Scan QR code'}
+              onPress={() => {
+                void handleOpenScanner();
+              }}
+              style={styles.actionFill}
+              variant="secondary"
+            />
+            {isScannerVisible ? (
+              <AppButton
+                label="Hide scanner"
+                onPress={() => setIsScannerVisible(false)}
+                style={styles.actionFill}
+                variant="ghost"
+              />
+            ) : null}
+          </View>
 
           {isScannerVisible && permission?.granted ? (
             <View style={styles.scannerSection}>
@@ -456,44 +489,33 @@ export default function CreateAlarmScreen() {
                 onBarcodeScanned={isScannerEnabled ? handleBarcodeScanned : undefined}
                 style={styles.camera}
               />
-              <Text style={[styles.scannerHint, { color: colors.muted }]}>
-                Scan the QR code you want this alarm to require.
+              <Text style={[TextPresets.body, { color: colors.muted }]}>
+                Scan the QR code this alarm should accept.
               </Text>
-              <Pressable
-                accessibilityRole="button"
-                onPress={() => setIsScannerVisible(false)}
-                style={[
-                  styles.hideScannerButton,
-                  {
-                    borderColor: colors.border,
-                  },
-                ]}>
-                <Text style={[styles.hideScannerButtonText, { color: colors.text }]}>
-                  Hide scanner
-                </Text>
-              </Pressable>
             </View>
           ) : null}
 
           {scannerMessage ? (
             <Text
               style={[
-                styles.helperText,
+                TextPresets.body,
                 {
-                  color: permission?.granted === false ? colors.danger : colors.muted,
+                  color: permission?.granted === false ? colors.danger : colors.textSoft,
                 },
               ]}>
               {scannerMessage}
             </Text>
           ) : null}
+        </AppCard>
 
-          <Text style={[styles.helperText, { color: colors.muted }]}>
-            Use the exact string encoded inside the QR code. The alarm only clears when that scan
-            matches perfectly.
-          </Text>
+        <AppCard elevated>
+          <SectionHeader
+            kicker="Step 3"
+            title="Rules"
+            description="Repeat and grace period."
+          />
 
-          <Text style={[styles.label, { color: colors.text }]}>Repeat</Text>
-          <View style={styles.repeatRow}>
+          <View style={styles.repeatGrid}>
             {REPEAT_OPTIONS.map((option) => {
               const isSelected = repeatSchedule === option.value;
 
@@ -503,84 +525,65 @@ export default function CreateAlarmScreen() {
                   accessibilityRole="button"
                   onPress={() => setRepeatSchedule(option.value)}
                   style={[
-                    styles.repeatButton,
+                    styles.optionCard,
                     {
-                      backgroundColor: isSelected ? `${colors.primary}14` : 'transparent',
+                      backgroundColor: isSelected ? colors.primarySurface : colors.elevated,
                       borderColor: isSelected ? colors.primary : colors.border,
                     },
                   ]}>
                   <Text
                     style={[
-                      styles.repeatButtonLabel,
+                      TextPresets.label,
                       {
                         color: isSelected ? colors.primary : colors.text,
                       },
                     ]}>
                     {option.label}
                   </Text>
-                  <Text style={[styles.repeatButtonHelp, { color: colors.muted }]}>
-                    {option.help}
-                  </Text>
+                  <Text style={[TextPresets.body, { color: colors.muted }]}>{option.help}</Text>
                 </Pressable>
               );
             })}
           </View>
 
-          <Text style={[styles.label, { color: colors.text }]}>Grace period in seconds</Text>
-          <TextInput
+          <AppInput
+            helper="Use at least 15 seconds. Shorter windows make misses far more likely."
             keyboardType="number-pad"
+            label="Grace period in seconds"
             onChangeText={setGracePeriodSeconds}
             placeholder="120"
-            placeholderTextColor={colors.muted}
-            style={[
-              styles.input,
-              {
-                borderColor: colors.border,
-                color: colors.text,
-              },
-            ]}
             value={gracePeriodSeconds}
           />
-        </View>
+        </AppCard>
 
-        <View
-          style={[
-            styles.section,
-            {
-              backgroundColor: colors.card,
-              borderColor: colors.border,
-            },
-          ]}>
-          <Text style={[styles.label, { color: colors.text }]}>Social accountability</Text>
+        <AppCard elevated>
+          <SectionHeader
+            kicker="Step 4"
+            title="Social accountability"
+            description="Private or shared."
+          />
+
           {!configured ? (
-            <Text style={[styles.helperText, { color: colors.muted }]}>
-              Connect Supabase on the account screen to attach alarms to circles and sync social outcomes.
-            </Text>
+            <SocialInfoCard
+              actionLabel="Open account"
+              colors={colors}
+              copy="Connect Supabase first so circles and shared outcomes can sync."
+              onPress={() => router.push('/account')}
+              title="Social sync is not configured"
+            />
           ) : !user || !isProfileComplete ? (
-            <>
-              <Text style={[styles.helperText, { color: colors.muted }]}>
-                Sign in and finish your profile before making an alarm social.
-              </Text>
-              <Pressable
-                accessibilityRole="button"
-                onPress={() => router.push('/account')}
-                style={[
-                  styles.scanButton,
-                  {
-                    borderColor: colors.border,
-                  },
-                ]}>
-                <Text style={[styles.scanButtonText, { color: colors.text }]}>Open account</Text>
-              </Pressable>
-            </>
+            <SocialInfoCard
+              actionLabel="Finish account"
+              colors={colors}
+              copy="Sign in and finish your profile before attaching alarms to a circle."
+              onPress={() => router.push('/account')}
+              title="Profile required"
+            />
           ) : isSocialOptionsLoading ? (
-            <Text style={[styles.helperText, { color: colors.muted }]}>Loading your circles...</Text>
+            <Text style={[TextPresets.body, { color: colors.muted }]}>Loading your circles...</Text>
           ) : (
             <>
-              <Text style={[styles.helperText, { color: colors.muted }]}>
-                Pick a circle if this alarm should feed into accountability updates. Leaving it private keeps all outcomes local-only.
-              </Text>
-              <View style={styles.circleList}>
+              <View style={styles.selectionList}>
                 <Pressable
                   accessibilityRole="button"
                   onPress={() => {
@@ -589,23 +592,17 @@ export default function CreateAlarmScreen() {
                     setShareMisses(false);
                   }}
                   style={[
-                    styles.circleOption,
+                    styles.optionCard,
                     {
-                      backgroundColor: !selectedCircleId ? `${colors.primary}14` : 'transparent',
+                      backgroundColor: !selectedCircleId ? colors.primarySurface : colors.elevated,
                       borderColor: !selectedCircleId ? colors.primary : colors.border,
                     },
                   ]}>
-                  <Text
-                    style={[
-                      styles.circleOptionTitle,
-                      {
-                        color: !selectedCircleId ? colors.primary : colors.text,
-                      },
-                    ]}>
-                    Keep this alarm private
+                  <Text style={[TextPresets.label, { color: !selectedCircleId ? colors.primary : colors.text }]}>
+                    Private alarm
                   </Text>
-                  <Text style={[styles.circleOptionText, { color: colors.muted }]}>
-                    The alarm still works normally, but it will not be attached to a circle.
+                  <Text style={[TextPresets.body, { color: colors.muted }]}>
+                    Nothing is shared.
                   </Text>
                 </Pressable>
 
@@ -618,23 +615,17 @@ export default function CreateAlarmScreen() {
                       accessibilityRole="button"
                       onPress={() => setSelectedCircleId(circle.id)}
                       style={[
-                        styles.circleOption,
+                        styles.optionCard,
                         {
-                          backgroundColor: isSelected ? `${colors.primary}14` : 'transparent',
+                          backgroundColor: isSelected ? colors.primarySurface : colors.elevated,
                           borderColor: isSelected ? colors.primary : colors.border,
                         },
                       ]}>
-                      <Text
-                        style={[
-                          styles.circleOptionTitle,
-                          {
-                            color: isSelected ? colors.primary : colors.text,
-                          },
-                        ]}>
+                      <Text style={[TextPresets.label, { color: isSelected ? colors.primary : colors.text }]}>
                         {circle.name}
                       </Text>
-                      <Text style={[styles.circleOptionText, { color: colors.muted }]}>
-                        {circle.memberCount} member{circle.memberCount === 1 ? '' : 's'} in this circle
+                      <Text style={[TextPresets.body, { color: colors.muted }]}>
+                        {circle.memberCount} member{circle.memberCount === 1 ? '' : 's'}
                       </Text>
                     </Pressable>
                   );
@@ -642,24 +633,14 @@ export default function CreateAlarmScreen() {
               </View>
 
               {availableCircles.length === 0 ? (
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={() => router.push('/circles' as never)}
-                  style={[
-                    styles.scanButton,
-                    {
-                      borderColor: colors.border,
-                    },
-                  ]}>
-                  <Text style={[styles.scanButtonText, { color: colors.text }]}>Create or join a circle</Text>
-                </Pressable>
+                <AppButton label="Create or join a circle" onPress={() => router.push('/circles')} variant="secondary" />
               ) : (
                 <>
                   <View style={[styles.preferenceRow, { borderColor: colors.border }]}>
                     <View style={styles.preferenceCopy}>
-                      <Text style={[styles.preferenceTitle, { color: colors.text }]}>Share successful clears</Text>
-                      <Text style={[styles.preferenceText, { color: colors.muted }]}>
-                        Post a circle event when this alarm is completed in time.
+                      <Text style={[TextPresets.label, { color: colors.text }]}>Share successful clears</Text>
+                      <Text style={[TextPresets.body, { color: colors.muted }]}>
+                        Share when this alarm is cleared.
                       </Text>
                     </View>
                     <Switch
@@ -672,9 +653,9 @@ export default function CreateAlarmScreen() {
 
                   <View style={[styles.preferenceRow, { borderColor: colors.border }]}>
                     <View style={styles.preferenceCopy}>
-                      <Text style={[styles.preferenceTitle, { color: colors.text }]}>Share missed alarms</Text>
-                      <Text style={[styles.preferenceText, { color: colors.muted }]}>
-                        Let the social sync layer send the miss outcome to the selected circle.
+                      <Text style={[TextPresets.label, { color: colors.text }]}>Share missed alarms</Text>
+                      <Text style={[TextPresets.body, { color: colors.muted }]}>
+                        Share when this alarm is missed.
                       </Text>
                     </View>
                     <Switch
@@ -688,47 +669,60 @@ export default function CreateAlarmScreen() {
               )}
             </>
           )}
+        </AppCard>
+
+        <View style={styles.bottomActions}>
+          <AppButton
+            disabled={isSaving}
+            label={isSaving ? 'Saving...' : primaryActionLabel}
+            onPress={handleSave}
+            style={styles.bottomAction}
+          />
+          <AppButton label="Cancel" onPress={() => router.back()} style={styles.bottomAction} variant="secondary" />
         </View>
-
-        <View
-          style={[
-            styles.infoCard,
-            {
-              backgroundColor: colors.card,
-              borderColor: colors.border,
-            },
-          ]}>
-          <Text style={[styles.infoTitle, { color: colors.text }]}>How the MVP alarm works</Text>
-          <Text style={[styles.infoText, { color: colors.muted }]}>
-            This version schedules the alarm, supports recurring daily routines, and gives you a
-            short window to scan the matching QR checkpoint before each run is marked as missed.
-          </Text>
-        </View>
-
-        <Pressable
-          accessibilityRole="button"
-          disabled={isSaving}
-          onPress={handleSave}
-          style={[
-            styles.primaryButton,
-            {
-              backgroundColor: colors.primary,
-              opacity: isSaving ? 0.7 : 1,
-            },
-          ]}>
-          <Text style={[styles.primaryButtonText, { color: colors.primaryText }]}>
-            {isSaving ? 'Saving...' : primaryActionLabel}
-          </Text>
-        </Pressable>
-
-        <Pressable
-          accessibilityRole="button"
-          onPress={() => router.back()}
-          style={[styles.secondaryButton, { borderColor: colors.border }]}>
-          <Text style={[styles.secondaryButtonText, { color: colors.text }]}>Cancel</Text>
-        </Pressable>
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+function SocialInfoCard({
+  title,
+  copy,
+  actionLabel,
+  onPress,
+  colors,
+}: {
+  title: string;
+  copy: string;
+  actionLabel: string;
+  onPress: () => void;
+  colors: ReturnType<typeof getAppColors>;
+}) {
+  return (
+    <View style={styles.socialInfo}>
+      <Text style={[TextPresets.title, { color: colors.text }]}>{title}</Text>
+      <Text style={[TextPresets.body, { color: colors.muted }]}>{copy}</Text>
+      <AppButton label={actionLabel} onPress={onPress} style={styles.socialAction} variant="secondary" />
+    </View>
+  );
+}
+
+function alertLabelRequired() {
+  Alert.alert('Checkpoint label required', 'Give this alarm a label so it is easy to recognize.');
+}
+
+function alertPayloadRequired() {
+  Alert.alert('QR payload required', 'Enter the exact QR payload that must be scanned when the alarm rings.');
+}
+
+function alertGraceRequired() {
+  Alert.alert('Grace period required', 'Set a grace period of at least 15 seconds.');
+}
+
+function alertNotificationPermission() {
+  Alert.alert(
+    'Notification permission needed',
+    'Notifications are required so the alarm can ring on time.'
   );
 }
 
@@ -736,182 +730,138 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
   },
+  backdropOrb: {
+    borderRadius: 220,
+    height: 240,
+    opacity: 0.1,
+    position: 'absolute',
+    width: 240,
+  },
+  backdropTop: {
+    right: -70,
+    top: 40,
+  },
+  backdropBottom: {
+    bottom: 180,
+    left: -90,
+  },
   content: {
-    gap: 18,
-    padding: 20,
-    paddingBottom: 36,
+    gap: Spacing.xl,
+    padding: Spacing.xl,
+    paddingBottom: Spacing.xxl,
   },
-  header: {
-    gap: 8,
+  heroCard: {
+    gap: Spacing.lg,
   },
-  title: {
-    fontSize: 32,
+  heroHeader: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    gap: Spacing.md,
+    justifyContent: 'space-between',
+  },
+  heroCopy: {
+    flex: 1,
+    gap: Spacing.xs,
+  },
+  heroTitle: {
+    fontFamily: Fonts.rounded,
+    fontSize: Type.titleLg,
     fontWeight: '800',
+    lineHeight: 32,
   },
-  subtitle: {
-    fontSize: 15,
-    lineHeight: 22,
-  },
-  section: {
-    borderRadius: 20,
+  heroPreview: {
+    borderRadius: Radius.lg,
     borderWidth: 1,
-    gap: 12,
-    padding: 18,
+    gap: Spacing.md,
+    padding: Spacing.lg,
   },
-  label: {
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  timePreview: {
-    fontSize: 28,
+  heroTime: {
+    fontFamily: Fonts.rounded,
+    fontSize: 34,
     fontWeight: '800',
+    lineHeight: 38,
   },
-  input: {
-    borderRadius: 14,
-    borderWidth: 1,
-    fontSize: 16,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+  previewStats: {
+    flexDirection: 'row',
+    gap: Spacing.sm,
   },
-  scanButton: {
-    alignItems: 'center',
-    borderRadius: 14,
-    borderWidth: 1,
-    paddingVertical: 12,
+  previewMetric: {
+    flex: 1,
+    gap: Spacing.xs,
   },
-  scanButtonText: {
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  presetList: {
-    gap: 10,
-  },
-  circleList: {
-    gap: 10,
-  },
-  circleOption: {
-    borderRadius: 16,
-    borderWidth: 1,
-    gap: 4,
-    padding: 14,
-  },
-  circleOptionTitle: {
-    fontSize: 15,
+  sourceTitle: {
+    fontFamily: Fonts.rounded,
+    fontSize: 22,
     fontWeight: '700',
+    lineHeight: 28,
   },
-  circleOptionText: {
-    fontSize: 13,
-    lineHeight: 18,
+  selectionList: {
+    gap: Spacing.sm,
   },
-  presetChip: {
-    borderRadius: 16,
-    gap: 4,
-    padding: 14,
+  selectionCard: {
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    gap: Spacing.xs,
+    padding: Spacing.md,
   },
-  presetLabel: {
-    fontSize: 15,
-    fontWeight: '700',
+  timePanel: {
+    gap: Spacing.xs,
   },
-  presetPayload: {
-    fontSize: 13,
-    lineHeight: 18,
+  timeValue: {
+    fontFamily: Fonts.rounded,
+    fontSize: 40,
+    fontWeight: '800',
+    lineHeight: 42,
+  },
+  actionRow: {
+    flexDirection: 'row',
+    gap: Spacing.sm,
+  },
+  actionFill: {
+    flex: 1,
   },
   scannerSection: {
-    gap: 10,
+    gap: Spacing.sm,
   },
   camera: {
-    borderRadius: 18,
-    height: 240,
+    borderRadius: Radius.lg,
+    height: 280,
     overflow: 'hidden',
     width: '100%',
   },
-  scannerHint: {
-    fontSize: 13,
-    lineHeight: 18,
+  repeatGrid: {
+    flexDirection: 'row',
+    gap: Spacing.sm,
   },
-  hideScannerButton: {
-    alignItems: 'center',
-    borderRadius: 14,
+  optionCard: {
+    borderRadius: Radius.md,
     borderWidth: 1,
-    paddingVertical: 12,
-  },
-  hideScannerButtonText: {
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  helperText: {
-    fontSize: 13,
-    lineHeight: 18,
+    flex: 1,
+    gap: Spacing.xs,
+    padding: Spacing.md,
   },
   preferenceRow: {
     alignItems: 'center',
-    borderRadius: 16,
-    borderWidth: 1,
+    borderTopWidth: 1,
     flexDirection: 'row',
-    gap: 14,
-    justifyContent: 'space-between',
-    padding: 14,
+    gap: Spacing.md,
+    paddingTop: Spacing.md,
   },
   preferenceCopy: {
     flex: 1,
-    gap: 4,
+    gap: Spacing.xs,
   },
-  preferenceTitle: {
-    fontSize: 15,
-    fontWeight: '700',
+  socialInfo: {
+    gap: Spacing.md,
   },
-  preferenceText: {
-    fontSize: 13,
-    lineHeight: 18,
+  socialAction: {
+    alignSelf: 'flex-start',
   },
-  repeatRow: {
-    gap: 10,
+  bottomActions: {
+    flexDirection: 'row',
+    gap: Spacing.sm,
   },
-  repeatButton: {
-    borderRadius: 16,
-    borderWidth: 1,
-    gap: 2,
-    padding: 14,
-  },
-  repeatButtonLabel: {
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  repeatButtonHelp: {
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  infoCard: {
-    borderRadius: 20,
-    borderWidth: 1,
-    gap: 8,
-    padding: 18,
-  },
-  infoTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  infoText: {
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  primaryButton: {
-    alignItems: 'center',
-    borderRadius: 16,
-    paddingVertical: 16,
-  },
-  primaryButtonText: {
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  secondaryButton: {
-    alignItems: 'center',
-    borderRadius: 16,
-    borderWidth: 1,
-    paddingVertical: 16,
-  },
-  secondaryButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
+  bottomAction: {
+    flex: 1,
   },
 });
