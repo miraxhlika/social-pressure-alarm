@@ -12,32 +12,55 @@ import { SocialSessionProvider } from '@/providers/social-session-provider';
 export default function RootLayout() {
   const colorScheme = useColorScheme();
   const colors = getAppColors(colorScheme);
+  const navigationTheme = {
+    ...(colorScheme === 'dark' ? DarkTheme : DefaultTheme),
+    colors: {
+      ...(colorScheme === 'dark' ? DarkTheme.colors : DefaultTheme.colors),
+      background: colors.canvas,
+      card: colors.card,
+      border: colors.border,
+      notification: colors.primary,
+      primary: colors.primary,
+      text: colors.text,
+    },
+  };
 
   useAlarmRuntime();
   useSocialRuntime();
 
   return (
     <SocialSessionProvider>
-      <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+      <ThemeProvider value={navigationTheme}>
         <Stack
           screenOptions={{
+            animation: 'fade_from_bottom',
             headerShown: false,
             contentStyle: {
               backgroundColor: colors.canvas,
             },
           }}>
-          <Stack.Screen name="index" />
-          <Stack.Screen name="create" />
+          <Stack.Screen name="(tabs)" />
+          <Stack.Screen
+            name="create"
+            options={{
+              animation: 'slide_from_bottom',
+              presentation: 'modal',
+            }}
+          />
           <Stack.Screen
             name="ringing"
             options={{
+              animation: 'fade',
               gestureEnabled: false,
             }}
           />
-          <Stack.Screen name="success" />
+          <Stack.Screen
+            name="success"
+            options={{
+              animation: 'slide_from_right',
+            }}
+          />
           <Stack.Screen name="paywall" />
-          <Stack.Screen name="account" />
-          <Stack.Screen name="circles" />
         </Stack>
         <StatusBar style={colorScheme === 'dark' ? 'light' : 'dark'} />
       </ThemeProvider>

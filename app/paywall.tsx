@@ -1,8 +1,11 @@
-import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Alert, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 
-import { getAppColors } from '@/constants/theme';
+import { AppButton } from '@/components/ui/app-button';
+import { AppCard } from '@/components/ui/app-card';
+import { StatusPill } from '@/components/ui/status-pill';
+import { Fonts, getAppColors, Spacing, TextPresets, Type } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 
 export default function PaywallScreen() {
@@ -12,39 +15,35 @@ export default function PaywallScreen() {
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.canvas }]}>
       <View style={styles.content}>
-        <View
-          style={[
-            styles.card,
-            {
-              backgroundColor: colors.card,
-              borderColor: colors.border,
-            },
-          ]}>
-          <Text style={[styles.kicker, { color: colors.primary }]}>Free limit reached</Text>
-          <Text style={[styles.title, { color: colors.text }]}>
-            Stop relying on willpower. Use pressure.
-          </Text>
-          <Text style={[styles.subtitle, { color: colors.muted }]}>
-            You&apos;ve used the 3 free alarm creations in this MVP. Payments are not implemented
-            yet, so this screen is a placeholder for the premium upgrade flow.
-          </Text>
+        <AppCard elevated tone="primary" style={styles.card}>
+          <View style={styles.header}>
+            <View style={styles.copy}>
+              <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Free limit reached</Text>
+              <Text style={[styles.title, { color: colors.text }]}>More alarms are coming soon.</Text>
+              <Text style={[TextPresets.body, { color: colors.textSoft }]}>
+                You have used the 3 free alarm slots. Expanded limits are not available yet.
+              </Text>
+            </View>
+            <StatusPill label="3 of 3 used" tone="primary" />
+          </View>
 
-          <Pressable
-            accessibilityRole="button"
-            onPress={() => Alert.alert('Coming soon', 'Payments are intentionally not implemented yet.')}
-            style={[styles.primaryButton, { backgroundColor: colors.primary }]}>
-            <Text style={[styles.primaryButtonText, { color: colors.primaryText }]}>
-              Unlock Unlimited Alarms
-            </Text>
-          </Pressable>
+          <AppCard tone="muted" style={styles.featureCard}>
+            <Text style={[TextPresets.label, { color: colors.text }]}>Planned</Text>
+            <View style={styles.featureList}>
+              <Text style={[TextPresets.body, { color: colors.muted }]}>Unlimited checkpoint alarms</Text>
+              <Text style={[TextPresets.body, { color: colors.muted }]}>More reusable checkpoint presets</Text>
+              <Text style={[TextPresets.body, { color: colors.muted }]}>More flexible account limits</Text>
+            </View>
+          </AppCard>
 
-          <Pressable
-            accessibilityRole="button"
-            onPress={() => router.replace('/')}
-            style={[styles.secondaryButton, { borderColor: colors.border }]}>
-            <Text style={[styles.secondaryButtonText, { color: colors.text }]}>Back Home</Text>
-          </Pressable>
-        </View>
+          <View style={styles.buttonGroup}>
+            <AppButton
+              label="Coming soon"
+              onPress={() => Alert.alert('Coming soon', 'Expanded limits are not available yet.')}
+            />
+            <AppButton label="Back to alarms" onPress={() => router.replace('/alarms')} variant="secondary" />
+          </View>
+        </AppCard>
       </View>
     </SafeAreaView>
   );
@@ -57,46 +56,31 @@ const styles = StyleSheet.create({
   content: {
     flex: 1,
     justifyContent: 'center',
-    padding: 24,
+    padding: Spacing.xl,
   },
   card: {
-    borderRadius: 24,
-    borderWidth: 1,
-    gap: 14,
-    padding: 22,
+    gap: Spacing.lg,
   },
-  kicker: {
-    fontSize: 15,
-    fontWeight: '700',
-    textTransform: 'uppercase',
+  header: {
+    alignItems: 'flex-start',
+    gap: Spacing.md,
+  },
+  copy: {
+    gap: Spacing.xs,
   },
   title: {
-    fontSize: 32,
+    fontFamily: Fonts.rounded,
+    fontSize: Type.titleLg,
     fontWeight: '800',
-    lineHeight: 36,
+    lineHeight: 32,
   },
-  subtitle: {
-    fontSize: 16,
-    lineHeight: 24,
+  featureCard: {
+    gap: Spacing.sm,
   },
-  primaryButton: {
-    alignItems: 'center',
-    borderRadius: 16,
-    marginTop: 8,
-    paddingVertical: 16,
+  featureList: {
+    gap: Spacing.xs,
   },
-  primaryButtonText: {
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  secondaryButton: {
-    alignItems: 'center',
-    borderRadius: 16,
-    borderWidth: 1,
-    paddingVertical: 16,
-  },
-  secondaryButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
+  buttonGroup: {
+    gap: Spacing.sm,
   },
 });

@@ -1,13 +1,18 @@
 import { useEffect, useMemo, useState } from 'react';
-import { DimensionValue, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { DimensionValue, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
-import { getAppColors } from '@/constants/theme';
+import { AppButton } from '@/components/ui/app-button';
+import { AppCard } from '@/components/ui/app-card';
+import { SectionHeader } from '@/components/ui/section-header';
+import { StatTile } from '@/components/ui/stat-tile';
+import { StatusPill } from '@/components/ui/status-pill';
+import { Fonts, getAppColors, Radius, Spacing, TextPresets, Type } from '@/constants/theme';
+import { useColorScheme } from '@/hooks/use-color-scheme';
 import { readAlarmStore } from '@/lib/alarms';
 import { getProgressSummary, ProgressSummary } from '@/lib/progress';
 import { getSocialQueueSummary } from '@/lib/social/queue';
-import { useColorScheme } from '@/hooks/use-color-scheme';
 import { Alarm, SuccessHistoryEntry } from '@/types/alarm';
 
 type SuccessState = {
@@ -44,26 +49,37 @@ function getSuccessShareStatus(
   if (!alarm.socialSettings?.circleId || !alarm.socialSettings.shareSuccesses) {
     return {
       tone: 'private',
-      title: 'Stayed private',
-      copy: 'This successful clear updated your own progress only and was not posted to a circle.',
+      title: 'Private',
+      copy: 'This result was saved only to your account.',
     };
   }
 
   if (queuedEvent) {
     return {
       tone: 'queued',
-      title: 'Queued for your circle',
+      title: 'Queued',
       copy: queuedEvent.lastSyncError
-        ? 'Sharing hit a sync issue, so the app kept it in the retry queue and will try again automatically.'
-        : 'This successful clear is waiting in the local sync queue and will appear in the circle feed after delivery.',
+        ? 'Sharing hit a sync issue and will retry automatically.'
+        : 'This result is waiting to sync to your circle.',
     };
   }
 
   return {
     tone: 'shared',
-    title: 'Shared to your circle',
-    copy: 'This successful clear has already moved past the local queue and is ready for the circle activity feed.',
+    title: 'Shared',
+    copy: 'This result is already available in your circle.',
   };
+}
+
+function getShareTone(tone?: SuccessShareStatus['tone']) {
+  switch (tone) {
+    case 'shared':
+      return 'success' as const;
+    case 'queued':
+      return 'primary' as const;
+    default:
+      return 'default' as const;
+  }
 }
 
 export default function SuccessScreen() {
@@ -103,168 +119,133 @@ export default function SuccessScreen() {
 
     return `${Math.max(8, Math.round(successState.summary.milestoneProgress.progressRatio * 100))}%` as DimensionValue;
   }, [successState]);
+
   const badgeList = successState?.summary.activeBadges ?? [];
-  const shareAccentColor =
-    successState?.shareStatus?.tone === 'shared'
-      ? colors.success
-      : successState?.shareStatus?.tone === 'queued'
-        ? colors.primary
-        : colors.text;
+  const shareTone = getShareTone(successState?.shareStatus?.tone);
 
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.canvas }]}>
-      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-        <Text style={[styles.kicker, { color: colors.success }]}>QR validated</Text>
-        <Text style={[styles.title, { color: colors.text }]}>Checkpoint cleared.</Text>
-        <Text style={[styles.subtitle, { color: colors.muted }]}>
-          {params.label
-            ? `The ${params.label} checkpoint was scanned in time. Your streak keeps going.`
-            : 'The correct QR checkpoint was scanned before the timer expired.'}
-        </Text>
+      <ScrollView
+        contentContainerStyle={styles.content}
+        contentInsetAdjustmentBehavior="automatic"
+        showsVerticalScrollIndicator={false}>
+        <AppCard elevated tone="success" style={styles.heroCard}>
+          <View style={styles.heroHeader}>
+            <View style={styles.heroCopy}>
+              <Text style={[TextPresets.eyebrow, { color: colors.success }]}>Alarm cleared</Text>
+              <Text style={[styles.title, { color: colors.text }]}>On time.</Text>
+              <Text style={[TextPresets.body, { color: colors.textSoft }]}>
+                {params.label
+                  ? `${params.label} was cleared in time.`
+                  : 'The QR code matched before the timer expired.'}
+              </Text>
+            </View>
+            <StatusPill label="Validated" tone="success" />
+          </View>
 
-        <View
-          style={[
-            styles.heroCard,
-            {
-              backgroundColor: colors.card,
-              borderColor: colors.border,
-            },
-          ]}>
-          <Text style={[styles.heroLabel, { color: colors.muted }]}>Checkpoint title</Text>
-          <Text style={[styles.heroValue, { color: colors.text }]}>
-            {successState?.summary.checkpointTitle ?? 'Rookie Scanner'}
-          </Text>
-          <Text style={[styles.heroHelp, { color: colors.muted }]}>
-            {successState?.summary.nextGoalCopy ?? 'Keep stacking clears to unlock the next milestone.'}
-          </Text>
+          <View style={[styles.heroPanel, { backgroundColor: colors.elevated, borderColor: colors.success }]}>
+            <Text style={[TextPresets.label, { color: colors.muted }]}>Current level</Text>
+            <Text style={[styles.heroValue, { color: colors.text }]}>
+              {successState?.summary.checkpointTitle ?? 'Getting Started'}
+            </Text>
+            <Text style={[TextPresets.body, { color: colors.textSoft }]}>
+              {successState?.summary.nextGoalCopy ?? 'Keep going to reach the next level.'}
+            </Text>
+          </View>
+        </AppCard>
+
+        <SectionHeader
+          kicker="Result"
+          title="This run"
+          description="What counted and what changed."
+        />
+
+        <View style={styles.statGrid}>
+          <StatTile label="Current streak" tone="primary" value={`${successState?.currentStreak ?? '--'}`} />
+          <StatTile label="Best streak" value={`${successState?.longestStreak ?? '--'}`} />
+          <StatTile
+            helper={successState?.successEntry ? 'Time from ring to valid QR scan' : undefined}
+            label="Time to scan"
+            tone="success"
+            value={formatTimeToScan(successState?.successEntry ?? null)}
+          />
         </View>
 
         {successState?.shareStatus ? (
-          <View
-            style={[
-              styles.shareCard,
-              {
-                backgroundColor: colors.card,
-                borderColor: colors.border,
-              },
-            ]}>
-            <Text style={[styles.sectionTitle, { color: colors.text }]}>Social result</Text>
-            <Text style={[styles.shareTitle, { color: shareAccentColor }]}>
+          <AppCard elevated tone={shareTone === 'success' ? 'success' : shareTone === 'primary' ? 'primary' : 'default'}>
+            <View style={styles.shareHeader}>
+              <SectionHeader
+                title="Social result"
+                description={successState.shareStatus.copy}
+              />
+              <StatusPill
+                label={successState.shareStatus.tone === 'shared' ? 'Delivered' : successState.shareStatus.tone === 'queued' ? 'Queued' : 'Private'}
+                tone={shareTone}
+              />
+            </View>
+            <Text style={[styles.shareTitle, { color: shareTone === 'success' ? colors.success : shareTone === 'primary' ? colors.primary : colors.text }]}>
               {successState.shareStatus.title}
             </Text>
-            <Text style={[styles.shareCopy, { color: colors.muted }]}>
-              {successState.shareStatus.copy}
-            </Text>
-          </View>
+          </AppCard>
         ) : null}
 
-        <View style={styles.statsRow}>
-          <View
-            style={[
-              styles.statCard,
-              {
-                backgroundColor: colors.card,
-                borderColor: colors.border,
-              },
-            ]}>
-            <Text style={[styles.statValue, { color: colors.primary }]}>
-              {successState?.currentStreak ?? '--'}
-            </Text>
-            <Text style={[styles.statLabel, { color: colors.muted }]}>Current streak</Text>
-          </View>
-          <View
-            style={[
-              styles.statCard,
-              {
-                backgroundColor: colors.card,
-                borderColor: colors.border,
-              },
-            ]}>
-            <Text style={[styles.statValue, { color: colors.text }]}>
-              {successState?.longestStreak ?? '--'}
-            </Text>
-            <Text style={[styles.statLabel, { color: colors.muted }]}>Best streak</Text>
-          </View>
-          <View
-            style={[
-              styles.statCard,
-              {
-                backgroundColor: colors.card,
-                borderColor: colors.border,
-              },
-            ]}>
-            <Text style={[styles.statValue, { color: colors.success }]}>
-              {formatTimeToScan(successState?.successEntry ?? null)}
-            </Text>
-            <Text style={[styles.statLabel, { color: colors.muted }]}>Time to scan</Text>
-          </View>
-        </View>
-
-        <View
-          style={[
-            styles.milestoneCard,
-            {
-              backgroundColor: colors.card,
-              borderColor: colors.border,
-            },
-          ]}>
-          <Text style={[styles.sectionTitle, { color: colors.text }]}>Milestone progress</Text>
+        <AppCard elevated>
+          <SectionHeader
+            kicker="Progress"
+            title="Progress"
+            description={
+              successState?.summary.nextStreakMilestone
+                ? `Next up: ${successState.summary.nextStreakMilestone.title}`
+                : 'You are in the highest streak tier.'
+            }
+          />
           <Text style={[styles.milestoneTitle, { color: colors.primary }]}>
             {successState?.summary.currentStreakMilestone?.title ??
               successState?.summary.milestoneProgress.currentLabel ??
-              'Rookie Scanner'}
-          </Text>
-          <Text style={[styles.milestoneSubtitle, { color: colors.muted }]}>
-            {successState?.summary.nextStreakMilestone
-              ? `Next up: ${successState.summary.nextStreakMilestone.title}`
-              : 'You have cleared every currently defined streak milestone.'}
+              'Getting Started'}
           </Text>
           <View style={[styles.progressTrack, { backgroundColor: colors.border }]}>
             <View style={[styles.progressFill, { backgroundColor: colors.primary, width: progressWidth }]} />
           </View>
-          <Text style={[styles.progressCopy, { color: colors.muted }]}>
-            {successState?.summary.nextGoalCopy ?? 'Keep going to unlock the next reward tier.'}
+          <Text style={[TextPresets.body, { color: colors.muted }]}>
+            {successState?.summary.nextGoalCopy ?? 'Keep going to reach the next level.'}
           </Text>
-        </View>
+        </AppCard>
 
-        <View
-          style={[
-            styles.badgesCard,
-            {
-              backgroundColor: colors.card,
-              borderColor: colors.border,
-            },
-          ]}>
-          <Text style={[styles.sectionTitle, { color: colors.text }]}>Unlocked today</Text>
+        <AppCard elevated>
+          <SectionHeader
+            kicker="Badges"
+            title="Recent badges"
+            description="Small progress markers."
+          />
           <View style={styles.badgeList}>
             {(badgeList.length > 0
               ? badgeList
               : [
                   {
                     id: 'showed-up',
-                    label: 'Showed Up',
-                    description: 'You cleared the checkpoint before the timer hit zero.',
+                    label: 'Cleared',
+                    description: 'You finished before the timer ran out.',
                   },
                 ]
             ).map((badge) => (
-              <View key={badge.id} style={[styles.badgeChip, { backgroundColor: `${colors.primary}14` }]}>
-                <Text style={[styles.badgeLabel, { color: colors.primary }]}>{badge.label}</Text>
-                <Text style={[styles.badgeDescription, { color: colors.muted }]}>
-                  {badge.description}
-                </Text>
+              <View
+                key={badge.id}
+                style={[
+                  styles.badgeChip,
+                  {
+                    backgroundColor: colors.elevated,
+                    borderColor: colors.border,
+                  },
+                ]}>
+                <Text style={[TextPresets.label, { color: colors.primary }]}>{badge.label}</Text>
+                <Text style={[TextPresets.body, { color: colors.muted }]}>{badge.description}</Text>
               </View>
             ))}
           </View>
-        </View>
+        </AppCard>
 
-        <Pressable
-          accessibilityRole="button"
-          onPress={() => router.replace('/')}
-          style={[styles.primaryButton, { backgroundColor: colors.primary }]}>
-          <Text style={[styles.primaryButtonText, { color: colors.primaryText }]}>
-            Back Home
-          </Text>
-        </Pressable>
+        <AppButton label="Back to today" onPress={() => router.replace('/')} />
       </ScrollView>
     </SafeAreaView>
   );
@@ -275,140 +256,80 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   content: {
-    gap: 18,
-    padding: 24,
-    paddingBottom: 40,
-  },
-  kicker: {
-    fontSize: 16,
-    fontWeight: '700',
-    marginBottom: 10,
-    textAlign: 'center',
-    textTransform: 'uppercase',
-  },
-  title: {
-    fontSize: 38,
-    fontWeight: '800',
-    lineHeight: 42,
-    textAlign: 'center',
-  },
-  subtitle: {
-    fontSize: 18,
-    lineHeight: 26,
-    textAlign: 'center',
+    gap: Spacing.xl,
+    padding: Spacing.xl,
+    paddingBottom: Spacing.xxl,
   },
   heroCard: {
-    borderRadius: 22,
-    borderWidth: 1,
-    gap: 8,
-    padding: 20,
+    gap: Spacing.lg,
   },
-  heroLabel: {
-    fontSize: 13,
-    fontWeight: '700',
-    textTransform: 'uppercase',
+  heroHeader: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    gap: Spacing.md,
+    justifyContent: 'space-between',
+  },
+  heroCopy: {
+    flex: 1,
+    gap: Spacing.xs,
+  },
+  title: {
+    fontFamily: Fonts.rounded,
+    fontSize: 36,
+    fontWeight: '800',
+    lineHeight: 40,
+  },
+  heroPanel: {
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    gap: Spacing.xs,
+    padding: Spacing.lg,
   },
   heroValue: {
-    fontSize: 28,
+    fontFamily: Fonts.rounded,
+    fontSize: Type.titleLg,
     fontWeight: '800',
+    lineHeight: 32,
   },
-  heroHelp: {
-    fontSize: 14,
-    lineHeight: 20,
+  statGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.md,
   },
-  shareCard: {
-    borderRadius: 22,
-    borderWidth: 1,
-    gap: 8,
-    padding: 20,
+  shareHeader: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    gap: Spacing.md,
+    justifyContent: 'space-between',
   },
   shareTitle: {
+    fontFamily: Fonts.rounded,
     fontSize: 22,
-    fontWeight: '800',
-  },
-  shareCopy: {
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  statsRow: {
-    flexDirection: 'row',
-    gap: 10,
-  },
-  statCard: {
-    borderRadius: 20,
-    borderWidth: 1,
-    flex: 1,
-    gap: 6,
-    padding: 16,
-  },
-  statValue: {
-    fontSize: 28,
-    fontWeight: '800',
-  },
-  statLabel: {
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  milestoneCard: {
-    borderRadius: 22,
-    borderWidth: 1,
-    gap: 10,
-    padding: 20,
-  },
-  sectionTitle: {
-    fontSize: 16,
     fontWeight: '700',
+    lineHeight: 28,
   },
   milestoneTitle: {
+    fontFamily: Fonts.rounded,
     fontSize: 24,
     fontWeight: '800',
-  },
-  milestoneSubtitle: {
-    fontSize: 14,
-    lineHeight: 20,
+    lineHeight: 30,
   },
   progressTrack: {
-    borderRadius: 999,
+    borderRadius: Radius.pill,
     height: 10,
     overflow: 'hidden',
   },
   progressFill: {
-    borderRadius: 999,
+    borderRadius: Radius.pill,
     height: '100%',
   },
-  progressCopy: {
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  badgesCard: {
-    borderRadius: 22,
-    borderWidth: 1,
-    gap: 12,
-    padding: 20,
-  },
   badgeList: {
-    gap: 10,
+    gap: Spacing.sm,
   },
   badgeChip: {
-    borderRadius: 18,
-    gap: 4,
-    padding: 14,
-  },
-  badgeLabel: {
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  badgeDescription: {
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  primaryButton: {
-    alignItems: 'center',
-    borderRadius: 16,
-    paddingVertical: 16,
-  },
-  primaryButtonText: {
-    fontSize: 16,
-    fontWeight: '700',
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    gap: Spacing.xs,
+    padding: Spacing.md,
   },
 });

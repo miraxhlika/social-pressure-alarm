@@ -1,7 +1,10 @@
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
+import { AppCard } from '@/components/ui/app-card';
+import { AppButton } from '@/components/ui/app-button';
+import { StatusPill } from '@/components/ui/status-pill';
+import { Fonts, Radius, getAppColors, Spacing, TextPresets, Type } from '@/constants/theme';
 import { getAlarmPhase, formatAlarmTime, formatRepeatSchedule, formatScheduledFor } from '@/lib/alarms';
-import { getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { Alarm } from '@/types/alarm';
 
@@ -16,144 +19,164 @@ type AlarmCardProps = {
 const STATUS_COPY = {
   inactive: 'Cleared',
   missed: 'Missed',
-  ringing: 'Scan checkpoint',
+  ringing: 'Scan now',
   scheduled: 'Scheduled',
   unscheduled: 'Draft',
+} as const;
+
+const STATUS_TONES = {
+  inactive: 'default',
+  missed: 'danger',
+  ringing: 'warning',
+  scheduled: 'primary',
+  unscheduled: 'default',
 } as const;
 
 export function AlarmCard({ alarm, onDelete, onEdit, onReschedule, onReuse }: AlarmCardProps) {
   const colors = getAppColors(useColorScheme());
   const phase = getAlarmPhase(alarm);
+  const sharesToCircle = Boolean(
+    alarm.socialSettings?.circleId && (alarm.socialSettings.shareSuccesses || alarm.socialSettings.shareMisses)
+  );
 
   return (
-    <View
-      style={[
-        styles.card,
-        {
-          backgroundColor: colors.card,
-          borderColor: colors.border,
-        },
-      ]}>
-      <View style={styles.row}>
-        <Text style={[styles.time, { color: colors.text }]}>
-          {formatAlarmTime(alarm.hour, alarm.minute)}
-        </Text>
-        <View
-          style={[
-            styles.badge,
-            {
-              backgroundColor: phase === 'missed' ? `${colors.danger}20` : `${colors.primary}18`,
-            },
-          ]}>
-          <Text
-            style={[
-              styles.badgeText,
-              {
-                color: phase === 'missed' ? colors.danger : colors.primary,
-              },
-            ]}>
-            {STATUS_COPY[phase]}
+    <AppCard elevated style={styles.card}>
+      <View style={styles.header}>
+        <View style={styles.timeBlock}>
+          <Text style={[styles.time, { color: colors.text }]}>{formatAlarmTime(alarm.hour, alarm.minute)}</Text>
+          <Text style={[TextPresets.body, { color: colors.muted }]}>
+            {formatRepeatSchedule(alarm.repeatSchedule)}
           </Text>
+        </View>
+        <StatusPill label={STATUS_COPY[phase]} tone={STATUS_TONES[phase]} />
+      </View>
+
+      <View style={styles.body}>
+        <Text style={[styles.label, { color: colors.text }]}>{alarm.label}</Text>
+        <Text numberOfLines={1} style={[TextPresets.body, { color: colors.textSoft }]}>
+          QR checkpoint: {alarm.expectedQrPayload || 'Needs update'}
+        </Text>
+      </View>
+
+      <View style={styles.metaGrid}>
+        <View style={[styles.metaChip, { backgroundColor: colors.cardMuted, borderColor: colors.border }]}>
+          <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>Grace</Text>
+          <Text style={[styles.metaValue, { color: colors.text }]}>{alarm.gracePeriodSeconds}s</Text>
+        </View>
+        <View style={[styles.metaChip, styles.metaChipWide, { backgroundColor: colors.cardMuted, borderColor: colors.border }]}>
+          <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>Next trigger</Text>
+          <Text style={[styles.metaValue, { color: colors.text }]}>{formatScheduledFor(alarm.scheduledFor)}</Text>
         </View>
       </View>
 
-      <Text style={[styles.label, { color: colors.text }]}>{alarm.label}</Text>
-      <Text style={[styles.meta, { color: colors.muted }]}>
-        QR payload: {alarm.expectedQrPayload || 'Needs update'}
-      </Text>
-      <Text style={[styles.meta, { color: colors.muted }]}>
-        Grace period: {alarm.gracePeriodSeconds} seconds
-      </Text>
-      <Text style={[styles.meta, { color: colors.muted }]}>
-        Repeat: {formatRepeatSchedule(alarm.repeatSchedule)}
-      </Text>
-      <Text style={[styles.meta, { color: colors.muted }]}>
-        Next trigger: {formatScheduledFor(alarm.scheduledFor)}
-      </Text>
-      <Text style={[styles.meta, { color: colors.muted }]}>
-        Last run: {alarm.lastOutcome === 'missed' ? 'Missed' : alarm.lastOutcome === 'confirmed' ? 'Cleared' : 'Not completed yet'}
-      </Text>
+      <View style={styles.summaryRow}>
+        <Text style={[TextPresets.body, { color: colors.muted }]}>
+          Last run:{' '}
+          {alarm.lastOutcome === 'missed'
+            ? 'Missed'
+            : alarm.lastOutcome === 'confirmed'
+              ? 'Cleared'
+              : 'Not completed yet'}
+        </Text>
+        {sharesToCircle ? <StatusPill label="Circle" tone="primary" /> : null}
+      </View>
 
-      <View style={styles.actionRow}>
-        <Pressable
-          accessibilityRole="button"
+      <View style={styles.actions}>
+        <AppButton
+          label="Edit"
           onPress={() => onEdit(alarm)}
-          style={[styles.utilityButton, { borderColor: colors.border }]}>
-          <Text style={[styles.utilityButtonText, { color: colors.text }]}>Edit</Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
+          size="compact"
+          style={styles.actionButton}
+          variant="secondary"
+        />
+        <AppButton
+          label="Reschedule"
           onPress={() => onReschedule(alarm)}
-          style={[styles.utilityButton, { borderColor: colors.border }]}>
-          <Text style={[styles.utilityButtonText, { color: colors.text }]}>Reschedule</Text>
-        </Pressable>
+          size="compact"
+          style={styles.actionButton}
+          variant="secondary"
+        />
       </View>
 
-      <View style={styles.actionRow}>
-        <Pressable
-          accessibilityRole="button"
+      <View style={styles.actions}>
+        <AppButton
+          label="Reuse"
           onPress={() => onReuse(alarm)}
-          style={[styles.utilityButton, { borderColor: colors.border }]}>
-          <Text style={[styles.utilityButtonText, { color: colors.text }]}>Reuse</Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
+          size="compact"
+          style={styles.actionButton}
+          variant="ghost"
+        />
+        <AppButton
+          label="Delete"
           onPress={() => onDelete(alarm)}
-          style={[styles.utilityButton, { borderColor: colors.border }]}>
-          <Text style={[styles.utilityButtonText, { color: colors.danger }]}>Delete</Text>
-        </Pressable>
+          size="compact"
+          style={styles.actionButton}
+          variant="danger"
+        />
       </View>
-    </View>
+    </AppCard>
   );
 }
 
 const styles = StyleSheet.create({
   card: {
-    borderRadius: 20,
-    borderWidth: 1,
-    gap: 8,
-    padding: 18,
+    gap: Spacing.md,
   },
-  row: {
-    alignItems: 'center',
+  header: {
+    alignItems: 'flex-start',
     flexDirection: 'row',
+    gap: Spacing.md,
     justifyContent: 'space-between',
   },
+  timeBlock: {
+    flex: 1,
+    gap: Spacing.xs,
+  },
   time: {
-    fontSize: 28,
-    fontWeight: '700',
+    fontFamily: Fonts.rounded,
+    fontSize: Type.titleLg,
+    fontWeight: '800',
+    lineHeight: 32,
   },
-  badge: {
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  badgeText: {
-    fontSize: 12,
-    fontWeight: '700',
-    textTransform: 'uppercase',
+  body: {
+    gap: Spacing.xs,
   },
   label: {
-    fontSize: 18,
-    fontWeight: '600',
+    fontFamily: Fonts.rounded,
+    fontSize: 20,
+    fontWeight: '700',
+    lineHeight: 24,
   },
-  meta: {
-    fontSize: 14,
-  },
-  actionRow: {
+  metaGrid: {
     flexDirection: 'row',
-    gap: 10,
+    gap: Spacing.md,
   },
-  utilityButton: {
-    alignItems: 'center',
-    borderRadius: 12,
+  metaChip: {
+    borderRadius: Radius.md,
     borderWidth: 1,
-    flex: 1,
-    marginTop: 8,
-    paddingVertical: 12,
+    gap: Spacing.xs,
+    minHeight: 72,
+    padding: Spacing.md,
   },
-  utilityButtonText: {
+  metaChipWide: {
+    flex: 1,
+  },
+  metaValue: {
     fontSize: 15,
-    fontWeight: '600',
+    fontWeight: '700',
+    lineHeight: 20,
+  },
+  summaryRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    justifyContent: 'space-between',
+  },
+  actions: {
+    flexDirection: 'row',
+    gap: Spacing.sm,
+  },
+  actionButton: {
+    flex: 1,
   },
 });
