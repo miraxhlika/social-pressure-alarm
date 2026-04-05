@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Tabs } from 'expo-router';
 
 import { HapticTab } from '@/components/haptic-tab';
-import { Fonts, Spacing, TextPresets, getAppColors } from '@/constants/theme';
+import { Radius, Shadows, TextPresets, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 
 export default function TabLayout() {
@@ -21,34 +21,39 @@ export default function TabLayout() {
         tabBarHideOnKeyboard: true,
         tabBarLabelStyle: {
           ...TextPresets.eyebrow,
-          fontFamily: Fonts.rounded,
           fontSize: 11,
           fontWeight: '700',
-          letterSpacing: 0.3,
-          marginBottom: 4,
+          letterSpacing: 0.2,
+          lineHeight: 14,
+          marginBottom: 0,
           textTransform: 'none',
         },
         tabBarItemStyle: {
-          paddingTop: 6,
+          borderRadius: Radius.md,
+          marginHorizontal: 0,
+          marginVertical: 0,
+          minHeight: 44,
+          paddingBottom: 0,
+          paddingTop: 4,
         },
         tabBarStyle: {
-          backgroundColor: colors.card,
-          borderColor: colors.border,
-          borderRadius: 28,
-          borderTopColor: colors.border,
-          borderTopWidth: 1,
+          ...Shadows.card,
+          backgroundColor: colors.tabBar ?? colors.elevated,
+          borderColor: colors.line,
+          borderRadius: Radius.lg,
+          borderTopWidth: 0,
           borderWidth: 1,
-          bottom: 14,
-          height: 84,
-          left: 14,
+          bottom: 10,
+          left: 20,
+          minHeight: 58,
           position: 'absolute',
-          paddingBottom: 10,
-          paddingHorizontal: Spacing.sm,
+          paddingBottom: 6,
+          paddingHorizontal: 8,
           paddingTop: 6,
-          right: 14,
+          right: 20,
         },
         tabBarIconStyle: {
-          marginTop: 2,
+          marginTop: 0,
         },
         tabBarBackground: () => null,
       }}>
@@ -57,7 +62,7 @@ export default function TabLayout() {
         options={{
           title: 'Today',
           tabBarIcon: ({ color, focused }) => (
-            <Ionicons color={color} name={focused ? 'sparkles' : 'sparkles-outline'} size={20} />
+            <Ionicons color={color} name={focused ? 'today' : 'today-outline'} size={20} />
           ),
         }}
       />
@@ -84,7 +89,7 @@ export default function TabLayout() {
         options={{
           title: 'Profile',
           tabBarIcon: ({ color, focused }) => (
-            <Ionicons color={color} name={focused ? 'person-circle' : 'person-circle-outline'} size={20} />
+            <Ionicons color={color} name={focused ? 'person' : 'person-outline'} size={20} />
           ),
         }}
       />

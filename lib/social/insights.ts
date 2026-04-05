@@ -133,7 +133,7 @@ function buildLeaderboard(feed: SocialFeedItem[]) {
 }
 
 export async function getSocialDashboardInsights(): Promise<SocialDashboardInsights> {
-  const [rows, feed] = await Promise.all([listMyAlarmEventHistory(150), listVisibleSocialFeed(40)]);
+  const [rows, feed] = await Promise.all([listMyAlarmEventHistory(150), listVisibleSocialFeed({ limitCount: 200 })]);
 
   return {
     challenges: buildChallenges(rows),

@@ -21,8 +21,8 @@ function getVariantStyles(variant: AppButtonVariant, colors: ReturnType<typeof g
     case 'secondary':
       return {
         container: {
-          backgroundColor: colors.cardMuted,
-          borderColor: colors.border,
+          backgroundColor: colors.elevated,
+          borderColor: colors.line,
         },
         label: {
           color: colors.text,
@@ -32,7 +32,7 @@ function getVariantStyles(variant: AppButtonVariant, colors: ReturnType<typeof g
       return {
         container: {
           backgroundColor: 'transparent',
-          borderColor: colors.border,
+          borderColor: colors.line,
         },
         label: {
           color: colors.textSoft,
@@ -77,6 +77,7 @@ export function AppButton({
     <Pressable
       android_ripple={{ color: colors.ring }}
       accessibilityRole="button"
+      accessibilityState={{ disabled }}
       disabled={disabled}
       onPress={onPress}
       style={({ pressed }) => [
@@ -97,32 +98,35 @@ export function AppButton({
 const styles = StyleSheet.create({
   base: {
     alignItems: 'center',
-    borderRadius: Radius.md,
+    borderRadius: Radius.lg,
     borderWidth: 1,
     justifyContent: 'center',
     minHeight: 52,
     paddingHorizontal: Spacing.xl,
-    paddingVertical: Spacing.md,
+    paddingVertical: 14,
   },
   compact: {
-    minHeight: 40,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
+    borderRadius: Radius.md,
+    minHeight: 42,
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: 10,
   },
   label: {
     ...TextPresets.label,
     fontFamily: Fonts.rounded,
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '700',
+    letterSpacing: 0.12,
+    textAlign: 'center',
   },
   compactLabel: {
-    fontSize: 14,
+    fontSize: 13,
   },
   disabled: {
-    opacity: 0.72,
+    opacity: 0.45,
   },
   pressed: {
-    opacity: 0.94,
+    opacity: 0.9,
     transform: [{ scale: 0.99 }],
   },
 });

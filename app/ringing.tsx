@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, StyleSheet, Text, View } from 'react-native';
+import { Alert, Animated, Easing, Linking, StyleSheet, Text, View } from 'react-native';
 import { BarcodeScanningResult, CameraView, useCameraPermissions } from 'expo-camera';
+import * as Haptics from 'expo-haptics';
 import { StatusBar } from 'expo-status-bar';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppButton } from '@/components/ui/app-button';
 import { AppCard } from '@/components/ui/app-card';
 import { StatusPill } from '@/components/ui/status-pill';
-import { Fonts, getAppColors, Radius, Spacing, TextPresets, Type } from '@/constants/theme';
+import { Fonts, Radius, Spacing, TextPresets, getAppColors, withAlpha } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import {
   formatAlarmTime,
@@ -21,20 +22,68 @@ import {
 import { cancelAlarmNotificationAsync, scheduleAlarmNotificationAsync } from '@/lib/notifications';
 import { Alarm } from '@/types/alarm';
 
-function getCountdownTone(remainingSeconds: number | null, gracePeriodSeconds: number) {
+type CountdownTone = 'primary' | 'warning' | 'danger';
+
+function getCriticalThreshold(gracePeriodSeconds: number) {
+  return Math.min(15, Math.ceil(gracePeriodSeconds * 0.2));
+}
+
+function getCountdownTone(remainingSeconds: number | null, gracePeriodSeconds: number): CountdownTone {
   if (remainingSeconds === null) {
-    return 'warning' as const;
+    return 'warning';
   }
 
-  if (remainingSeconds <= Math.min(15, Math.ceil(gracePeriodSeconds * 0.2))) {
-    return 'danger' as const;
+  if (remainingSeconds <= getCriticalThreshold(gracePeriodSeconds)) {
+    return 'danger';
   }
 
   if (remainingSeconds <= Math.ceil(gracePeriodSeconds * 0.5)) {
-    return 'warning' as const;
+    return 'warning';
   }
 
-  return 'primary' as const;
+  return 'primary';
+}
+
+function getUrgencyCopy(tone: CountdownTone, remainingSeconds: number | null) {
+  if (tone === 'danger') {
+    return {
+      badge: 'Critical',
+      title: remainingSeconds === 1 ? '1 second left' : `${remainingSeconds ?? 0} seconds left`,
+      description: 'Scan the saved code now. This run is about to lock in as missed.',
+    };
+  }
+
+  if (tone === 'warning') {
+    return {
+      badge: 'Move now',
+      title: 'Get to the checkpoint',
+      description: 'Hold the camera steady and scan the exact code saved to this alarm.',
+    };
+  }
+
+  return {
+    badge: 'Live',
+    title: 'Scan the saved code',
+    description: 'One job now: reach the checkpoint and match the saved QR code.',
+  };
+}
+
+async function triggerHaptic(kind: 'warning' | 'error' | 'success') {
+  try {
+    if (kind === 'success') {
+      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      return;
+    }
+
+    if (kind === 'error') {
+      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      return;
+    }
+
+    await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+  } catch {
+    // Haptics are best-effort only.
+  }
 }
 
 export default function RingingScreen() {
@@ -42,22 +91,27 @@ export default function RingingScreen() {
   const params = useLocalSearchParams<{ alarmId?: string }>();
   const colorScheme = useColorScheme();
   const colors = getAppColors(colorScheme);
-  const urgentBackground = colorScheme === 'dark' ? '#09111F' : '#0F172A';
-  const urgentPanel = colorScheme === 'dark' ? '#142036' : '#172554';
-  const urgentBorder = colorScheme === 'dark' ? '#24385D' : '#274690';
-  const urgentText = '#F8FAFC';
-  const urgentTextSoft = colorScheme === 'dark' ? '#C9D6F2' : '#DCE6FF';
-  const urgentTrack = colorScheme === 'dark' ? '#1F3152' : '#2B4C93';
+  const urgentBackground = '#090B0D';
+  const urgentPanel = '#12161B';
+  const urgentBorder = '#252D37';
+  const urgentText = '#F5F7FA';
+  const urgentTextSoft = '#AEB7C3';
+  const urgentTrack = '#232B34';
   const [alarm, setAlarm] = useState<Alarm | null>(null);
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [isScannerVisible, setIsScannerVisible] = useState(false);
   const [scanError, setScanError] = useState('');
   const [scanEnabled, setScanEnabled] = useState(true);
   const [permission, requestPermission] = useCameraPermissions();
   const hasResolvedRef = useRef(false);
-  const hasAutoOpenedScannerRef = useRef(false);
+  const hasRequestedPermissionRef = useRef(false);
   const retryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const criticalHapticFiredRef = useRef(false);
+  const glowPulse = useRef(new Animated.Value(0)).current;
+  const framePulse = useRef(new Animated.Value(0)).current;
+  const countdownScale = useRef(new Animated.Value(1)).current;
+  const errorFlash = useRef(new Animated.Value(0)).current;
+  const criticalGlowLoopRef = useRef<Animated.CompositeAnimation | null>(null);
 
   useEffect(() => {
     const loadAlarm = async () => {
@@ -75,12 +129,47 @@ export default function RingingScreen() {
   }, [params.alarmId]);
 
   useEffect(() => {
+    const frameLoop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(framePulse, {
+          toValue: 1,
+          duration: 1400,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(framePulse, {
+          toValue: 0,
+          duration: 1400,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ])
+    );
+
+    frameLoop.start();
+
+    return () => {
+      frameLoop.stop();
+    };
+  }, [framePulse]);
+
+  useEffect(() => {
     return () => {
       if (retryTimeoutRef.current) {
         clearTimeout(retryTimeoutRef.current);
       }
+
+      criticalGlowLoopRef.current?.stop();
     };
   }, []);
+
+  useEffect(() => {
+    hasResolvedRef.current = false;
+    hasRequestedPermissionRef.current = false;
+    criticalHapticFiredRef.current = false;
+    setScanEnabled(true);
+    setScanError('');
+  }, [alarm?.id]);
 
   const deadline = useMemo(() => {
     if (!alarm) {
@@ -107,12 +196,20 @@ export default function RingingScreen() {
   }, [deadline]);
 
   useEffect(() => {
-    if (alarm && permission?.granted && !isScannerVisible && !hasAutoOpenedScannerRef.current) {
-      hasAutoOpenedScannerRef.current = true;
-      setScanEnabled(true);
-      setIsScannerVisible(true);
+    if (!alarm || !permission || permission.granted || permission.canAskAgain === false || hasRequestedPermissionRef.current) {
+      return;
     }
-  }, [alarm, isScannerVisible, permission?.granted]);
+
+    hasRequestedPermissionRef.current = true;
+    void requestPermission();
+  }, [alarm, permission, requestPermission]);
+
+  useEffect(() => {
+    if (permission?.granted) {
+      setScanEnabled(true);
+      setScanError('');
+    }
+  }, [permission?.granted]);
 
   const handleScanSuccess = useCallback(async () => {
     if (!alarm || isSubmitting || hasResolvedRef.current) {
@@ -122,6 +219,7 @@ export default function RingingScreen() {
     hasResolvedRef.current = true;
     setIsSubmitting(true);
     setScanError('');
+    await triggerHaptic('success');
 
     try {
       await cancelAlarmNotificationAsync(alarm.notificationIds);
@@ -149,7 +247,7 @@ export default function RingingScreen() {
       setScanEnabled(true);
 
       const errorMessage =
-        error instanceof Error ? error.message : 'The QR checkpoint could not be confirmed.';
+        error instanceof Error ? error.message : 'The checkpoint could not be confirmed.';
 
       Alert.alert('Unable to confirm checkpoint', errorMessage);
     } finally {
@@ -199,18 +297,27 @@ export default function RingingScreen() {
 
     setScanError('');
 
+    if (permission?.granted) {
+      setScanEnabled(true);
+      return;
+    }
+
+    if (permission?.canAskAgain === false) {
+      await Linking.openSettings().catch(() => null);
+      return;
+    }
+
     if (!permission?.granted) {
       const response = await requestPermission();
 
       if (!response.granted) {
-        setScanError('Camera access is required to scan your QR checkpoint.');
+        setScanError('Camera access is required so you can scan the checkpoint and stop the alarm.');
         return;
       }
     }
 
     setScanEnabled(true);
-    setIsScannerVisible(true);
-  }, [isSubmitting, permission?.granted, requestPermission]);
+  }, [isSubmitting, permission?.canAskAgain, permission?.granted, requestPermission]);
 
   const handleBarcodeScanned = useCallback(
     async ({ data }: BarcodeScanningResult) => {
@@ -221,7 +328,21 @@ export default function RingingScreen() {
       setScanEnabled(false);
 
       if (data !== alarm.expectedQrPayload) {
-        setScanError('That QR code does not match this checkpoint. Keep scanning for the correct one.');
+        setScanError('That code belongs to a different checkpoint. Keep scanning for the one saved to this alarm.');
+        await triggerHaptic('error');
+
+        Animated.sequence([
+          Animated.timing(errorFlash, {
+            toValue: 1,
+            duration: 110,
+            useNativeDriver: true,
+          }),
+          Animated.timing(errorFlash, {
+            toValue: 0,
+            duration: 240,
+            useNativeDriver: true,
+          }),
+        ]).start();
 
         if (retryTimeoutRef.current) {
           clearTimeout(retryTimeoutRef.current);
@@ -236,7 +357,7 @@ export default function RingingScreen() {
 
       await handleScanSuccess();
     },
-    [alarm, handleScanSuccess, isSubmitting, scanEnabled]
+    [alarm, errorFlash, handleScanSuccess, isSubmitting, scanEnabled]
   );
 
   useEffect(() => {
@@ -244,6 +365,115 @@ export default function RingingScreen() {
       void handleMissedAlarm();
     }
   }, [alarm, handleMissedAlarm, isSubmitting, remainingSeconds]);
+
+  const gracePeriodSeconds = alarm?.gracePeriodSeconds ?? 60;
+  const countdownTone = getCountdownTone(remainingSeconds, gracePeriodSeconds);
+  const progressRatio = remainingSeconds === null ? 1 : Math.max(0, remainingSeconds / gracePeriodSeconds);
+  const urgencyCopy = getUrgencyCopy(countdownTone, remainingSeconds);
+  const scannerFrameBorderColor =
+    scanError.length > 0
+      ? colors.danger
+      : countdownTone === 'danger'
+        ? colors.danger
+        : countdownTone === 'warning'
+          ? colors.warning
+          : colors.primary;
+  const isCameraReady = permission?.granted === true;
+  const cameraStatusLabel = !isCameraReady ? 'Camera needed' : scanEnabled ? 'Camera live' : 'Reading';
+  const permissionMessage =
+    permission?.canAskAgain === false
+      ? 'Allow camera access in Settings to scan the saved checkpoint.'
+      : 'Allow camera access to scan the saved checkpoint and stop the alarm.';
+
+  useEffect(() => {
+    if (!alarm) {
+      return;
+    }
+
+    Animated.sequence([
+      Animated.timing(countdownScale, {
+        toValue: countdownTone === 'danger' ? 1.08 : 1.04,
+        duration: 160,
+        useNativeDriver: true,
+      }),
+      Animated.spring(countdownScale, {
+        toValue: 1,
+        friction: 5,
+        tension: 150,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [alarm, countdownScale, countdownTone, remainingSeconds]);
+
+  useEffect(() => {
+    criticalGlowLoopRef.current?.stop();
+
+    if (!alarm || countdownTone !== 'danger' || remainingSeconds === 0) {
+      glowPulse.stopAnimation();
+      glowPulse.setValue(0);
+      return;
+    }
+
+    criticalGlowLoopRef.current = Animated.loop(
+      Animated.sequence([
+        Animated.timing(glowPulse, {
+          toValue: 1,
+          duration: 420,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(glowPulse, {
+          toValue: 0,
+          duration: 420,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ])
+    );
+
+    criticalGlowLoopRef.current.start();
+
+    return () => {
+      criticalGlowLoopRef.current?.stop();
+    };
+  }, [alarm, countdownTone, glowPulse, remainingSeconds]);
+
+  useEffect(() => {
+    if (!alarm) {
+      return;
+    }
+
+    if (
+      countdownTone === 'danger' &&
+      remainingSeconds !== null &&
+      remainingSeconds > 0 &&
+      !criticalHapticFiredRef.current
+    ) {
+      criticalHapticFiredRef.current = true;
+      void triggerHaptic('warning');
+    }
+
+    if (countdownTone !== 'danger') {
+      criticalHapticFiredRef.current = false;
+    }
+  }, [alarm, countdownTone, remainingSeconds]);
+
+  const glowScale = glowPulse.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.96, 1.08],
+  });
+  const glowOpacity = glowPulse.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, 0.32],
+  });
+  const frameScale = framePulse.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.985, 1.015],
+  });
+  const frameOpacity = framePulse.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.62, 1],
+  });
 
   if (!alarm) {
     return (
@@ -261,103 +491,142 @@ export default function RingingScreen() {
     );
   }
 
-  const countdownTone = getCountdownTone(remainingSeconds, alarm.gracePeriodSeconds);
-  const progressRatio = remainingSeconds === null ? 1 : Math.max(0, remainingSeconds / alarm.gracePeriodSeconds);
-
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: urgentBackground }]}>
       <StatusBar animated style="light" />
-      <View style={styles.screen}>
+      <View style={styles.screenShell}>
         <View pointerEvents="none" style={[styles.backdropOrb, styles.backdropTop, { backgroundColor: colors.primary }]} />
         <View
           pointerEvents="none"
           style={[styles.backdropOrb, styles.backdropBottom, { backgroundColor: colors.danger }]}
         />
-        <View style={styles.topBlock}>
-          <StatusPill label="Alarm" tone="danger" />
-          <Text style={[styles.time, { color: urgentText }]}>{formatAlarmTime(alarm.hour, alarm.minute)}</Text>
-          <Text style={[styles.label, { color: urgentText }]}>{alarm.label}</Text>
-          <Text style={[TextPresets.body, styles.centered, { color: urgentTextSoft }]}>
-            Scan the saved QR code before time runs out.
-          </Text>
-        </View>
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            styles.criticalGlow,
+            {
+              backgroundColor: colors.danger,
+              opacity: glowOpacity,
+              transform: [{ scale: glowScale }],
+            },
+          ]}
+        />
 
-        <AppCard
-          elevated
-          tone={countdownTone === 'danger' ? 'danger' : 'default'}
-          style={[styles.countdownCard, { backgroundColor: urgentPanel, borderColor: urgentBorder }]}>
-          <View style={styles.countdownHeader}>
-            <Text style={[TextPresets.label, { color: urgentTextSoft }]}>Time left</Text>
-            <StatusPill label={countdownTone === 'danger' ? 'Critical' : countdownTone === 'warning' ? 'Move now' : 'Live'} tone={countdownTone} />
-          </View>
-          <Text style={[styles.countdownValue, { color: countdownTone === 'danger' ? colors.danger : urgentText }]}>
-            {remainingSeconds ?? alarm.gracePeriodSeconds}s
-          </Text>
-          <View style={[styles.progressTrack, { backgroundColor: urgentTrack }]}>
-            <View
-              style={[
-                styles.progressFill,
-                {
-                  backgroundColor:
-                    countdownTone === 'danger'
-                      ? colors.danger
-                      : countdownTone === 'warning'
-                        ? colors.warning
-                        : colors.primary,
-                  width: `${Math.max(4, Math.round(progressRatio * 100))}%`,
-                },
-              ]}
-            />
-          </View>
-          <Text style={[TextPresets.body, { color: urgentTextSoft }]}>
-            Required payload: {alarm.expectedQrPayload}
-          </Text>
-        </AppCard>
+        <View style={styles.screen}>
+          <AppCard padded={false} style={[styles.stageCard, { backgroundColor: urgentPanel, borderColor: urgentBorder }]}>
+            <View style={styles.stageContent}>
+              {isCameraReady ? (
+                <View style={styles.cameraFill}>
+                  <CameraView
+                    barcodeScannerSettings={{
+                      barcodeTypes: ['qr'],
+                    }}
+                    onBarcodeScanned={scanEnabled ? handleBarcodeScanned : undefined}
+                    style={styles.camera}
+                  />
+                </View>
+              ) : (
+                <View style={[styles.permissionState, { backgroundColor: urgentPanel }]}>
+                  <Text style={[styles.permissionTitle, { color: urgentText }]}>Enable camera to scan</Text>
+                  <Text style={[styles.permissionDescription, { color: urgentTextSoft }]}>{permissionMessage}</Text>
+                  <AppButton
+                    disabled={isSubmitting}
+                    label={permission?.canAskAgain === false ? 'Open settings' : 'Allow camera'}
+                    onPress={() => {
+                      void handleStartScanner();
+                    }}
+                    textStyle={styles.primaryButtonText}
+                  />
+                </View>
+              )}
 
-        <View style={styles.scannerWrap}>
-          {isScannerVisible && permission?.granted ? (
-            <View style={styles.scannerSection}>
-              <CameraView
-                barcodeScannerSettings={{
-                  barcodeTypes: ['qr'],
-                }}
-                onBarcodeScanned={scanEnabled ? handleBarcodeScanned : undefined}
-                style={styles.camera}
+              <View pointerEvents="none" style={styles.stageTopShade} />
+
+              <View style={styles.stageTopOverlay}>
+                <View style={styles.stageMetaRow}>
+                  <Text style={[styles.subtleTime, { color: urgentTextSoft }]}>
+                    {formatAlarmTime(alarm.hour, alarm.minute)}
+                  </Text>
+                  <StatusPill label={cameraStatusLabel} tone={isCameraReady && scanEnabled ? countdownTone : 'warning'} />
+                </View>
+                <View style={styles.stageTopCopy}>
+                  <Text numberOfLines={1} style={[styles.label, { color: urgentText }]}>
+                    {alarm.label}
+                  </Text>
+                  <Text style={[styles.stageInstruction, { color: urgentTextSoft }]}>Scan the saved QR code to stop the alarm.</Text>
+                </View>
+              </View>
+
+              {isCameraReady ? (
+                <Animated.View
+                  pointerEvents="none"
+                  style={[
+                    styles.scannerFrame,
+                    {
+                      borderColor: scannerFrameBorderColor,
+                      opacity: frameOpacity,
+                      transform: [{ scale: frameScale }],
+                    },
+                  ]}>
+                  <View style={[styles.frameCorner, styles.frameCornerTopLeft, { borderColor: scannerFrameBorderColor }]} />
+                  <View style={[styles.frameCorner, styles.frameCornerTopRight, { borderColor: scannerFrameBorderColor }]} />
+                  <View style={[styles.frameCorner, styles.frameCornerBottomLeft, { borderColor: scannerFrameBorderColor }]} />
+                  <View style={[styles.frameCorner, styles.frameCornerBottomRight, { borderColor: scannerFrameBorderColor }]} />
+                </Animated.View>
+              ) : null}
+
+              {scanError ? (
+                <View style={[styles.inlineError, { backgroundColor: '#2C1010E6', borderColor: withAlpha(colors.danger, '5C') }]}>
+                  <Text style={[styles.inlineErrorTitle, { color: colors.danger }]}>Wrong checkpoint</Text>
+                  <Text numberOfLines={2} style={[styles.inlineErrorText, { color: '#FFD7D7' }]}>
+                    {scanError}
+                  </Text>
+                </View>
+              ) : null}
+
+              <View style={styles.countdownOverlay}>
+                <Animated.Text
+                  accessibilityLiveRegion="assertive"
+                  style={[
+                    styles.countdownValue,
+                    {
+                      color: countdownTone === 'danger' ? colors.danger : urgentText,
+                      transform: [{ scale: countdownScale }],
+                    },
+                  ]}>
+                  {remainingSeconds ?? alarm.gracePeriodSeconds}s
+                </Animated.Text>
+
+                <View style={[styles.progressTrack, { backgroundColor: urgentTrack }]}>
+                  <View
+                    style={[
+                      styles.progressFill,
+                      {
+                        backgroundColor:
+                          countdownTone === 'danger'
+                            ? colors.danger
+                            : countdownTone === 'warning'
+                              ? colors.warning
+                              : colors.primary,
+                        width: `${Math.max(4, Math.round(progressRatio * 100))}%`,
+                      },
+                    ]}
+                  />
+                </View>
+              </View>
+
+              <Animated.View
+                pointerEvents="none"
+                style={[
+                  styles.errorOverlay,
+                  {
+                    backgroundColor: colors.danger,
+                    opacity: errorFlash,
+                  },
+                ]}
               />
-              <Text style={[TextPresets.body, styles.centered, { color: colors.muted }]}>
-                Hold the camera over the saved QR code.
-              </Text>
             </View>
-          ) : (
-            <AppCard
-              tone="muted"
-              style={[styles.placeholderCard, { backgroundColor: urgentPanel, borderColor: urgentBorder }]}>
-              <Text style={[TextPresets.label, { color: urgentText }]}>Camera</Text>
-              <Text style={[TextPresets.body, { color: urgentTextSoft }]}>
-                Open the camera and scan the saved code.
-              </Text>
-            </AppCard>
-          )}
-        </View>
-
-        {scanError ? (
-          <AppCard tone="danger" style={styles.errorCard}>
-            <Text style={[TextPresets.label, { color: colors.danger }]}>Wrong QR code</Text>
-            <Text style={[TextPresets.body, { color: colors.danger }]}>{scanError}</Text>
           </AppCard>
-        ) : null}
-
-        <View style={styles.bottomActions}>
-          <AppButton
-            disabled={isSubmitting}
-            label={isScannerVisible ? 'Scanner active' : 'Open scanner'}
-            onPress={handleStartScanner}
-            textStyle={styles.primaryButtonText}
-            variant="primary"
-          />
-          {isScannerVisible ? (
-            <AppButton disabled={isSubmitting} label="Hide scanner" onPress={() => setIsScannerVisible(false)} variant="secondary" />
-          ) : null}
         </View>
       </View>
     </SafeAreaView>
@@ -368,13 +637,14 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
   },
+  screenShell: {
+    flex: 1,
+    overflow: 'hidden',
+    padding: Spacing.lg,
+    position: 'relative',
+  },
   screen: {
     flex: 1,
-    gap: Spacing.lg,
-    justifyContent: 'space-between',
-    overflow: 'hidden',
-    padding: Spacing.xl,
-    position: 'relative',
   },
   backdropOrb: {
     borderRadius: 180,
@@ -391,6 +661,14 @@ const styles = StyleSheet.create({
     bottom: 110,
     left: -50,
   },
+  criticalGlow: {
+    alignSelf: 'center',
+    borderRadius: 280,
+    height: 280,
+    position: 'absolute',
+    top: 150,
+    width: 280,
+  },
   emptyWrap: {
     flex: 1,
     justifyContent: 'center',
@@ -399,79 +677,170 @@ const styles = StyleSheet.create({
   emptyCard: {
     gap: Spacing.md,
   },
-  topBlock: {
-    alignItems: 'center',
-    gap: Spacing.sm,
-    paddingTop: Spacing.sm,
-  },
-  centered: {
-    textAlign: 'center',
-  },
-  time: {
-    fontFamily: Fonts.rounded,
-    fontSize: 56,
-    fontWeight: '800',
-    letterSpacing: -1.2,
-    lineHeight: 60,
-    textAlign: 'center',
-  },
   label: {
     fontFamily: Fonts.rounded,
-    fontSize: Type.title,
+    fontSize: 34,
     fontWeight: '700',
-    lineHeight: 28,
-    textAlign: 'center',
+    letterSpacing: -0.8,
+    lineHeight: 40,
   },
-  countdownCard: {
+  subtleTime: {
+    ...TextPresets.body,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  stageCard: {
+    flex: 1,
+    overflow: 'hidden',
+  },
+  stageContent: {
+    flex: 1,
+    minHeight: 0,
+    position: 'relative',
+  },
+  stageTopShade: {
+    backgroundColor: '#05070AC2',
+    height: 132,
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: 0,
+  },
+  cameraFill: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#0B0D10',
+  },
+  stageTopOverlay: {
+    left: Spacing.lg,
+    position: 'absolute',
+    right: Spacing.lg,
+    top: Spacing.lg,
     gap: Spacing.md,
   },
-  countdownHeader: {
+  stageMetaRow: {
     alignItems: 'center',
     flexDirection: 'row',
-    gap: Spacing.md,
     justifyContent: 'space-between',
+  },
+  stageTopCopy: {
+    gap: 2,
+  },
+  stageInstruction: {
+    ...TextPresets.body,
+    fontSize: 15,
+    lineHeight: 22,
+  },
+  permissionState: {
+    alignItems: 'flex-start',
+    flex: 1,
+    justifyContent: 'center',
+    padding: Spacing.xl,
+    gap: Spacing.md,
+  },
+  permissionTitle: {
+    ...TextPresets.title,
+  },
+  permissionDescription: {
+    ...TextPresets.body,
+    maxWidth: 320,
   },
   countdownValue: {
     fontFamily: Fonts.rounded,
-    fontSize: 48,
+    fontSize: 68,
     fontWeight: '800',
-    lineHeight: 50,
+    letterSpacing: -1.4,
+    lineHeight: 72,
+    textShadowColor: '#05070ACC',
+    textShadowOffset: { width: 0, height: 6 },
+    textShadowRadius: 18,
+  },
+  countdownOverlay: {
+    bottom: Spacing.lg,
+    gap: Spacing.md,
+    left: Spacing.lg,
+    position: 'absolute',
+    right: Spacing.lg,
   },
   progressTrack: {
     borderRadius: Radius.pill,
-    height: 10,
+    height: 8,
     overflow: 'hidden',
   },
   progressFill: {
     borderRadius: Radius.pill,
     height: '100%',
   },
-  scannerWrap: {
-    flex: 1,
-    justifyContent: 'center',
-  },
-  scannerSection: {
-    gap: Spacing.sm,
-  },
   camera: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  scannerFrame: {
+    alignItems: 'center',
     borderRadius: Radius.lg,
-    height: 320,
-    overflow: 'hidden',
-    width: '100%',
+    borderWidth: 2,
+    bottom: 168,
+    justifyContent: 'flex-end',
+    left: 28,
+    position: 'absolute',
+    right: 28,
+    top: 144,
   },
-  placeholderCard: {
-    gap: Spacing.sm,
+  frameCorner: {
+    borderRadius: Radius.sm,
+    borderWidth: 4,
+    height: 32,
+    position: 'absolute',
+    width: 32,
   },
-  errorCard: {
-    gap: Spacing.xs,
+  frameCornerTopLeft: {
+    borderBottomWidth: 0,
+    borderRightWidth: 0,
+    left: 14,
+    top: 14,
   },
-  bottomActions: {
-    gap: Spacing.sm,
+  frameCornerTopRight: {
+    borderBottomWidth: 0,
+    borderLeftWidth: 0,
+    right: 14,
+    top: 14,
+  },
+  frameCornerBottomLeft: {
+    borderRightWidth: 0,
+    borderTopWidth: 0,
+    bottom: 14,
+    left: 14,
+  },
+  frameCornerBottomRight: {
+    borderLeftWidth: 0,
+    borderTopWidth: 0,
+    bottom: 14,
+    right: 14,
+  },
+  inlineError: {
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    gap: 2,
+    left: Spacing.lg,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    position: 'absolute',
+    right: Spacing.lg,
+    top: 116,
+  },
+  inlineErrorTitle: {
+    ...TextPresets.label,
+  },
+  inlineErrorText: {
+    ...TextPresets.body,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  errorOverlay: {
+    ...StyleSheet.absoluteFillObject,
   },
   primaryButtonText: {
     fontFamily: Fonts.rounded,
-    fontSize: 22,
+    fontSize: 16,
     fontWeight: '800',
-    letterSpacing: 0.4,
+    letterSpacing: 0.3,
   },
 });
