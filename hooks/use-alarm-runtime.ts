@@ -3,7 +3,7 @@ import { AppState } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import { useRouter } from 'expo-router';
 
-import { getAlarms, getNextActionableAlarm, hydrateAlarmRuntimeForCurrentUser } from '@/lib/alarms';
+import { getAlarmPhase, getAlarms, getNextActionableAlarm, hydrateAlarmRuntimeForCurrentUser } from '@/lib/alarms';
 import { configureNotificationsAsync } from '@/lib/notifications';
 import { getSupabaseClient } from '@/lib/social/client';
 
@@ -40,6 +40,23 @@ export function useAlarmRuntime() {
       });
     };
 
+    const routeToAlarmIfStillActive = async (alarmId: string, clearLastResponse = false) => {
+      try {
+        const store = await hydrateAlarmRuntimeForCurrentUser();
+        const alarm = store.alarms.find((candidate) => candidate.id === alarmId) ?? null;
+
+        if (!alarm || !alarm.isActive || getAlarmPhase(alarm) !== 'ringing') {
+          return;
+        }
+
+        routeToAlarm(alarmId);
+      } finally {
+        if (clearLastResponse) {
+          await Notifications.clearLastNotificationResponseAsync().catch(() => null);
+        }
+      }
+    };
+
     const hydrateAndCheckForDueAlarms = async () => {
       await hydrateAlarmRuntimeForCurrentUser();
       const alarms = await getAlarms();
@@ -60,7 +77,7 @@ export function useAlarmRuntime() {
       const alarmId = getAlarmIdFromNotification(response);
 
       if (alarmId) {
-        routeToAlarm(alarmId);
+        void routeToAlarmIfStillActive(alarmId, true);
       }
     });
 
@@ -68,7 +85,7 @@ export function useAlarmRuntime() {
       const alarmId = getAlarmIdFromNotification(notification);
 
       if (alarmId) {
-        routeToAlarm(alarmId);
+        void routeToAlarmIfStillActive(alarmId);
       }
     });
 
@@ -76,7 +93,7 @@ export function useAlarmRuntime() {
       const alarmId = getAlarmIdFromNotification(response);
 
       if (alarmId) {
-        routeToAlarm(alarmId);
+        void routeToAlarmIfStillActive(alarmId, true);
       }
     });
 

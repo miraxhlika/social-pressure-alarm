@@ -1,9 +1,9 @@
-import { StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { AppCard } from '@/components/ui/app-card';
 import { AppButton } from '@/components/ui/app-button';
 import { StatusPill } from '@/components/ui/status-pill';
-import { Fonts, Radius, getAppColors, Spacing, TextPresets, Type } from '@/constants/theme';
+import { Fonts, getAppColors, Spacing, TextPresets } from '@/constants/theme';
 import { getAlarmPhase, formatAlarmTime, formatRepeatSchedule, formatScheduledFor } from '@/lib/alarms';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { Alarm } from '@/types/alarm';
@@ -32,89 +32,100 @@ const STATUS_TONES = {
   unscheduled: 'default',
 } as const;
 
+function getPrimaryActionLabel(phase: keyof typeof STATUS_COPY) {
+  return phase === 'missed' || phase === 'inactive' ? 'Reschedule' : phase === 'ringing' ? 'Open scanner' : 'Edit';
+}
+
+function getLastOutcomeCopy(alarm: Alarm) {
+  if (alarm.lastOutcome === 'missed') {
+    return 'Last run missed';
+  }
+
+  if (alarm.lastOutcome === 'confirmed') {
+    return 'Last run cleared';
+  }
+
+  return 'No completed run yet';
+}
+
 export function AlarmCard({ alarm, onDelete, onEdit, onReschedule, onReuse }: AlarmCardProps) {
   const colors = getAppColors(useColorScheme());
   const phase = getAlarmPhase(alarm);
   const sharesToCircle = Boolean(
     alarm.socialSettings?.circleId && (alarm.socialSettings.shareSuccesses || alarm.socialSettings.shareMisses)
   );
+  const primaryActionLabel = getPrimaryActionLabel(phase);
+  const primaryAction = phase === 'missed' || phase === 'inactive' ? () => onReschedule(alarm) : () => onEdit(alarm);
+  const secondaryActionLabel = phase === 'ringing' ? 'Edit' : 'Reuse';
+  const secondaryAction = phase === 'ringing' ? () => onEdit(alarm) : () => onReuse(alarm);
 
   return (
     <AppCard elevated style={styles.card}>
       <View style={styles.header}>
-        <View style={styles.timeBlock}>
-          <Text style={[styles.time, { color: colors.text }]}>{formatAlarmTime(alarm.hour, alarm.minute)}</Text>
-          <Text style={[TextPresets.body, { color: colors.muted }]}>
-            {formatRepeatSchedule(alarm.repeatSchedule)}
-          </Text>
-        </View>
+        <Text style={[styles.time, { color: colors.text }]}>{formatAlarmTime(alarm.hour, alarm.minute)}</Text>
         <StatusPill label={STATUS_COPY[phase]} tone={STATUS_TONES[phase]} />
       </View>
 
-      <View style={styles.body}>
+      <View style={styles.copy}>
         <Text style={[styles.label, { color: colors.text }]}>{alarm.label}</Text>
-        <Text numberOfLines={1} style={[TextPresets.body, { color: colors.textSoft }]}>
-          QR checkpoint: {alarm.expectedQrPayload || 'Needs update'}
+        <Text style={[TextPresets.body, { color: colors.textSoft }]}>
+          {formatRepeatSchedule(alarm.repeatSchedule)} · {formatScheduledFor(alarm.scheduledFor)}
         </Text>
       </View>
 
-      <View style={styles.metaGrid}>
-        <View style={[styles.metaChip, { backgroundColor: colors.cardMuted, borderColor: colors.border }]}>
-          <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>Grace</Text>
-          <Text style={[styles.metaValue, { color: colors.text }]}>{alarm.gracePeriodSeconds}s</Text>
-        </View>
-        <View style={[styles.metaChip, styles.metaChipWide, { backgroundColor: colors.cardMuted, borderColor: colors.border }]}>
-          <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>Next trigger</Text>
-          <Text style={[styles.metaValue, { color: colors.text }]}>{formatScheduledFor(alarm.scheduledFor)}</Text>
-        </View>
-      </View>
-
-      <View style={styles.summaryRow}>
-        <Text style={[TextPresets.body, { color: colors.muted }]}>
-          Last run:{' '}
-          {alarm.lastOutcome === 'missed'
-            ? 'Missed'
-            : alarm.lastOutcome === 'confirmed'
-              ? 'Cleared'
-              : 'Not completed yet'}
+      <View style={styles.metaRow}>
+        <Text style={[styles.metaText, { color: colors.muted }]}>
+          {alarm.gracePeriodSeconds}s reach time · {getLastOutcomeCopy(alarm)}
         </Text>
-        {sharesToCircle ? <StatusPill label="Circle" tone="primary" /> : null}
+        {sharesToCircle ? <Text style={[styles.circleMeta, { color: colors.primary }]}>Circle linked</Text> : null}
       </View>
 
-      <View style={styles.actions}>
+      <View style={styles.actionRow}>
+        <AppButton label={primaryActionLabel} onPress={primaryAction} size="compact" style={styles.primaryAction} />
         <AppButton
-          label="Edit"
-          onPress={() => onEdit(alarm)}
+          label={secondaryActionLabel}
+          onPress={secondaryAction}
           size="compact"
-          style={styles.actionButton}
-          variant="secondary"
-        />
-        <AppButton
-          label="Reschedule"
-          onPress={() => onReschedule(alarm)}
-          size="compact"
-          style={styles.actionButton}
+          style={styles.secondaryAction}
           variant="secondary"
         />
       </View>
 
-      <View style={styles.actions}>
-        <AppButton
-          label="Reuse"
-          onPress={() => onReuse(alarm)}
-          size="compact"
-          style={styles.actionButton}
-          variant="ghost"
-        />
-        <AppButton
+      <View style={[styles.utilityRow, { borderTopColor: colors.line ?? colors.border }]}>
+        <UtilityAction
+          accessibilityHint={`Deletes ${alarm.label}. This action cannot be undone.`}
+          accessibilityLabel={`Delete ${alarm.label}`}
+          color={colors.danger}
           label="Delete"
           onPress={() => onDelete(alarm)}
-          size="compact"
-          style={styles.actionButton}
-          variant="danger"
         />
       </View>
     </AppCard>
+  );
+}
+
+function UtilityAction({
+  accessibilityHint,
+  accessibilityLabel,
+  label,
+  onPress,
+  color,
+}: {
+  accessibilityHint?: string;
+  accessibilityLabel?: string;
+  label: string;
+  onPress: () => void;
+  color: string;
+}) {
+  return (
+    <Pressable
+      accessibilityHint={accessibilityHint}
+      accessibilityLabel={accessibilityLabel ?? label}
+      accessibilityRole="button"
+      onPress={onPress}
+      style={styles.utilityAction}>
+      <Text style={[styles.utilityLabel, { color }]}>{label}</Text>
+    </Pressable>
   );
 }
 
@@ -123,60 +134,62 @@ const styles = StyleSheet.create({
     gap: Spacing.md,
   },
   header: {
-    alignItems: 'flex-start',
+    alignItems: 'center',
     flexDirection: 'row',
     gap: Spacing.md,
     justifyContent: 'space-between',
   },
-  timeBlock: {
-    flex: 1,
+  copy: {
     gap: Spacing.xs,
   },
   time: {
     fontFamily: Fonts.rounded,
-    fontSize: Type.titleLg,
+    fontSize: 34,
     fontWeight: '800',
-    lineHeight: 32,
-  },
-  body: {
-    gap: Spacing.xs,
+    lineHeight: 38,
   },
   label: {
     fontFamily: Fonts.rounded,
-    fontSize: 20,
+    fontSize: 22,
     fontWeight: '700',
-    lineHeight: 24,
+    lineHeight: 28,
   },
-  metaGrid: {
-    flexDirection: 'row',
-    gap: Spacing.md,
-  },
-  metaChip: {
-    borderRadius: Radius.md,
-    borderWidth: 1,
-    gap: Spacing.xs,
-    minHeight: 72,
-    padding: Spacing.md,
-  },
-  metaChipWide: {
-    flex: 1,
-  },
-  metaValue: {
-    fontSize: 15,
-    fontWeight: '700',
-    lineHeight: 20,
-  },
-  summaryRow: {
+  metaRow: {
     alignItems: 'center',
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: Spacing.sm,
-    justifyContent: 'space-between',
   },
-  actions: {
+  metaText: {
+    ...TextPresets.body,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  circleMeta: {
+    ...TextPresets.label,
+    fontSize: 13,
+  },
+  actionRow: {
     flexDirection: 'row',
     gap: Spacing.sm,
   },
-  actionButton: {
+  primaryAction: {
+    flex: 1.2,
+  },
+  secondaryAction: {
     flex: 1,
+  },
+  utilityRow: {
+    borderTopWidth: 1,
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    paddingTop: Spacing.xs,
+  },
+  utilityAction: {
+    paddingVertical: 6,
+  },
+  utilityLabel: {
+    ...TextPresets.label,
+    fontSize: 13,
   },
 });

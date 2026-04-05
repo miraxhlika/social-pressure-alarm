@@ -88,23 +88,47 @@ function mapVisibleAlarmEventRow(row: VisibleAlarmEventRow): SocialFeedItem | nu
   };
 }
 
-export async function listVisibleSocialFeed(limitCount = 8) {
+type ListVisibleSocialFeedOptions = {
+  limitCount?: number;
+  offsetCount?: number;
+};
+
+async function listVisibleAlarmEventRows(limitCount: number, offsetCount: number) {
   const client = getSupabaseClient();
   const session = await getSocialSession().catch(() => null);
+  const boundedLimit = Math.max(1, Math.min(50, Math.trunc(limitCount)));
+  const boundedOffset = Math.max(0, Math.trunc(offsetCount));
 
   if (!client || !session?.user) {
-    return [] as SocialFeedItem[];
+    return [] as VisibleAlarmEventRow[];
   }
 
   const { data, error } = await client.rpc('list_visible_alarm_events', {
-    limit_count: Math.max(1, Math.min(50, Math.trunc(limitCount))),
+    limit_count: boundedLimit,
+    offset_count: boundedOffset,
   });
 
-  if (error) {
-    throw error;
+  if (!error) {
+    return (data ?? []) as VisibleAlarmEventRow[];
   }
 
-  return ((data ?? []) as VisibleAlarmEventRow[])
+  // Support older backends that only accept a limit by over-fetching and slicing locally.
+  const fallbackLimit = Math.min(250, boundedLimit + boundedOffset);
+  const { data: fallbackData, error: fallbackError } = await client.rpc('list_visible_alarm_events', {
+    limit_count: fallbackLimit,
+  });
+
+  if (fallbackError) {
+    throw fallbackError;
+  }
+
+  return ((fallbackData ?? []) as VisibleAlarmEventRow[]).slice(boundedOffset, boundedOffset + boundedLimit);
+}
+
+export async function listVisibleSocialFeed({ limitCount = 8, offsetCount = 0 }: ListVisibleSocialFeedOptions = {}) {
+  const rows = await listVisibleAlarmEventRows(limitCount, offsetCount);
+
+  return rows
     .map(mapVisibleAlarmEventRow)
     .filter((item): item is SocialFeedItem => item !== null)
     .map((item) => ({

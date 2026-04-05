@@ -1,17 +1,19 @@
-import { useEffect, useMemo, useState } from 'react';
-import { DimensionValue, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Animated, DimensionValue, Easing, StyleSheet, Text, View } from 'react-native';
+import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { AppButton } from '@/components/ui/app-button';
 import { AppCard } from '@/components/ui/app-card';
-import { SectionHeader } from '@/components/ui/section-header';
+import { AppScreen } from '@/components/ui/app-screen';
+import { LoadingBlock } from '@/components/ui/loading-block';
 import { StatTile } from '@/components/ui/stat-tile';
 import { StatusPill } from '@/components/ui/status-pill';
-import { Fonts, getAppColors, Radius, Spacing, TextPresets, Type } from '@/constants/theme';
+import { Fonts, Radius, Spacing, TextPresets, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { readAlarmStore } from '@/lib/alarms';
-import { getProgressSummary, ProgressSummary } from '@/lib/progress';
+import { formatAlarmTime, readAlarmStore } from '@/lib/alarms';
+import { getPrimaryAlarm } from '@/lib/dashboard';
+import { ProgressSummary, getProgressSummary } from '@/lib/progress';
 import { getSocialQueueSummary } from '@/lib/social/queue';
 import { Alarm, SuccessHistoryEntry } from '@/types/alarm';
 
@@ -21,6 +23,7 @@ type SuccessState = {
   summary: ProgressSummary;
   successEntry: SuccessHistoryEntry | null;
   shareStatus: SuccessShareStatus | null;
+  nextAlarm: Alarm | null;
 };
 
 type SuccessShareStatus = {
@@ -50,7 +53,7 @@ function getSuccessShareStatus(
     return {
       tone: 'private',
       title: 'Private',
-      copy: 'This result was saved only to your account.',
+      copy: 'Saved only to your account.',
     };
   }
 
@@ -58,16 +61,14 @@ function getSuccessShareStatus(
     return {
       tone: 'queued',
       title: 'Queued',
-      copy: queuedEvent.lastSyncError
-        ? 'Sharing hit a sync issue and will retry automatically.'
-        : 'This result is waiting to sync to your circle.',
+      copy: queuedEvent.lastSyncError ? 'Circle sync will retry automatically.' : 'Syncing to your circle.',
     };
   }
 
   return {
     tone: 'shared',
     title: 'Shared',
-    copy: 'This result is already available in your circle.',
+    copy: 'Available in your circle.',
   };
 }
 
@@ -82,31 +83,80 @@ function getShareTone(tone?: SuccessShareStatus['tone']) {
   }
 }
 
+function getHeroKicker(successState: SuccessState | null) {
+  if (!successState) {
+    return 'Checkpoint cleared';
+  }
+
+  return successState.currentStreak >= 2 ? 'Streak extended' : 'Checkpoint cleared';
+}
+
+function getHeroBody(successState: SuccessState | null, label?: string) {
+  if (!successState) {
+    return label ? `${label} matched before the timer expired.` : 'The checkpoint matched before the timer expired.';
+  }
+
+  if (successState.currentStreak >= 2) {
+    return successState.summary.nextGoalCopy;
+  }
+
+  if (successState.successEntry) {
+    return label
+      ? `${label} cleared in ${successState.successEntry.timeToScanSeconds}s.`
+      : `Cleared in ${successState.successEntry.timeToScanSeconds}s.`;
+  }
+
+  return label ? `${label} matched before time ran out.` : 'The checkpoint matched before time ran out.';
+}
+
+async function triggerSuccessArrival() {
+  try {
+    await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+  } catch {
+    // Haptics are best-effort only.
+  }
+}
+
 export default function SuccessScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ alarmId?: string; label?: string }>();
   const colors = getAppColors(useColorScheme());
+  const [isLoading, setIsLoading] = useState(true);
   const [successState, setSuccessState] = useState<SuccessState | null>(null);
+  const heroOpacity = useRef(new Animated.Value(0)).current;
+  const heroTranslateY = useRef(new Animated.Value(24)).current;
+  const heroScale = useRef(new Animated.Value(0.94)).current;
+  const glowPulse = useRef(new Animated.Value(0)).current;
+  const detailOpacity = useRef(new Animated.Value(0)).current;
+  const detailTranslateY = useRef(new Animated.Value(20)).current;
+  const didCelebrateRef = useRef(false);
 
   useEffect(() => {
     const loadProgress = async () => {
-      const [store, socialQueue] = await Promise.all([readAlarmStore(), getSocialQueueSummary()]);
-      const summary = getProgressSummary(store);
-      const alarm = store.alarms.find((entry) => entry.id === params.alarmId) ?? null;
-      const successEntry =
-        store.successHistory.find((entry) => entry.alarmId === params.alarmId) ?? summary.latestSuccess;
-      const eventId =
-        params.alarmId && successEntry ? `${params.alarmId}-${successEntry.confirmedAt}` : null;
-      const queuedEvent =
-        eventId ? socialQueue.queuedEvents.find((entry) => entry.id === eventId) ?? null : null;
+      setIsLoading(true);
 
-      setSuccessState({
-        currentStreak: store.currentStreak,
-        longestStreak: store.longestStreak,
-        summary,
-        successEntry,
-        shareStatus: getSuccessShareStatus(alarm, successEntry, queuedEvent),
-      });
+      try {
+        const [store, socialQueue] = await Promise.all([readAlarmStore(), getSocialQueueSummary()]);
+        const summary = getProgressSummary(store);
+        const alarm = store.alarms.find((entry) => entry.id === params.alarmId) ?? null;
+        const successEntry =
+          store.successHistory.find((entry) => entry.alarmId === params.alarmId) ?? summary.latestSuccess;
+        const eventId =
+          params.alarmId && successEntry ? `${params.alarmId}-${successEntry.confirmedAt}` : null;
+        const queuedEvent =
+          eventId ? socialQueue.queuedEvents.find((entry) => entry.id === eventId) ?? null : null;
+
+        setSuccessState({
+          currentStreak: store.currentStreak,
+          longestStreak: store.longestStreak,
+          summary,
+          successEntry,
+          shareStatus: getSuccessShareStatus(alarm, successEntry, queuedEvent),
+          nextAlarm: getPrimaryAlarm(store.alarms),
+        });
+      } finally {
+        setIsLoading(false);
+      }
     };
 
     void loadProgress();
@@ -120,199 +170,274 @@ export default function SuccessScreen() {
     return `${Math.max(8, Math.round(successState.summary.milestoneProgress.progressRatio * 100))}%` as DimensionValue;
   }, [successState]);
 
-  const badgeList = successState?.summary.activeBadges ?? [];
   const shareTone = getShareTone(successState?.shareStatus?.tone);
+  const heroKicker = getHeroKicker(successState);
+  const heroBody = getHeroBody(successState, params.label);
+  const keyStatLabel =
+    successState && successState.currentStreak >= 2 ? 'Current streak' : 'Time to scan';
+  const keyStatValue =
+    successState && successState.currentStreak >= 2
+      ? `${successState.currentStreak}`
+      : formatTimeToScan(successState?.successEntry ?? null);
+
+  useEffect(() => {
+    if (isLoading || !successState || didCelebrateRef.current) {
+      return;
+    }
+
+    didCelebrateRef.current = true;
+    void triggerSuccessArrival();
+
+    Animated.parallel([
+      Animated.spring(heroOpacity, {
+        toValue: 1,
+        friction: 8,
+        tension: 70,
+        useNativeDriver: true,
+      }),
+      Animated.spring(heroTranslateY, {
+        toValue: 0,
+        friction: 8,
+        tension: 70,
+        useNativeDriver: true,
+      }),
+      Animated.spring(heroScale, {
+        toValue: 1,
+        friction: 7,
+        tension: 85,
+        useNativeDriver: true,
+      }),
+      Animated.sequence([
+        Animated.timing(glowPulse, {
+          toValue: 1,
+          duration: 360,
+          easing: Easing.out(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(glowPulse, {
+          toValue: 0.25,
+          duration: 700,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ]),
+      Animated.sequence([
+        Animated.delay(120),
+        Animated.parallel([
+          Animated.timing(detailOpacity, {
+            toValue: 1,
+            duration: 360,
+            easing: Easing.out(Easing.quad),
+            useNativeDriver: true,
+          }),
+          Animated.timing(detailTranslateY, {
+            toValue: 0,
+            duration: 360,
+            easing: Easing.out(Easing.quad),
+            useNativeDriver: true,
+          }),
+        ]),
+      ]),
+    ]).start();
+  }, [detailOpacity, detailTranslateY, glowPulse, heroOpacity, heroScale, heroTranslateY, isLoading, successState]);
+
+  const glowScale = glowPulse.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.88, 1.08],
+  });
+  const glowOpacity = glowPulse.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.1, 0.28],
+  });
 
   return (
-    <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.canvas }]}>
-      <ScrollView
-        contentContainerStyle={styles.content}
-        contentInsetAdjustmentBehavior="automatic"
-        showsVerticalScrollIndicator={false}>
-        <AppCard elevated tone="success" style={styles.heroCard}>
-          <View style={styles.heroHeader}>
-            <View style={styles.heroCopy}>
-              <Text style={[TextPresets.eyebrow, { color: colors.success }]}>Alarm cleared</Text>
-              <Text style={[styles.title, { color: colors.text }]}>On time.</Text>
-              <Text style={[TextPresets.body, { color: colors.textSoft }]}>
-                {params.label
-                  ? `${params.label} was cleared in time.`
-                  : 'The QR code matched before the timer expired.'}
-              </Text>
-            </View>
-            <StatusPill label="Validated" tone="success" />
-          </View>
-
-          <View style={[styles.heroPanel, { backgroundColor: colors.elevated, borderColor: colors.success }]}>
-            <Text style={[TextPresets.label, { color: colors.muted }]}>Current level</Text>
-            <Text style={[styles.heroValue, { color: colors.text }]}>
-              {successState?.summary.checkpointTitle ?? 'Getting Started'}
-            </Text>
-            <Text style={[TextPresets.body, { color: colors.textSoft }]}>
-              {successState?.summary.nextGoalCopy ?? 'Keep going to reach the next level.'}
-            </Text>
-          </View>
-        </AppCard>
-
-        <SectionHeader
-          kicker="Result"
-          title="This run"
-          description="What counted and what changed."
+    <AppScreen>
+      {isLoading ? (
+        <LoadingBlock
+          description="Adding this clear to your streak."
+          style={styles.loadingCard}
+          title="Saving the win"
+          tone="success"
         />
+      ) : null}
 
-        <View style={styles.statGrid}>
-          <StatTile label="Current streak" tone="primary" value={`${successState?.currentStreak ?? '--'}`} />
-          <StatTile label="Best streak" value={`${successState?.longestStreak ?? '--'}`} />
-          <StatTile
-            helper={successState?.successEntry ? 'Time from ring to valid QR scan' : undefined}
-            label="Time to scan"
-            tone="success"
-            value={formatTimeToScan(successState?.successEntry ?? null)}
-          />
-        </View>
+      {!isLoading && successState ? (
+        <>
+          <Animated.View
+            style={[
+              styles.heroShell,
+              {
+                opacity: heroOpacity,
+                transform: [{ translateY: heroTranslateY }, { scale: heroScale }],
+              },
+            ]}>
+            <View pointerEvents="none" style={[styles.heroBackdropOrb, styles.heroBackdropTop, { backgroundColor: colors.success }]} />
+            <View pointerEvents="none" style={[styles.heroBackdropOrb, styles.heroBackdropBottom, { backgroundColor: colors.primary }]} />
+            <Animated.View
+              pointerEvents="none"
+              style={[
+                styles.heroGlow,
+                {
+                  backgroundColor: colors.success,
+                  opacity: glowOpacity,
+                  transform: [{ scale: glowScale }],
+                },
+              ]}
+            />
 
-        {successState?.shareStatus ? (
-          <AppCard elevated tone={shareTone === 'success' ? 'success' : shareTone === 'primary' ? 'primary' : 'default'}>
-            <View style={styles.shareHeader}>
-              <SectionHeader
-                title="Social result"
-                description={successState.shareStatus.copy}
-              />
-              <StatusPill
-                label={successState.shareStatus.tone === 'shared' ? 'Delivered' : successState.shareStatus.tone === 'queued' ? 'Queued' : 'Private'}
-                tone={shareTone}
-              />
-            </View>
-            <Text style={[styles.shareTitle, { color: shareTone === 'success' ? colors.success : shareTone === 'primary' ? colors.primary : colors.text }]}>
-              {successState.shareStatus.title}
-            </Text>
-          </AppCard>
-        ) : null}
-
-        <AppCard elevated>
-          <SectionHeader
-            kicker="Progress"
-            title="Progress"
-            description={
-              successState?.summary.nextStreakMilestone
-                ? `Next up: ${successState.summary.nextStreakMilestone.title}`
-                : 'You are in the highest streak tier.'
-            }
-          />
-          <Text style={[styles.milestoneTitle, { color: colors.primary }]}>
-            {successState?.summary.currentStreakMilestone?.title ??
-              successState?.summary.milestoneProgress.currentLabel ??
-              'Getting Started'}
-          </Text>
-          <View style={[styles.progressTrack, { backgroundColor: colors.border }]}>
-            <View style={[styles.progressFill, { backgroundColor: colors.primary, width: progressWidth }]} />
-          </View>
-          <Text style={[TextPresets.body, { color: colors.muted }]}>
-            {successState?.summary.nextGoalCopy ?? 'Keep going to reach the next level.'}
-          </Text>
-        </AppCard>
-
-        <AppCard elevated>
-          <SectionHeader
-            kicker="Badges"
-            title="Recent badges"
-            description="Small progress markers."
-          />
-          <View style={styles.badgeList}>
-            {(badgeList.length > 0
-              ? badgeList
-              : [
-                  {
-                    id: 'showed-up',
-                    label: 'Cleared',
-                    description: 'You finished before the timer ran out.',
-                  },
-                ]
-            ).map((badge) => (
-              <View
-                key={badge.id}
-                style={[
-                  styles.badgeChip,
-                  {
-                    backgroundColor: colors.elevated,
-                    borderColor: colors.border,
-                  },
-                ]}>
-                <Text style={[TextPresets.label, { color: colors.primary }]}>{badge.label}</Text>
-                <Text style={[TextPresets.body, { color: colors.muted }]}>{badge.description}</Text>
+            <AppCard elevated style={[styles.heroCard, { backgroundColor: colors.card, borderColor: colors.line }]}>
+              <View style={styles.heroTopRow}>
+                <Text style={[TextPresets.eyebrow, { color: colors.success }]}>{heroKicker}</Text>
+                <StatusPill label="Cleared" tone="success" />
               </View>
-            ))}
-          </View>
-        </AppCard>
+              <Text style={[styles.title, { color: colors.text }]}>Checkpoint cleared</Text>
+              <Text style={[styles.heroBody, { color: colors.textSoft }]}>{heroBody}</Text>
 
-        <AppButton label="Back to today" onPress={() => router.replace('/')} />
-      </ScrollView>
-    </SafeAreaView>
+              <View style={styles.heroHighlights}>
+                <StatTile label={keyStatLabel} tone="success" value={keyStatValue} />
+                <StatTile label="Best streak" tone="primary" value={`${successState.longestStreak}`} />
+              </View>
+
+              {successState.shareStatus ? (
+                <View style={[styles.heroFooter, { borderTopColor: colors.line }]}>
+                  <StatusPill label={successState.shareStatus.title} tone={shareTone} />
+                  <Text style={[styles.shareCopy, { color: colors.textSoft }]}>{successState.shareStatus.copy}</Text>
+                </View>
+              ) : null}
+            </AppCard>
+          </Animated.View>
+
+          <Animated.View
+            style={[
+              styles.detailStack,
+              {
+                opacity: detailOpacity,
+                transform: [{ translateY: detailTranslateY }],
+              },
+            ]}>
+            <AppCard elevated tone="canvas" style={styles.nextCard}>
+              <View style={styles.nextHeader}>
+                <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Next</Text>
+                <Text style={[styles.nextTitle, { color: colors.text }]}>
+                  {successState.nextAlarm
+                    ? `${formatAlarmTime(successState.nextAlarm.hour, successState.nextAlarm.minute)} · ${successState.nextAlarm.label}`
+                    : 'Schedule the next checkpoint'}
+                </Text>
+                <Text style={[styles.nextBody, { color: colors.textSoft }]}>{successState.summary.nextGoalCopy}</Text>
+              </View>
+              <View style={[styles.progressTrack, { backgroundColor: colors.border }]}>
+                <View style={[styles.progressFill, { backgroundColor: colors.primary, width: progressWidth }]} />
+              </View>
+              <Text style={[styles.progressCaption, { color: colors.textSoft }]}>
+                {successState.summary.currentStreakMilestone?.title ??
+                  successState.summary.milestoneProgress.currentLabel ??
+                  'Getting started'}
+                {successState.summary.milestoneProgress.nextLabel
+                  ? ` · ${successState.summary.milestoneProgress.remainingWins} to go`
+                  : ''}
+              </Text>
+              <View style={styles.buttonRow}>
+                <AppButton
+                  label={successState.nextAlarm ? 'Manage alarms' : 'Create next alarm'}
+                  onPress={() => router.replace(successState.nextAlarm ? '/alarms' : '/create')}
+                  style={styles.buttonFill}
+                />
+                <AppButton
+                  label="Back to today"
+                  onPress={() => router.replace('/')}
+                  style={styles.buttonFill}
+                  variant="secondary"
+                />
+              </View>
+            </AppCard>
+          </Animated.View>
+        </>
+      ) : null}
+    </AppScreen>
   );
 }
 
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
+  loadingCard: {
+    minHeight: 200,
   },
-  content: {
-    gap: Spacing.xl,
-    padding: Spacing.xl,
-    paddingBottom: Spacing.xxl,
+  heroShell: {
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  heroBackdropOrb: {
+    borderRadius: 180,
+    height: 180,
+    opacity: 0.1,
+    position: 'absolute',
+    width: 180,
+  },
+  heroBackdropTop: {
+    right: -36,
+    top: -12,
+  },
+  heroBackdropBottom: {
+    bottom: 18,
+    left: -48,
+  },
+  heroGlow: {
+    alignSelf: 'center',
+    borderRadius: 200,
+    height: 200,
+    position: 'absolute',
+    top: 36,
+    width: 200,
   },
   heroCard: {
-    gap: Spacing.lg,
+    gap: Spacing.md,
   },
-  heroHeader: {
+  heroTopRow: {
     alignItems: 'flex-start',
     flexDirection: 'row',
     gap: Spacing.md,
     justifyContent: 'space-between',
-  },
-  heroCopy: {
-    flex: 1,
-    gap: Spacing.xs,
   },
   title: {
     fontFamily: Fonts.rounded,
-    fontSize: 36,
+    fontSize: 34,
     fontWeight: '800',
-    lineHeight: 40,
+    lineHeight: 38,
   },
-  heroPanel: {
-    borderRadius: Radius.lg,
-    borderWidth: 1,
+  heroBody: {
+    ...TextPresets.body,
+  },
+  heroHighlights: {
+    flexDirection: 'row',
+    gap: Spacing.md,
+  },
+  heroFooter: {
+    alignItems: 'center',
+    borderTopWidth: 1,
+    flexDirection: 'row',
+    gap: Spacing.md,
+    paddingTop: Spacing.md,
+  },
+  shareCopy: {
+    ...TextPresets.body,
+    flex: 1,
+  },
+  detailStack: {
+    gap: Spacing.lg,
+  },
+  nextCard: {
+    gap: Spacing.md,
+  },
+  nextHeader: {
     gap: Spacing.xs,
-    padding: Spacing.lg,
   },
-  heroValue: {
-    fontFamily: Fonts.rounded,
-    fontSize: Type.titleLg,
-    fontWeight: '800',
-    lineHeight: 32,
-  },
-  statGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.md,
-  },
-  shareHeader: {
-    alignItems: 'flex-start',
-    flexDirection: 'row',
-    gap: Spacing.md,
-    justifyContent: 'space-between',
-  },
-  shareTitle: {
+  nextTitle: {
     fontFamily: Fonts.rounded,
     fontSize: 22,
-    fontWeight: '700',
+    fontWeight: '800',
     lineHeight: 28,
   },
-  milestoneTitle: {
-    fontFamily: Fonts.rounded,
-    fontSize: 24,
-    fontWeight: '800',
-    lineHeight: 30,
+  nextBody: {
+    ...TextPresets.body,
   },
   progressTrack: {
     borderRadius: Radius.pill,
@@ -323,13 +448,18 @@ const styles = StyleSheet.create({
     borderRadius: Radius.pill,
     height: '100%',
   },
-  badgeList: {
+  progressCaption: {
+    ...TextPresets.body,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  buttonRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: Spacing.sm,
   },
-  badgeChip: {
-    borderRadius: Radius.md,
-    borderWidth: 1,
-    gap: Spacing.xs,
-    padding: Spacing.md,
+  buttonFill: {
+    flexBasis: 180,
+    flexGrow: 1,
   },
 });

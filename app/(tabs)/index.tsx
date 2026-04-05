@@ -1,17 +1,17 @@
 import { useCallback, useMemo, useState } from 'react';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
 
 import { AppButton } from '@/components/ui/app-button';
 import { AppCard } from '@/components/ui/app-card';
+import { AppScreen } from '@/components/ui/app-screen';
+import { EmptyState } from '@/components/ui/empty-state';
+import { LoadingBlock } from '@/components/ui/loading-block';
 import { PageHeader } from '@/components/ui/page-header';
-import { SectionHeader } from '@/components/ui/section-header';
-import { StatTile } from '@/components/ui/stat-tile';
 import { StatusPill } from '@/components/ui/status-pill';
-import { Fonts, Shadows, Spacing, TextPresets, Type, getAppColors } from '@/constants/theme';
+import { Fonts, Radius, Spacing, TextPresets, Type, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { hydrateAlarmRuntimeForCurrentUser, readAlarmStore, formatAlarmTime } from '@/lib/alarms';
+import { formatAlarmTime, hydrateAlarmRuntimeForCurrentUser, readAlarmStore } from '@/lib/alarms';
 import {
   formatSocialTimestamp,
   getAlarmPhaseLabel,
@@ -21,12 +21,12 @@ import {
   getSocialStatusLabel,
   getSocialStatusTone,
 } from '@/lib/dashboard';
-import { getProgressSummary, ProgressSummary } from '@/lib/progress';
+import { ProgressSummary, getProgressSummary } from '@/lib/progress';
 import { listMySocialCircles } from '@/lib/social/circles';
 import { getSocialRuntimeSnapshot } from '@/lib/social/queue';
 import { SocialRuntimeSnapshot } from '@/lib/social/types';
 import { useSocialSession } from '@/providers/social-session-provider';
-import { Alarm, FailureHistoryEntry, FREE_ALARM_LIMIT, SuccessHistoryEntry } from '@/types/alarm';
+import { Alarm, FailureHistoryEntry, SuccessHistoryEntry } from '@/types/alarm';
 
 type HomeState = {
   alarms: Alarm[];
@@ -69,10 +69,23 @@ function getLatestOutcome(
   return null;
 }
 
+function getCircleSummary(circleCount: number, lastSuccessfulSyncAt?: string | null) {
+  if (circleCount === 0) {
+    return 'No circles linked yet';
+  }
+
+  if (!lastSuccessfulSyncAt) {
+    return `${circleCount} circle${circleCount === 1 ? '' : 's'} ready`;
+  }
+
+  return `${circleCount} circle${circleCount === 1 ? '' : 's'} · ${formatSocialTimestamp(lastSuccessfulSyncAt)}`;
+}
+
 export default function TodayScreen() {
   const router = useRouter();
   const colors = getAppColors(useColorScheme());
   const { configured, profile, user } = useSocialSession();
+  const [isLoading, setIsLoading] = useState(true);
   const [state, setState] = useState<HomeState>({
     alarms: [],
     currentStreak: 0,
@@ -86,25 +99,30 @@ export default function TodayScreen() {
 
   const loadHome = useCallback(async () => {
     const shouldLoadCircles = Boolean(configured && user);
+    setIsLoading(true);
 
-    await hydrateAlarmRuntimeForCurrentUser().catch(() => null);
+    try {
+      await hydrateAlarmRuntimeForCurrentUser().catch(() => null);
 
-    const [store, socialRuntime, circles] = await Promise.all([
-      readAlarmStore(),
-      getSocialRuntimeSnapshot(),
-      shouldLoadCircles ? listMySocialCircles().catch(() => []) : Promise.resolve([]),
-    ]);
+      const [store, socialRuntime, circles] = await Promise.all([
+        readAlarmStore(),
+        getSocialRuntimeSnapshot(),
+        shouldLoadCircles ? listMySocialCircles().catch(() => []) : Promise.resolve([]),
+      ]);
 
-    setState({
-      alarms: store.alarms,
-      currentStreak: store.currentStreak,
-      lifetimeAlarmCreations: store.lifetimeAlarmCreations,
-      progressSummary: getProgressSummary(store),
-      socialRuntime,
-      circleCount: circles.length,
-      latestSuccess: store.successHistory[0] ?? null,
-      latestFailure: store.failureHistory[0] ?? null,
-    });
+      setState({
+        alarms: store.alarms,
+        currentStreak: store.currentStreak,
+        lifetimeAlarmCreations: store.lifetimeAlarmCreations,
+        progressSummary: getProgressSummary(store),
+        socialRuntime,
+        circleCount: circles.length,
+        latestSuccess: store.successHistory[0] ?? null,
+        latestFailure: store.failureHistory[0] ?? null,
+      });
+    } finally {
+      setIsLoading(false);
+    }
   }, [configured, user]);
 
   useFocusEffect(
@@ -114,183 +132,209 @@ export default function TodayScreen() {
   );
 
   const primaryAlarm = useMemo(() => getPrimaryAlarm(state.alarms), [state.alarms]);
-  const freeSlotsRemaining = Math.max(0, FREE_ALARM_LIMIT - state.lifetimeAlarmCreations);
   const socialStatusLabel = getSocialStatusLabel(state.socialRuntime);
   const socialStatusTone = getSocialStatusTone(state.socialRuntime);
   const latestOutcome = getLatestOutcome(state.latestSuccess, state.latestFailure);
+  const primaryActionLabel = primaryAlarm && getAlarmPhaseLabel(primaryAlarm) === 'Scan now' ? 'Open scanner' : 'Create alarm';
 
   return (
-    <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.canvas }]}>
-      <View pointerEvents="none" style={[styles.backdropOrb, styles.backdropTop, { backgroundColor: colors.primary }]} />
-      <View pointerEvents="none" style={[styles.backdropOrb, styles.backdropBottom, { backgroundColor: colors.accent }]} />
+    <AppScreen>
+      <PageHeader
+        badgeLabel={user ? `@${profile?.handle ?? 'account'}` : configured ? 'Local' : 'Offline'}
+        badgeTone={user ? 'success' : configured ? 'warning' : 'default'}
+        eyebrow="Today"
+        title="One next step."
+        description="Your next checkpoint first."
+      />
 
-      <ScrollView
-        contentContainerStyle={styles.content}
-        contentInsetAdjustmentBehavior="automatic"
-        showsVerticalScrollIndicator={false}>
-        <PageHeader
-          eyebrow="Today"
-          title="Your morning at a glance"
-          description="Next alarm, streak, and latest result."
-          badgeLabel={user ? `@${profile?.handle ?? 'account'}` : configured ? 'Guest' : 'Offline'}
-          badgeTone={user ? 'success' : configured ? 'warning' : 'default'}
+      {isLoading ? (
+        <LoadingBlock
+          description="Checking your next checkpoint and latest proof."
+          style={styles.loadingHero}
+          title="Loading today"
+          tone="canvas"
         />
-
-        <AppCard elevated style={[styles.heroCard, Shadows.hero]} tone="primary">
-          <View style={styles.heroHeader}>
-            <View style={styles.heroCopy}>
+      ) : state.alarms.length === 0 ? (
+        <EmptyState
+          actionLabel="Create your first alarm"
+          description="Set one checkpoint alarm and Today becomes your calm starting point."
+          eyebrow="Today"
+          onAction={() => router.push('/create')}
+          title="No alarm scheduled"
+          tone="primary"
+        />
+      ) : (
+        <>
+          <AppCard elevated tone="primary" variant="hero" style={styles.heroCard}>
+            <View style={styles.heroTopRow}>
               <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Next checkpoint</Text>
+              <StatusPill label={getAlarmPhaseLabel(primaryAlarm)} tone={getAlarmPhaseTone(primaryAlarm)} />
+            </View>
+
+            <View style={styles.heroCopy}>
               <Text style={[styles.heroTime, { color: colors.text }]}>
                 {primaryAlarm ? formatAlarmTime(primaryAlarm.hour, primaryAlarm.minute) : 'No alarm'}
               </Text>
               <Text style={[styles.heroLabel, { color: colors.text }]}>
                 {primaryAlarm ? primaryAlarm.label : 'Create your first alarm'}
               </Text>
-              <Text style={[TextPresets.body, { color: colors.textSoft }]}>{getPrimaryAlarmCopy(primaryAlarm)}</Text>
+              <Text style={[TextPresets.bodyLg, { color: colors.textSoft }]}>{getPrimaryAlarmCopy(primaryAlarm)}</Text>
             </View>
-            <StatusPill label={getAlarmPhaseLabel(primaryAlarm)} tone={getAlarmPhaseTone(primaryAlarm)} />
-          </View>
 
-          <View style={styles.heroActions}>
-            <AppButton
-              label="New alarm"
-              onPress={() => router.push('/create')}
-              style={styles.heroAction}
-            />
-            <AppButton
-              label="Manage alarms"
-              onPress={() => router.push('/alarms')}
-              style={styles.heroAction}
-              variant="secondary"
-            />
-          </View>
-        </AppCard>
-
-        <View style={styles.metricGrid}>
-          <StatTile label="Current streak" tone="primary" value={`${state.currentStreak}`} />
-          <StatTile
-            helper={`${state.progressSummary?.weeklyStats.successes ?? 0}/${state.progressSummary?.weeklyStats.attempts ?? 0} clears`}
-            label="This week"
-            tone="success"
-            value={`${state.progressSummary?.weeklyStats.completionRate ?? 0}%`}
-          />
-          <StatTile
-            helper={`${Math.min(state.lifetimeAlarmCreations, FREE_ALARM_LIMIT)} of ${FREE_ALARM_LIMIT} used`}
-            label="Free slots"
-            value={`${freeSlotsRemaining}`}
-          />
-        </View>
-
-        <SectionHeader
-          kicker="Today"
-          title="At a glance"
-          description="Only the essentials."
-        />
-
-        <View style={styles.glanceGrid}>
-          <AppCard elevated style={styles.glanceCard}>
-            <Text style={[TextPresets.label, { color: colors.text }]}>Latest result</Text>
-            {latestOutcome ? (
-              <>
-                <StatusPill label={latestOutcome.tone === 'success' ? 'Cleared' : 'Missed'} tone={latestOutcome.tone} />
-                <Text style={[styles.glanceTitle, { color: colors.text }]}>{latestOutcome.title}</Text>
-                <Text style={[TextPresets.body, { color: colors.muted }]}>{latestOutcome.detail}</Text>
-              </>
-            ) : (
-              <Text style={[TextPresets.body, { color: colors.muted }]}>
-                Complete a checkpoint and the latest result will appear here.
-              </Text>
-            )}
+            <View style={styles.heroFooter}>
+              <View style={styles.heroMeta}>
+                <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>Library</Text>
+                <Text style={[styles.heroMetaValue, { color: colors.text }]}>
+                  {state.alarms.length} alarm{state.alarms.length === 1 ? '' : 's'} saved
+                </Text>
+              </View>
+              <AppButton
+                label={primaryActionLabel}
+                onPress={() => {
+                  if (getAlarmPhaseLabel(primaryAlarm) === 'Scan now' && primaryAlarm) {
+                    router.push(`/ringing?alarmId=${primaryAlarm.id}`);
+                  } else {
+                    router.push('/create');
+                  }
+                }}
+                style={styles.heroAction}
+              />
+            </View>
           </AppCard>
 
-          <AppCard elevated style={styles.glanceCard}>
-            <Text style={[TextPresets.label, { color: colors.text }]}>Circles</Text>
-            <StatusPill label={socialStatusLabel} tone={socialStatusTone} />
-            <Text style={[styles.glanceTitle, { color: colors.text }]}>
-              {state.circleCount} circle{state.circleCount === 1 ? '' : 's'}
-            </Text>
-            <Text style={[TextPresets.body, { color: colors.muted }]}>
-              Last delivery {formatSocialTimestamp(state.socialRuntime?.queue.lastSuccessfulSyncAt)}
-            </Text>
+          <AppCard elevated tone="canvas" style={styles.secondaryCard}>
+            <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Momentum</Text>
+            <View style={styles.secondaryRows}>
+              <SupportRow
+                body={latestOutcome ? latestOutcome.detail : 'Your latest result appears here after the first clear or miss.'}
+                label="Latest result"
+                onPress={() => router.push('/alarms')}
+                pillLabel={latestOutcome ? (latestOutcome.tone === 'success' ? 'Cleared' : 'Missed') : 'Waiting'}
+                pillTone={latestOutcome ? latestOutcome.tone : 'default'}
+                title={latestOutcome ? latestOutcome.title : 'No completed run yet'}
+              />
+              <SupportRow
+                body={getCircleSummary(state.circleCount, state.socialRuntime?.queue.lastSuccessfulSyncAt)}
+                label="Circles"
+                onPress={() => router.push('/circles')}
+                pillLabel={socialStatusLabel}
+                pillTone={socialStatusTone}
+                title={state.circleCount === 0 ? 'Private' : `${state.circleCount} circle${state.circleCount === 1 ? '' : 's'}`}
+              />
+            </View>
           </AppCard>
-        </View>
-      </ScrollView>
-    </SafeAreaView>
+        </>
+      )}
+    </AppScreen>
+  );
+}
+
+function SupportRow({
+  label,
+  title,
+  body,
+  pillLabel,
+  pillTone,
+  onPress,
+}: {
+  label: string;
+  title: string;
+  body: string;
+  pillLabel: string;
+  pillTone: 'default' | 'primary' | 'success' | 'danger' | 'warning';
+  onPress: () => void;
+}) {
+  const colors = getAppColors(useColorScheme());
+
+  return (
+    <Pressable onPress={onPress} style={({ pressed }) => [styles.supportRow, { borderColor: colors.line }, pressed && styles.pressedRow]}>
+      <View style={styles.supportRowCopy}>
+        <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>{label}</Text>
+        <Text style={[styles.supportRowTitle, { color: colors.text }]}>{title}</Text>
+        <Text style={[styles.supportRowBody, { color: colors.textSoft }]}>{body}</Text>
+      </View>
+      <StatusPill label={pillLabel} tone={pillTone} />
+    </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-  },
-  backdropOrb: {
-    borderRadius: 240,
-    height: 260,
-    opacity: 0.1,
-    position: 'absolute',
-    width: 260,
-  },
-  backdropTop: {
-    right: -70,
-    top: 12,
-  },
-  backdropBottom: {
-    bottom: 180,
-    left: -100,
-  },
-  content: {
-    gap: Spacing.xl,
-    padding: Spacing.xl,
-    paddingBottom: 128,
+  loadingHero: {
+    minHeight: 188,
   },
   heroCard: {
-    gap: Spacing.lg,
+    gap: Spacing.xl,
   },
-  heroHeader: {
+  heroTopRow: {
     alignItems: 'flex-start',
     flexDirection: 'row',
     gap: Spacing.md,
     justifyContent: 'space-between',
   },
   heroCopy: {
-    flex: 1,
-    gap: Spacing.xs,
+    gap: Spacing.sm,
   },
   heroTime: {
     fontFamily: Fonts.rounded,
     fontSize: Type.hero,
     fontWeight: '800',
-    letterSpacing: -0.8,
-    lineHeight: 42,
+    letterSpacing: -1.4,
+    lineHeight: 56,
   },
   heroLabel: {
     fontFamily: Fonts.rounded,
-    fontSize: 22,
+    fontSize: 24,
     fontWeight: '700',
-    lineHeight: 28,
+    lineHeight: 30,
   },
-  heroActions: {
+  heroFooter: {
+    alignItems: 'center',
     flexDirection: 'row',
-    gap: Spacing.sm,
+    gap: Spacing.md,
+    justifyContent: 'space-between',
+  },
+  heroMeta: {
+    flex: 1,
+    gap: Spacing.xs,
+  },
+  heroMetaValue: {
+    ...TextPresets.title,
+    fontSize: 20,
+    lineHeight: 26,
   },
   heroAction: {
-    flex: 1,
+    minWidth: 160,
   },
-  metricGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
+  secondaryCard: {
     gap: Spacing.md,
   },
-  glanceGrid: {
-    gap: Spacing.md,
-  },
-  glanceCard: {
+  secondaryRows: {
     gap: Spacing.sm,
   },
-  glanceTitle: {
-    fontFamily: Fonts.rounded,
+  supportRow: {
+    alignItems: 'flex-start',
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: Spacing.md,
+    justifyContent: 'space-between',
+    padding: Spacing.md,
+  },
+  pressedRow: {
+    opacity: 0.88,
+  },
+  supportRowCopy: {
+    flex: 1,
+    gap: Spacing.xs,
+  },
+  supportRowTitle: {
+    ...TextPresets.title,
     fontSize: 20,
-    fontWeight: '700',
-    lineHeight: 24,
+    lineHeight: 26,
+  },
+  supportRowBody: {
+    ...TextPresets.body,
+    fontSize: 15,
+    lineHeight: 22,
   },
 });

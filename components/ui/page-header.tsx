@@ -1,7 +1,7 @@
 import { ReactNode } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
-import { getAppColors, Spacing, TextPresets, Type, Fonts } from '@/constants/theme';
+import { getAppColors, Spacing, TextPresets } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { StatusPill } from '@/components/ui/status-pill';
 
@@ -12,6 +12,7 @@ type PageHeaderProps = {
   action?: ReactNode;
   badgeLabel?: string;
   badgeTone?: 'default' | 'primary' | 'success' | 'danger' | 'warning';
+  size?: 'default' | 'compact';
 };
 
 export function PageHeader({
@@ -21,19 +22,28 @@ export function PageHeader({
   action,
   badgeLabel,
   badgeTone = 'default',
+  size = 'default',
 }: PageHeaderProps) {
   const colors = getAppColors(useColorScheme());
 
   return (
     <View style={styles.wrap}>
       <View style={styles.copy}>
-        {eyebrow ? <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>{eyebrow}</Text> : null}
-        <Text style={[styles.title, { color: colors.text }]}>{title}</Text>
-        {description ? <Text style={[TextPresets.body, { color: colors.muted }]}>{description}</Text> : null}
+        {(eyebrow || badgeLabel) ? (
+          <View style={styles.metaRow}>
+            {eyebrow ? <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>{eyebrow}</Text> : null}
+            {badgeLabel ? <StatusPill label={badgeLabel} tone={badgeTone} /> : null}
+          </View>
+        ) : null}
+        <Text style={[styles.title, size === 'compact' && styles.titleCompact, { color: colors.text }]}>{title}</Text>
+        {description ? (
+          <Text style={[styles.description, size === 'compact' && styles.descriptionCompact, { color: colors.textSoft }]}>
+            {description}
+          </Text>
+        ) : null}
       </View>
 
       {action ? <View style={styles.action}>{action}</View> : null}
-      {badgeLabel ? <StatusPill label={badgeLabel} tone={badgeTone} /> : null}
     </View>
   );
 }
@@ -47,16 +57,30 @@ const styles = StyleSheet.create({
   },
   copy: {
     flex: 1,
-    gap: Spacing.xs,
+    gap: Spacing.sm,
+  },
+  metaRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.sm,
   },
   title: {
-    fontFamily: Fonts.rounded,
-    fontSize: Type.titleLg,
-    fontWeight: '800',
-    letterSpacing: -0.4,
-    lineHeight: 32,
+    ...TextPresets.titleLg,
+  },
+  titleCompact: {
+    ...TextPresets.title,
+  },
+  description: {
+    ...TextPresets.body,
+    maxWidth: 520,
+  },
+  descriptionCompact: {
+    fontSize: 15,
+    lineHeight: 22,
   },
   action: {
-    alignSelf: 'center',
+    alignSelf: 'flex-start',
+    paddingTop: Spacing.xs,
   },
 });

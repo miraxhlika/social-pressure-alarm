@@ -9,17 +9,18 @@ type SectionHeaderProps = {
   description?: string;
   kicker?: string;
   action?: ReactNode;
+  size?: 'default' | 'compact';
 };
 
-export function SectionHeader({ title, description, kicker, action }: SectionHeaderProps) {
+export function SectionHeader({ title, description, kicker, action, size = 'default' }: SectionHeaderProps) {
   const colors = getAppColors(useColorScheme());
 
   return (
     <View style={styles.row}>
       <View style={styles.copy}>
         {kicker ? <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>{kicker}</Text> : null}
-        <Text style={[TextPresets.title, { color: colors.text }]}>{title}</Text>
-        {description ? <Text style={[TextPresets.body, { color: colors.muted }]}>{description}</Text> : null}
+        <Text style={[styles.title, size === 'compact' && styles.titleCompact, { color: colors.text }]}>{title}</Text>
+        {description ? <Text style={[styles.description, size === 'compact' && styles.descriptionCompact, { color: colors.textSoft }]}>{description}</Text> : null}
       </View>
       {action ? <View style={styles.action}>{action}</View> : null}
     </View>
@@ -35,10 +36,24 @@ const styles = StyleSheet.create({
   },
   copy: {
     flex: 1,
-    gap: Spacing.xs,
+    gap: Spacing.sm,
+  },
+  title: {
+    ...TextPresets.title,
+  },
+  titleCompact: {
+    fontSize: 22,
+    lineHeight: 28,
+  },
+  description: {
+    ...TextPresets.body,
+  },
+  descriptionCompact: {
+    fontSize: 15,
+    lineHeight: 22,
   },
   action: {
-    alignSelf: 'center',
+    alignSelf: 'flex-start',
     paddingTop: Spacing.xs,
   },
 });
