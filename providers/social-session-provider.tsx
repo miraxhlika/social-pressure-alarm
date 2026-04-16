@@ -3,22 +3,24 @@ import * as Linking from 'expo-linking';
 import { Session, User } from '@supabase/supabase-js';
 
 import {
+  signInWithApple,
+  signInWithGoogle,
   getSocialAuthRedirectUrl,
   handleSupabaseAuthRedirect,
-  sendMagicLink,
-  signInWithPassword,
   signOutSocialSession,
-  signUpWithPassword,
 } from '@/lib/social/auth';
 import { getSupabaseClient, getSocialSession } from '@/lib/social/client';
 import { hasSocialBackendConfig } from '@/lib/social/config';
 import { getMySocialProfile, upsertMySocialProfile } from '@/lib/social/profile';
 import { SocialProfile, UpsertSocialProfileInput } from '@/lib/social/types';
 
+type SocialAuthProvider = 'google' | 'apple';
+
 type SocialSessionContextValue = {
   configured: boolean;
   authRedirectUrl: string;
   isLoading: boolean;
+  authProviderInFlight: SocialAuthProvider | null;
   isProfileLoading: boolean;
   session: Session | null;
   user: User | null;
@@ -26,12 +28,8 @@ type SocialSessionContextValue = {
   profileError: string | null;
   isProfileComplete: boolean;
   refreshProfile: () => Promise<void>;
-  signIn: (email: string, password: string) => Promise<void>;
-  signUp: (
-    email: string,
-    password: string
-  ) => Promise<{ requiresEmailConfirmation: boolean; emailAddress: string }>;
-  requestMagicLink: (email: string) => Promise<string>;
+  continueWithGoogle: () => Promise<void>;
+  continueWithApple: () => Promise<void>;
   signOut: () => Promise<void>;
   saveProfile: (input: UpsertSocialProfileInput) => Promise<SocialProfile>;
 };
@@ -48,6 +46,7 @@ export function SocialSessionProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<SocialProfile | null>(null);
   const [isLoading, setIsLoading] = useState(configured);
+  const [authProviderInFlight, setAuthProviderInFlight] = useState<SocialAuthProvider | null>(null);
   const [isProfileLoading, setIsProfileLoading] = useState(false);
   const [profileError, setProfileError] = useState<string | null>(null);
 
@@ -93,7 +92,7 @@ export function SocialSessionProvider({ children }: { children: ReactNode }) {
         }
       } catch (error) {
         if (isMounted) {
-          setProfileError(getErrorMessage(error, 'Unable to complete the email sign-in link.'));
+          setProfileError(getErrorMessage(error, 'Unable to complete the sign-in redirect.'));
         }
       }
 
@@ -134,7 +133,7 @@ export function SocialSessionProvider({ children }: { children: ReactNode }) {
     const linkSubscription = Linking.addEventListener('url', ({ url }) => {
       void handleSupabaseAuthRedirect(url).catch((error: unknown) => {
         if (isMounted) {
-          setProfileError(getErrorMessage(error, 'Unable to complete the email sign-in link.'));
+          setProfileError(getErrorMessage(error, 'Unable to complete the sign-in redirect.'));
         }
       });
     });
@@ -157,22 +156,24 @@ export function SocialSessionProvider({ children }: { children: ReactNode }) {
     setIsProfileLoading(false);
   }, [refreshProfile, session?.user]);
 
-  const handleSignIn = useCallback(async (email: string, password: string) => {
-    await signInWithPassword(email, password);
+  const handleContinueWithGoogle = useCallback(async () => {
+    setAuthProviderInFlight('google');
+
+    try {
+      await signInWithGoogle();
+    } finally {
+      setAuthProviderInFlight(null);
+    }
   }, []);
 
-  const handleSignUp = useCallback(async (email: string, password: string) => {
-    const result = await signUpWithPassword(email, password);
+  const handleContinueWithApple = useCallback(async () => {
+    setAuthProviderInFlight('apple');
 
-    return {
-      requiresEmailConfirmation: result.requiresEmailConfirmation,
-      emailAddress: email.trim(),
-    };
-  }, []);
-
-  const handleMagicLink = useCallback(async (email: string) => {
-    await sendMagicLink(email);
-    return email.trim();
+    try {
+      await signInWithApple();
+    } finally {
+      setAuthProviderInFlight(null);
+    }
   }, []);
 
   const handleSignOut = useCallback(async () => {
@@ -191,6 +192,7 @@ export function SocialSessionProvider({ children }: { children: ReactNode }) {
       configured,
       authRedirectUrl,
       isLoading,
+      authProviderInFlight,
       isProfileLoading,
       session,
       user: session?.user ?? null,
@@ -198,20 +200,19 @@ export function SocialSessionProvider({ children }: { children: ReactNode }) {
       profileError,
       isProfileComplete: Boolean(profile?.displayName && profile?.handle),
       refreshProfile,
-      signIn: handleSignIn,
-      signUp: handleSignUp,
-      requestMagicLink: handleMagicLink,
+      continueWithGoogle: handleContinueWithGoogle,
+      continueWithApple: handleContinueWithApple,
       signOut: handleSignOut,
       saveProfile: handleSaveProfile,
     }),
     [
       authRedirectUrl,
+      authProviderInFlight,
       configured,
-      handleMagicLink,
+      handleContinueWithApple,
+      handleContinueWithGoogle,
       handleSaveProfile,
-      handleSignIn,
       handleSignOut,
-      handleSignUp,
       isLoading,
       isProfileLoading,
       profile,
