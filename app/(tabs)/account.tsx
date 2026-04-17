@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Switch, Text, View } from 'react-native';
+import type { User } from '@supabase/supabase-js';
+import { Pressable, Platform, StyleSheet, Switch, Text, View } from 'react-native';
 
 import { AppButton } from '@/components/ui/app-button';
 import { AppCard } from '@/components/ui/app-card';
@@ -13,13 +14,7 @@ import { Fonts, Radius, Spacing, TextPresets, Type, getAppColors } from '@/const
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useSocialSession } from '@/providers/social-session-provider';
 
-type AuthMode = 'sign-in' | 'sign-up';
 type FormFeedbackTone = 'success' | 'danger';
-type AuthFieldErrors = {
-  email?: string;
-  password?: string;
-  confirmPassword?: string;
-};
 type ProfileFieldErrors = {
   displayName?: string;
   handle?: string;
@@ -31,7 +26,6 @@ type FormFeedback = {
 };
 
 const DEFAULT_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
-const EMAIL_PATTERN = /\S+@\S+\.\S+/;
 const COMMON_TIMEZONES = [
   'UTC',
   DEFAULT_TIMEZONE,
@@ -47,29 +41,66 @@ const intlWithSupportedValues = Intl as typeof Intl & {
   supportedValuesOf?: (key: 'timeZone') => string[];
 };
 
-function createSuggestedDisplayName(email?: string | null) {
-  if (!email) {
-    return '';
+function getMetadataString(user: User | null | undefined, ...keys: string[]) {
+  const metadata = user?.user_metadata;
+
+  if (!metadata || typeof metadata !== 'object') {
+    return null;
   }
 
-  const localPart = email.split('@')[0] ?? '';
-  return localPart
+  for (const key of keys) {
+    const value = metadata[key];
+
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return null;
+}
+
+function getProviderLabel(user: User | null | undefined) {
+  const provider = typeof user?.app_metadata?.provider === 'string' ? user.app_metadata.provider : null;
+
+  if (provider === 'apple') {
+    return 'Apple';
+  }
+
+  if (provider === 'google') {
+    return 'Google';
+  }
+
+  return null;
+}
+
+function formatSeedLabel(value: string) {
+  return value
     .replace(/[._-]+/g, ' ')
     .replace(/\b\w/g, (letter) => letter.toUpperCase())
     .trim();
 }
 
-function createSuggestedHandle(email?: string | null) {
-  if (!email) {
+function createSuggestedDisplayName(user?: User | null) {
+  const fullName = getMetadataString(user, 'full_name', 'name');
+
+  if (fullName) {
+    return fullName;
+  }
+
+  const firstName = getMetadataString(user, 'given_name', 'first_name');
+  const lastName = getMetadataString(user, 'family_name', 'last_name');
+  const combinedName = [firstName, lastName].filter(Boolean).join(' ').trim();
+
+  if (combinedName) {
+    return combinedName;
+  }
+
+  if (!user?.email) {
     return '';
   }
 
-  return (email.split('@')[0] ?? '')
-    .toLowerCase()
-    .replace(/[^a-z0-9_]/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 20);
+  const localPart = user.email.split('@')[0] ?? '';
+  return formatSeedLabel(localPart);
 }
 
 function normalizeHandle(value: string) {
@@ -81,6 +112,24 @@ function normalizeHandle(value: string) {
     .slice(0, 20);
 }
 
+function createSuggestedHandle(user?: User | null) {
+  const preferredHandle = getMetadataString(user, 'preferred_username', 'user_name', 'nickname');
+
+  if (preferredHandle) {
+    return normalizeHandle(preferredHandle);
+  }
+
+  if (user?.email) {
+    return normalizeHandle(user.email.split('@')[0] ?? '');
+  }
+
+  return normalizeHandle(createSuggestedDisplayName(user));
+}
+
+function getAccountLabel(user: User | null) {
+  return user?.email ?? getMetadataString(user, 'email') ?? `${getProviderLabel(user) ?? 'Connected'} account`;
+}
+
 function getSuggestedTimezones(...zones: (string | null | undefined)[]) {
   const supportedTimezones = intlWithSupportedValues.supportedValuesOf?.('timeZone') ?? [];
   const hasSupportedTimezones = supportedTimezones.length > 0;
@@ -88,43 +137,6 @@ function getSuggestedTimezones(...zones: (string | null | undefined)[]) {
   return Array.from(new Set([...zones, ...COMMON_TIMEZONES].filter((zone): zone is string => Boolean(zone))))
     .filter((zone) => !hasSupportedTimezones || supportedTimezones.includes(zone))
     .slice(0, 8);
-}
-
-function getAuthErrors({
-  authMode,
-  email,
-  password,
-  confirmPassword,
-}: {
-  authMode: AuthMode;
-  email: string;
-  password: string;
-  confirmPassword: string;
-}): AuthFieldErrors {
-  const trimmedEmail = email.trim().toLowerCase();
-  const errors: AuthFieldErrors = {};
-
-  if (!trimmedEmail) {
-    errors.email = 'Enter your email address to continue.';
-  } else if (!EMAIL_PATTERN.test(trimmedEmail)) {
-    errors.email = 'Use a valid email address.';
-  }
-
-  if (!password) {
-    errors.password = 'Enter your password.';
-  } else if (authMode === 'sign-up' && password.length < 6) {
-    errors.password = 'Use at least 6 characters.';
-  }
-
-  if (authMode === 'sign-up') {
-    if (!confirmPassword) {
-      errors.confirmPassword = 'Repeat the password once.';
-    } else if (confirmPassword !== password) {
-      errors.confirmPassword = 'Passwords need to match.';
-    }
-  }
-
-  return errors;
 }
 
 function getProfileErrors({
@@ -162,22 +174,22 @@ function getProfileErrors({
   return errors;
 }
 
-function getFriendlyAuthError(authMode: AuthMode, error: unknown) {
+function getFriendlyAuthError(error: unknown, authRedirectUrl: string) {
   const message = error instanceof Error ? error.message : 'The request could not be completed right now.';
 
-  if (/invalid login credentials/i.test(message)) {
-    return 'That email and password do not match. Try again or use a magic link.';
+  if (/canceled/i.test(message)) {
+    return message;
   }
 
-  if (/email not confirmed/i.test(message)) {
-    return 'Confirm your email from the link in your inbox, then return to sign in.';
+  if (/redirect|valid session|invalid_grant|grant/i.test(message)) {
+    return `Could not finish sign-in. Confirm ${authRedirectUrl} is allowed in Supabase redirect URLs, then try again.`;
   }
 
-  if (/user already registered/i.test(message)) {
-    return 'An account already exists for this email. Sign in instead or request a magic link.';
+  if (/provider/i.test(message)) {
+    return 'That provider is not configured yet in Supabase. Finish the provider setup, then try again.';
   }
 
-  return authMode === 'sign-in' ? message : `Could not create the account. ${message}`;
+  return message;
 }
 
 function getFriendlyProfileError(error: unknown) {
@@ -214,27 +226,21 @@ export default function AccountScreen() {
   const colors = getAppColors(useColorScheme());
   const {
     authRedirectUrl,
+    authProviderInFlight,
+    continueWithApple,
+    continueWithGoogle,
     configured,
     isLoading,
     isProfileLoading,
     profile,
     profileError,
     refreshProfile,
-    signIn,
     signOut,
-    signUp,
-    requestMagicLink,
     saveProfile,
     user,
   } = useSocialSession();
   const hydratedFormKeyRef = useRef<string | null>(null);
-  const [authMode, setAuthMode] = useState<AuthMode>('sign-in');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
   const [authFeedback, setAuthFeedback] = useState<FormFeedback | null>(null);
-  const [isAuthSubmitting, setIsAuthSubmitting] = useState(false);
-  const [hasAttemptedAuthSubmit, setHasAttemptedAuthSubmit] = useState(false);
   const [displayName, setDisplayName] = useState('');
   const [handle, setHandle] = useState('');
   const [timezone, setTimezone] = useState(DEFAULT_TIMEZONE);
@@ -244,12 +250,12 @@ export default function AccountScreen() {
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [hasAttemptedProfileSubmit, setHasAttemptedProfileSubmit] = useState(false);
   const [profileFeedback, setProfileFeedback] = useState<FormFeedback | null>(null);
-
-  useEffect(() => {
-    if (user?.email) {
-      setEmail((currentEmail) => currentEmail || user.email || '');
-    }
-  }, [user?.email]);
+  const suggestedDisplayName = createSuggestedDisplayName(user);
+  const suggestedHandle = createSuggestedHandle(user);
+  const signedInAccountLabel = getAccountLabel(user);
+  const supportsAppleSignIn = Platform.OS === 'ios';
+  const isGoogleSubmitting = authProviderInFlight === 'google';
+  const isAppleSubmitting = authProviderInFlight === 'apple';
 
   useEffect(() => {
     const hydrationKey = `${user?.id ?? 'signed-out'}:${profile?.updatedAt ?? 'no-profile'}`;
@@ -259,21 +265,15 @@ export default function AccountScreen() {
     }
 
     hydratedFormKeyRef.current = hydrationKey;
-    setDisplayName(profile?.displayName ?? createSuggestedDisplayName(user?.email));
-    setHandle(profile?.handle ?? createSuggestedHandle(user?.email));
+    setDisplayName(profile?.displayName ?? suggestedDisplayName);
+    setHandle(profile?.handle ?? suggestedHandle);
     setTimezone(profile?.timezone ?? DEFAULT_TIMEZONE);
     setAllowCircleNotifications(profile?.allowCircleNotifications ?? true);
     setAllowMissedAlarmAlerts(profile?.allowMissedAlarmAlerts ?? true);
     setProfileFeedback(null);
     setHasAttemptedProfileSubmit(false);
-  }, [profile, user?.email, user?.id]);
+  }, [profile, suggestedDisplayName, suggestedHandle, user?.id]);
 
-  const authErrors = getAuthErrors({
-    authMode,
-    email,
-    password,
-    confirmPassword,
-  });
   const profileErrors = getProfileErrors({
     displayName,
     handle,
@@ -288,72 +288,29 @@ export default function AccountScreen() {
       ? `Circle members will see @${normalizedHandle}.`
       : 'Lowercase only, with letters, numbers, and underscores.';
 
-  const handleSubmitAuth = async () => {
-    setHasAttemptedAuthSubmit(true);
-
-    if (hasErrors(authErrors)) {
-      setAuthFeedback(null);
-      return;
-    }
-
-    const trimmedEmail = email.trim().toLowerCase();
-
-    setIsAuthSubmitting(true);
+  const handleContinueWithGoogle = async () => {
     setAuthFeedback(null);
 
     try {
-      if (authMode === 'sign-in') {
-        await signIn(trimmedEmail, password);
-        setPassword('');
-        setConfirmPassword('');
-      } else {
-        const result = await signUp(trimmedEmail, password);
-        setPassword('');
-        setConfirmPassword('');
-        setAuthFeedback({
-          tone: 'success',
-          message: result.requiresEmailConfirmation
-            ? `Account created. Check ${result.emailAddress} to confirm your email, then return to the app.`
-            : 'Account created and signed in.',
-        });
-      }
+      await continueWithGoogle();
     } catch (error) {
       setAuthFeedback({
         tone: 'danger',
-        message: getFriendlyAuthError(authMode, error),
+        message: getFriendlyAuthError(error, authRedirectUrl),
       });
-    } finally {
-      setIsAuthSubmitting(false);
     }
   };
 
-  const handleSendMagicLink = async () => {
-    const trimmedEmail = email.trim().toLowerCase();
-
-    if (!trimmedEmail || !EMAIL_PATTERN.test(trimmedEmail)) {
-      setAuthFeedback({
-        tone: 'danger',
-        message: 'Enter a valid email address before requesting a magic link.',
-      });
-      return;
-    }
-
-    setIsAuthSubmitting(true);
+  const handleContinueWithApple = async () => {
     setAuthFeedback(null);
 
     try {
-      const recipient = await requestMagicLink(trimmedEmail);
-      setAuthFeedback({
-        tone: 'success',
-        message: `Magic link sent to ${recipient}. If it does not open the app automatically, confirm ${authRedirectUrl} is allowed in Supabase redirect URLs.`,
-      });
+      await continueWithApple();
     } catch (error) {
       setAuthFeedback({
         tone: 'danger',
-        message: error instanceof Error ? error.message : 'The magic link could not be sent right now.',
+        message: getFriendlyAuthError(error, authRedirectUrl),
       });
-    } finally {
-      setIsAuthSubmitting(false);
     }
   };
 
@@ -439,98 +396,35 @@ export default function AccountScreen() {
             <AppCard elevated>
               <SectionHeader
                 kicker="Authentication"
-                title={authMode === 'sign-in' ? 'Sign in' : 'Create account'}
-                description={
-                  authMode === 'sign-in'
-                    ? 'Use your password or a magic link.'
-                    : 'Create one account for sync and circles.'
-                }
-                action={
-                  <AppButton
-                    label={authMode === 'sign-in' ? 'Create account instead' : 'Sign in instead'}
-                    onPress={() => {
-                      setAuthMode(authMode === 'sign-in' ? 'sign-up' : 'sign-in');
-                      setHasAttemptedAuthSubmit(false);
-                      setAuthFeedback(null);
-                      setPassword('');
-                      setConfirmPassword('');
-                    }}
-                    size="compact"
-                    variant="ghost"
-                  />
-                }
+                title="Continue securely"
+                description="Use Google or Apple to create your sync account and sign back in on any device."
               />
-
-              <AppInput
-                autoCapitalize="none"
-                autoComplete="email"
-                autoCorrect={false}
-                error={hasAttemptedAuthSubmit ? authErrors.email : undefined}
-                helper="Used for sign-in links, password recovery, and your profile."
-                inputMode="email"
-                keyboardType="email-address"
-                label="Email"
-                onChangeText={(value) => {
-                  setEmail(value);
-                  setAuthFeedback(null);
-                }}
-                placeholder="you@example.com"
-                textContentType="emailAddress"
-                value={email}
-              />
-
-              <AppInput
-                autoCapitalize="none"
-                autoComplete={authMode === 'sign-in' ? 'current-password' : 'new-password'}
-                autoCorrect={false}
-                error={hasAttemptedAuthSubmit ? authErrors.password : undefined}
-                helper={authMode === 'sign-in' ? 'Use the password tied to this email.' : 'Use at least 6 characters.'}
-                label="Password"
-                onChangeText={(value) => {
-                  setPassword(value);
-                  setAuthFeedback(null);
-                }}
-                placeholder={authMode === 'sign-in' ? 'Your password' : 'At least 6 characters'}
-                secureTextEntry
-                textContentType={authMode === 'sign-in' ? 'password' : 'newPassword'}
-                value={password}
-              />
-
-              {authMode === 'sign-up' ? (
-                <AppInput
-                  autoCapitalize="none"
-                  autoComplete="new-password"
-                  autoCorrect={false}
-                  error={hasAttemptedAuthSubmit ? authErrors.confirmPassword : undefined}
-                  label="Confirm password"
-                  onChangeText={(value) => {
-                    setConfirmPassword(value);
-                    setAuthFeedback(null);
-                  }}
-                  placeholder="Repeat your password"
-                  secureTextEntry
-                  textContentType="newPassword"
-                  value={confirmPassword}
-                />
-              ) : null}
 
               <View style={styles.buttonGroup}>
                 <AppButton
-                  disabled={isAuthSubmitting}
-                  label={isAuthSubmitting ? 'Working...' : authMode === 'sign-in' ? 'Sign in' : 'Create account'}
-                  onPress={handleSubmitAuth}
+                  disabled={Boolean(authProviderInFlight)}
+                  label={isGoogleSubmitting ? 'Connecting Google...' : 'Continue with Google'}
+                  onPress={handleContinueWithGoogle}
+                  variant="secondary"
                 />
-                <AppButton
-                  disabled={isAuthSubmitting}
-                  label="Send magic link"
-                  onPress={handleSendMagicLink}
-                  variant="ghost"
-                />
+                {supportsAppleSignIn ? (
+                  <AppButton
+                    disabled={Boolean(authProviderInFlight)}
+                    label={isAppleSubmitting ? 'Connecting Apple...' : 'Continue with Apple'}
+                    onPress={handleContinueWithApple}
+                    variant="ghost"
+                  />
+                ) : null}
               </View>
 
               <Text style={[styles.helperCaption, { color: colors.muted }]}>
-                Magic links work for first-time access too.
+                If sign-in returns to the browser, confirm {authRedirectUrl} is allowed in your Supabase redirect URLs.
               </Text>
+              {!supportsAppleSignIn ? (
+                <Text style={[styles.helperCaption, { color: colors.muted }]}>
+                  Apple sign-in appears on iPhone and iPad builds.
+                </Text>
+              ) : null}
 
               {authFeedback && authFeedbackColors ? (
                 <View
@@ -555,12 +449,12 @@ export default function AccountScreen() {
                 <View style={styles.accountCopy}>
                   <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Signed in</Text>
                   <Text style={[styles.accountTitle, { color: colors.text }]}>
-                    {profile?.displayName || createSuggestedDisplayName(user.email) || 'Your account'}
+                    {profile?.displayName || suggestedDisplayName || 'Your account'}
                   </Text>
                   <Text style={[styles.accountMeta, { color: colors.primary }]}>
                     {profile?.handle ? `@${profile.handle}` : 'Finish your profile to show up clearly in circles.'}
                   </Text>
-                  <Text style={[TextPresets.body, { color: colors.muted }]}>{user.email ?? 'No email found'}</Text>
+                  <Text style={[TextPresets.body, { color: colors.muted }]}>{signedInAccountLabel}</Text>
                 </View>
               </View>
 

@@ -9,8 +9,9 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
+      "usesAppleSignIn": true,
       "supportsTablet": true,
-      "bundleIdentifier": "com.miraxhnteams.socialpressurealarm"
+      "bundleIdentifier": "com.miraxhlika.socialpressurealarm"
     },
     "android": {
       "adaptiveIcon": {
@@ -25,7 +26,7 @@
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO"
       ],
-      "package": "com.miraxhnteams.socialpressurealarm"
+      "package": "com.miraxhlika.socialpressurealarm"
     },
     "web": {
       "output": "static",
@@ -33,6 +34,7 @@
     },
     "plugins": [
       "expo-router",
+      "expo-apple-authentication",
       "expo-notifications",
       [
         "expo-camera",

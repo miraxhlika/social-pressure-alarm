@@ -1,7 +1,13 @@
+import * as AppleAuthentication from 'expo-apple-authentication';
+import * as Crypto from 'expo-crypto';
 import * as Linking from 'expo-linking';
+import * as WebBrowser from 'expo-web-browser';
 import { EmailOtpType } from '@supabase/supabase-js';
+import { Platform } from 'react-native';
 
 import { getSupabaseClient } from '@/lib/social/client';
+
+WebBrowser.maybeCompleteAuthSession();
 
 const EMAIL_OTP_TYPES: EmailOtpType[] = [
   'signup',
@@ -11,6 +17,7 @@ const EMAIL_OTP_TYPES: EmailOtpType[] = [
   'email_change',
   'email',
 ];
+let lastHandledAuthUrl: string | null = null;
 
 function getRequiredSupabaseClient() {
   const client = getSupabaseClient();
@@ -35,6 +42,24 @@ function isEmailOtpType(value: string | null): value is EmailOtpType {
   return value ? EMAIL_OTP_TYPES.includes(value as EmailOtpType) : false;
 }
 
+function getErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
+}
+
+function formatAppleName(fullName: AppleAuthentication.AppleAuthenticationFullName | null) {
+  if (!fullName) {
+    return null;
+  }
+
+  const parts = [
+    fullName.givenName,
+    fullName.middleName,
+    fullName.familyName,
+  ].filter((part): part is string => Boolean(part?.trim()));
+
+  return parts.length > 0 ? parts.join(' ') : null;
+}
+
 export function getSocialAuthRedirectUrl() {
   return Linking.createURL('/account', {
     scheme: 'socialpressurealarm',
@@ -46,6 +71,10 @@ export async function handleSupabaseAuthRedirect(url: string) {
 
   if (!client) {
     return false;
+  }
+
+  if (lastHandledAuthUrl === url) {
+    return true;
   }
 
   const authCode = readParamFromUrl(url, 'code');
@@ -61,6 +90,7 @@ export async function handleSupabaseAuthRedirect(url: string) {
       throw error;
     }
 
+    lastHandledAuthUrl = url;
     return true;
   }
 
@@ -74,6 +104,7 @@ export async function handleSupabaseAuthRedirect(url: string) {
       throw error;
     }
 
+    lastHandledAuthUrl = url;
     return true;
   }
 
@@ -87,60 +118,122 @@ export async function handleSupabaseAuthRedirect(url: string) {
       throw error;
     }
 
+    lastHandledAuthUrl = url;
     return true;
   }
 
   return false;
 }
 
-export async function signInWithPassword(email: string, password: string) {
+export async function signInWithGoogle() {
   const client = getRequiredSupabaseClient();
-  const { data, error } = await client.auth.signInWithPassword({
-    email: email.trim(),
-    password,
+  const redirectUrl = getSocialAuthRedirectUrl();
+  const { data, error } = await client.auth.signInWithOAuth({
+    provider: 'google',
+    options: {
+      redirectTo: redirectUrl,
+      skipBrowserRedirect: true,
+      queryParams: {
+        prompt: 'select_account',
+      },
+    },
   });
 
   if (error) {
     throw error;
+  }
+
+  if (!data.url) {
+    throw new Error('Google sign-in could not be started right now.');
+  }
+
+  await WebBrowser.warmUpAsync().catch(() => null);
+
+  try {
+    const result = await WebBrowser.openAuthSessionAsync(data.url, redirectUrl);
+
+    if (result.type === 'success') {
+      const didHandle = await handleSupabaseAuthRedirect(result.url);
+
+      if (!didHandle) {
+        throw new Error('Google sign-in returned without a valid session.');
+      }
+
+      return;
+    }
+
+    if (result.type === 'cancel' || result.type === 'dismiss') {
+      throw new Error('Google sign-in was canceled.');
+    }
+
+    throw new Error(`Google sign-in could not be completed (${result.type}).`);
+  } finally {
+    await WebBrowser.coolDownAsync().catch(() => null);
+  }
+}
+
+export async function signInWithApple() {
+  if (Platform.OS !== 'ios') {
+    throw new Error('Apple sign-in is available only on iPhone and iPad builds.');
+  }
+
+  const isAvailable = await AppleAuthentication.isAvailableAsync();
+
+  if (!isAvailable) {
+    throw new Error('Apple sign-in is not available on this device.');
+  }
+
+  const client = getRequiredSupabaseClient();
+  const rawNonce = Crypto.randomUUID();
+  const hashedNonce = await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, rawNonce);
+
+  let credential: AppleAuthentication.AppleAuthenticationCredential;
+
+  try {
+    credential = await AppleAuthentication.signInAsync({
+      nonce: hashedNonce,
+      requestedScopes: [
+        AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
+        AppleAuthentication.AppleAuthenticationScope.EMAIL,
+      ],
+    });
+  } catch (error) {
+    const message = getErrorMessage(error, 'Apple sign-in could not be started.');
+
+    if (/ERR_REQUEST_CANCELED/i.test(message)) {
+      throw new Error('Apple sign-in was canceled.');
+    }
+
+    throw error;
+  }
+
+  if (!credential.identityToken) {
+    throw new Error('Apple sign-in did not return an identity token.');
+  }
+
+  const { data, error } = await client.auth.signInWithIdToken({
+    provider: 'apple',
+    token: credential.identityToken,
+    nonce: rawNonce,
+  });
+
+  if (error) {
+    throw error;
+  }
+
+  const fullName = formatAppleName(credential.fullName);
+
+  if (fullName) {
+    await client.auth
+      .updateUser({
+        data: {
+          full_name: fullName,
+        },
+      })
+      .catch(() => null);
   }
 
   return data;
-}
-
-export async function signUpWithPassword(email: string, password: string) {
-  const client = getRequiredSupabaseClient();
-  const { data, error } = await client.auth.signUp({
-    email: email.trim(),
-    password,
-    options: {
-      emailRedirectTo: getSocialAuthRedirectUrl(),
-    },
-  });
-
-  if (error) {
-    throw error;
-  }
-
-  return {
-    session: data.session,
-    user: data.user,
-    requiresEmailConfirmation: !data.session,
-  };
-}
-
-export async function sendMagicLink(email: string) {
-  const client = getRequiredSupabaseClient();
-  const { error } = await client.auth.signInWithOtp({
-    email: email.trim(),
-    options: {
-      emailRedirectTo: getSocialAuthRedirectUrl(),
-      shouldCreateUser: true,
-    },
-  });
-
-  if (error) {
-    throw error;
-  }
 }
 
 export async function signOutSocialSession() {
