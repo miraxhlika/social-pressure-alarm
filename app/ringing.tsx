@@ -11,14 +11,17 @@ import { AppCard } from '@/components/ui/app-card';
 import { StatusPill } from '@/components/ui/status-pill';
 import { Fonts, Radius, Spacing, TextPresets, getAppColors, withAlpha } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { trackAnalyticsEvent } from '@/lib/analytics';
 import {
   formatAlarmTime,
   getAlarmById,
   getAlarmDeadlineTimestamp,
   hydrateAlarmRuntimeForCurrentUser,
+  readAlarmStore,
   resolveAlarm,
   updateAlarm,
 } from '@/lib/alarms';
+import { formatGracePeriodLabel, getCheckpointLiveCopy, getUseCaseShortLabel } from '@/lib/checkpoint-templates';
 import { cancelAlarmNotificationAsync, scheduleAlarmNotificationAsync } from '@/lib/notifications';
 import { Alarm } from '@/types/alarm';
 
@@ -44,27 +47,31 @@ function getCountdownTone(remainingSeconds: number | null, gracePeriodSeconds: n
   return 'primary';
 }
 
-function getUrgencyCopy(tone: CountdownTone, remainingSeconds: number | null) {
+function getUrgencyCopy(
+  tone: CountdownTone,
+  remainingSeconds: number | null,
+  liveCopy: ReturnType<typeof getCheckpointLiveCopy>
+) {
   if (tone === 'danger') {
     return {
       badge: 'Critical',
       title: remainingSeconds === 1 ? '1 second left' : `${remainingSeconds ?? 0} seconds left`,
-      description: 'Scan the saved code now. This run is about to lock in as missed.',
+      description: liveCopy.criticalDescription,
     };
   }
 
   if (tone === 'warning') {
     return {
       badge: 'Move now',
-      title: 'Get to the checkpoint',
-      description: 'Hold the camera steady and scan the exact code saved to this alarm.',
+      title: liveCopy.title,
+      description: liveCopy.warningDescription,
     };
   }
 
   return {
     badge: 'Live',
-    title: 'Scan the saved code',
-    description: 'One job now: reach the checkpoint and match the saved QR code.',
+    title: liveCopy.title,
+    description: liveCopy.description,
   };
 }
 
@@ -178,6 +185,10 @@ export default function RingingScreen() {
 
     return getAlarmDeadlineTimestamp(alarm);
   }, [alarm]);
+  const liveCopy = useMemo(
+    () => getCheckpointLiveCopy(alarm?.useCaseType ?? 'custom', alarm?.label ?? ''),
+    [alarm?.label, alarm?.useCaseType]
+  );
 
   useEffect(() => {
     if (!deadline) {
@@ -224,6 +235,15 @@ export default function RingingScreen() {
     try {
       await cancelAlarmNotificationAsync(alarm.notificationIds);
       const resolvedAlarm = await resolveAlarm(alarm.id, 'confirmed');
+      const store = await readAlarmStore();
+      const successEntry = store.successHistory.find((entry) => entry.alarmId === alarm.id) ?? null;
+      await trackAnalyticsEvent('checkpoint_cleared', {
+        checkpointId: alarm.id,
+        useCaseType: alarm.useCaseType,
+        repeatSchedule: alarm.repeatSchedule,
+        gracePeriodSeconds: alarm.gracePeriodSeconds,
+        timeToClearSeconds: successEntry?.timeToScanSeconds,
+      });
 
       if (alarm.repeatSchedule !== 'once' && resolvedAlarm) {
         const nextScheduled = await scheduleAlarmNotificationAsync(resolvedAlarm);
@@ -232,6 +252,7 @@ export default function RingingScreen() {
           isActive: true,
           notificationIds: nextScheduled.notificationIds,
           scheduledFor: nextScheduled.scheduledFor,
+          notificationStrategyKey: nextScheduled.strategyKey,
         });
       }
 
@@ -266,6 +287,23 @@ export default function RingingScreen() {
     try {
       await cancelAlarmNotificationAsync(alarm.notificationIds);
       const resolvedAlarm = await resolveAlarm(alarm.id, 'missed');
+      const store = await readAlarmStore();
+      await trackAnalyticsEvent('checkpoint_missed', {
+        checkpointId: alarm.id,
+        useCaseType: alarm.useCaseType,
+        repeatSchedule: alarm.repeatSchedule,
+        gracePeriodSeconds: alarm.gracePeriodSeconds,
+        failureCount: store.failureHistory.length,
+      });
+
+      if (store.failureHistory.length === 1) {
+        await trackAnalyticsEvent('first_miss', {
+          checkpointId: alarm.id,
+          useCaseType: alarm.useCaseType,
+          repeatSchedule: alarm.repeatSchedule,
+          gracePeriodSeconds: alarm.gracePeriodSeconds,
+        });
+      }
 
       if (alarm.repeatSchedule !== 'once' && resolvedAlarm) {
         const nextScheduled = await scheduleAlarmNotificationAsync(resolvedAlarm);
@@ -274,17 +312,23 @@ export default function RingingScreen() {
           isActive: true,
           notificationIds: nextScheduled.notificationIds,
           scheduledFor: nextScheduled.scheduledFor,
+          notificationStrategyKey: nextScheduled.strategyKey,
         });
       }
 
-      router.replace('/');
+      router.replace({
+        pathname: '/missed',
+        params: {
+          alarmId: alarm.id,
+        },
+      });
     } catch (error) {
       hasResolvedRef.current = false;
 
       const errorMessage =
         error instanceof Error ? error.message : 'The missed checkpoint could not be recorded.';
 
-      Alert.alert('Unable to record missed alarm', errorMessage);
+      Alert.alert('Unable to record missed checkpoint', errorMessage);
     } finally {
       setIsSubmitting(false);
     }
@@ -311,7 +355,7 @@ export default function RingingScreen() {
       const response = await requestPermission();
 
       if (!response.granted) {
-        setScanError('Camera access is required so you can scan the checkpoint and stop the alarm.');
+        setScanError('Camera access is required so you can scan the checkpoint and clear the live run.');
         return;
       }
     }
@@ -328,7 +372,7 @@ export default function RingingScreen() {
       setScanEnabled(false);
 
       if (data !== alarm.expectedQrPayload) {
-        setScanError('That code belongs to a different checkpoint. Keep scanning for the one saved to this alarm.');
+        setScanError(liveCopy.wrongCodeDescription);
         await triggerHaptic('error');
 
         Animated.sequence([
@@ -357,7 +401,7 @@ export default function RingingScreen() {
 
       await handleScanSuccess();
     },
-    [alarm, errorFlash, handleScanSuccess, isSubmitting, scanEnabled]
+    [alarm, errorFlash, handleScanSuccess, isSubmitting, liveCopy.wrongCodeDescription, scanEnabled]
   );
 
   useEffect(() => {
@@ -369,7 +413,7 @@ export default function RingingScreen() {
   const gracePeriodSeconds = alarm?.gracePeriodSeconds ?? 60;
   const countdownTone = getCountdownTone(remainingSeconds, gracePeriodSeconds);
   const progressRatio = remainingSeconds === null ? 1 : Math.max(0, remainingSeconds / gracePeriodSeconds);
-  const urgencyCopy = getUrgencyCopy(countdownTone, remainingSeconds);
+  const urgencyCopy = getUrgencyCopy(countdownTone, remainingSeconds, liveCopy);
   const scannerFrameBorderColor =
     scanError.length > 0
       ? colors.danger
@@ -379,11 +423,11 @@ export default function RingingScreen() {
           ? colors.warning
           : colors.primary;
   const isCameraReady = permission?.granted === true;
-  const cameraStatusLabel = !isCameraReady ? 'Camera needed' : scanEnabled ? 'Camera live' : 'Reading';
+  const cameraStatusLabel = !isCameraReady ? 'Camera needed' : scanEnabled ? 'Ready to scan' : 'Reading';
   const permissionMessage =
     permission?.canAskAgain === false
-      ? 'Allow camera access in Settings to scan the saved checkpoint.'
-      : 'Allow camera access to scan the saved checkpoint and stop the alarm.';
+      ? `${liveCopy.permissionDescription} Turn it on in Settings to continue.`
+      : liveCopy.permissionDescription;
 
   useEffect(() => {
     if (!alarm) {
@@ -480,11 +524,11 @@ export default function RingingScreen() {
       <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.canvas }]}>
         <View style={styles.emptyWrap}>
           <AppCard elevated style={styles.emptyCard}>
-            <Text style={[TextPresets.title, { color: colors.text }]}>Alarm not found</Text>
+            <Text style={[TextPresets.title, { color: colors.text }]}>Checkpoint not found</Text>
             <Text style={[TextPresets.body, { color: colors.muted }]}>
-              This alarm may have been deleted or already resolved.
+              This checkpoint may have been deleted or already resolved.
             </Text>
-            <AppButton label="Back to alarms" onPress={() => router.replace('/alarms')} />
+            <AppButton label="Back to checkpoints" onPress={() => router.replace('/alarms')} />
           </AppCard>
         </View>
       </SafeAreaView>
@@ -527,7 +571,7 @@ export default function RingingScreen() {
                 </View>
               ) : (
                 <View style={[styles.permissionState, { backgroundColor: urgentPanel }]}>
-                  <Text style={[styles.permissionTitle, { color: urgentText }]}>Enable camera to scan</Text>
+                  <Text style={[styles.permissionTitle, { color: urgentText }]}>{liveCopy.permissionTitle}</Text>
                   <Text style={[styles.permissionDescription, { color: urgentTextSoft }]}>{permissionMessage}</Text>
                   <AppButton
                     disabled={isSubmitting}
@@ -544,16 +588,30 @@ export default function RingingScreen() {
 
               <View style={styles.stageTopOverlay}>
                 <View style={styles.stageMetaRow}>
-                  <Text style={[styles.subtleTime, { color: urgentTextSoft }]}>
-                    {formatAlarmTime(alarm.hour, alarm.minute)}
-                  </Text>
+                  <View style={styles.stageMetaGroup}>
+                    <StatusPill label={urgencyCopy.badge} tone={countdownTone} />
+                    <Text style={[styles.subtleTime, { color: urgentTextSoft }]}>
+                      {getUseCaseShortLabel(alarm.useCaseType)} · {formatAlarmTime(alarm.hour, alarm.minute)}
+                    </Text>
+                  </View>
                   <StatusPill label={cameraStatusLabel} tone={isCameraReady && scanEnabled ? countdownTone : 'warning'} />
                 </View>
                 <View style={styles.stageTopCopy}>
+                  <Text style={[styles.liveTitle, { color: urgentText }]}>{urgencyCopy.title}</Text>
                   <Text numberOfLines={1} style={[styles.label, { color: urgentText }]}>
-                    {alarm.label}
+                    Saved proof: {alarm.label}
                   </Text>
-                  <Text style={[styles.stageInstruction, { color: urgentTextSoft }]}>Scan the saved QR code to stop the alarm.</Text>
+                  <Text style={[styles.stageInstruction, { color: urgentTextSoft }]}>{urgencyCopy.description}</Text>
+                </View>
+                <View style={[styles.focusCard, { backgroundColor: '#0D1116E0', borderColor: urgentBorder }]}>
+                  <View style={styles.focusHeader}>
+                    <Text style={[TextPresets.eyebrow, { color: urgentTextSoft }]}>Clear this run</Text>
+                    <Text style={[styles.focusWindow, { color: urgentTextSoft }]}>
+                      {formatGracePeriodLabel(alarm.gracePeriodSeconds)} window
+                    </Text>
+                  </View>
+                  <Text style={[styles.focusTitle, { color: urgentText }]}>{alarm.label}</Text>
+                  <Text style={[styles.focusBody, { color: urgentTextSoft }]}>{liveCopy.focusBody}</Text>
                 </View>
               </View>
 
@@ -577,7 +635,7 @@ export default function RingingScreen() {
 
               {scanError ? (
                 <View style={[styles.inlineError, { backgroundColor: '#2C1010E6', borderColor: withAlpha(colors.danger, '5C') }]}>
-                  <Text style={[styles.inlineErrorTitle, { color: colors.danger }]}>Wrong checkpoint</Text>
+                  <Text style={[styles.inlineErrorTitle, { color: colors.danger }]}>{liveCopy.wrongCodeTitle}</Text>
                   <Text numberOfLines={2} style={[styles.inlineErrorText, { color: '#FFD7D7' }]}>
                     {scanError}
                   </Text>
@@ -585,7 +643,9 @@ export default function RingingScreen() {
               ) : null}
 
               <View style={styles.countdownOverlay}>
+                <Text style={[styles.countdownLabel, { color: urgentTextSoft }]}>Time left</Text>
                 <Animated.Text
+                  accessibilityLabel={`${remainingSeconds ?? alarm.gracePeriodSeconds} seconds left`}
                   accessibilityLiveRegion="assertive"
                   style={[
                     styles.countdownValue,
@@ -700,7 +760,7 @@ const styles = StyleSheet.create({
   },
   stageTopShade: {
     backgroundColor: '#05070AC2',
-    height: 132,
+    height: 240,
     left: 0,
     position: 'absolute',
     right: 0,
@@ -711,24 +771,64 @@ const styles = StyleSheet.create({
     backgroundColor: '#0B0D10',
   },
   stageTopOverlay: {
+    gap: Spacing.md,
     left: Spacing.lg,
     position: 'absolute',
     right: Spacing.lg,
     top: Spacing.lg,
-    gap: Spacing.md,
   },
   stageMetaRow: {
     alignItems: 'center',
     flexDirection: 'row',
     justifyContent: 'space-between',
   },
+  stageMetaGroup: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    flexShrink: 1,
+    gap: Spacing.sm,
+  },
   stageTopCopy: {
     gap: 2,
+  },
+  liveTitle: {
+    fontFamily: Fonts.rounded,
+    fontSize: 32,
+    fontWeight: '800',
+    letterSpacing: -0.8,
+    lineHeight: 36,
   },
   stageInstruction: {
     ...TextPresets.body,
     fontSize: 15,
     lineHeight: 22,
+  },
+  focusCard: {
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    gap: Spacing.xs,
+    padding: Spacing.md,
+  },
+  focusHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  focusWindow: {
+    ...TextPresets.label,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  focusTitle: {
+    fontFamily: Fonts.rounded,
+    fontSize: 18,
+    fontWeight: '700',
+    lineHeight: 22,
+  },
+  focusBody: {
+    ...TextPresets.body,
+    fontSize: 14,
+    lineHeight: 20,
   },
   permissionState: {
     alignItems: 'flex-start',
@@ -761,6 +861,9 @@ const styles = StyleSheet.create({
     position: 'absolute',
     right: Spacing.lg,
   },
+  countdownLabel: {
+    ...TextPresets.eyebrow,
+  },
   progressTrack: {
     borderRadius: Radius.pill,
     height: 8,
@@ -782,7 +885,7 @@ const styles = StyleSheet.create({
     left: 28,
     position: 'absolute',
     right: 28,
-    top: 144,
+    top: 244,
   },
   frameCorner: {
     borderRadius: Radius.sm,
@@ -824,7 +927,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     position: 'absolute',
     right: Spacing.lg,
-    top: 116,
+    top: 260,
   },
   inlineErrorTitle: {
     ...TextPresets.label,

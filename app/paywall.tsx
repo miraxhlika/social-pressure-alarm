@@ -59,14 +59,14 @@ export default function PaywallScreen() {
       <PageHeader
         badgeLabel={`${usedSlots}/${FREE_ALARM_LIMIT}`}
         badgeTone={canCreateAnother ? 'warning' : 'danger'}
-        eyebrow="Alarm limit"
-        title={canCreateAnother ? 'You still have room for another alarm.' : 'This build has reached its alarm limit.'}
-        description="A simple local build rule."
+        eyebrow="Checkpoint limit"
+        title={canCreateAnother ? 'You still have room for another checkpoint.' : 'This preview build has reached its checkpoint limit.'}
+        description="A local preview rule, not a checkout."
       />
 
       {isLoading ? (
         <LoadingBlock
-          description="Checking your saved alarms and current usage."
+          description="Checking your saved checkpoints and current usage."
           title="Loading limit details"
           tone="canvas"
         />
@@ -77,23 +77,23 @@ export default function PaywallScreen() {
               <View style={styles.heroCopy}>
                 <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Current build rule</Text>
                 <Text style={[styles.heroTitle, { color: colors.text }]}>
-                  {canCreateAnother ? 'You can keep building for now.' : 'Your saved alarms still keep working.'}
+                  {canCreateAnother ? 'You can keep building for now.' : 'Your saved checkpoints still keep working.'}
                 </Text>
                 <Text style={[TextPresets.body, { color: colors.textSoft }]}>
                   {canCreateAnother
-                    ? `This preview build allows ${FREE_ALARM_LIMIT} total alarm creations on this device.`
-                    : 'You can still edit, reuse, reschedule, and delete the alarms already on this device.'}
+                    ? `This preview build allows ${FREE_ALARM_LIMIT} total checkpoint saves on this device.`
+                    : 'You can still edit, reuse, reschedule, and delete the checkpoints already on this device.'}
                 </Text>
               </View>
               <StatusPill label={canCreateAnother ? 'Preview limit' : 'Limit reached'} tone={canCreateAnother ? 'warning' : 'danger'} />
             </View>
 
             <View style={styles.metricGrid}>
-              <UsageMetric colors={colors} helper="Total creations" label="Used" value={`${usedSlots}`} />
+              <UsageMetric colors={colors} helper="Total saves" label="Used" value={`${usedSlots}`} />
               <UsageMetric colors={colors} helper="Saved right now" label="Active" value={`${activeAlarmCount}`} />
               <UsageMetric
                 colors={colors}
-                helper="New setups left"
+                helper="New saves left"
                 label="Left"
                 value={`${Math.max(0, FREE_ALARM_LIMIT - state.lifetimeAlarmCreations)}`}
               />
@@ -109,20 +109,20 @@ export default function PaywallScreen() {
 
             <View style={styles.noteList}>
               <InfoRow
-                body="There is no payment flow behind this screen yet."
+                body="There is no payment flow behind this screen."
                 colors={colors}
-                title="No payment required"
+                title="No checkout"
               />
               <InfoRow
-                body="Deleting an alarm does not reopen a slot because the cap is based on total creations in this build."
+                body="Deleting a checkpoint does not reopen a slot because the cap is based on total saves in this build."
                 colors={colors}
                 title="Why a slot may stay used"
               />
               <InfoRow
                 body={
                   state.alarms[0]
-                    ? `Your next saved alarm is ${formatAlarmTime(state.alarms[0].hour, state.alarms[0].minute)}.`
-                    : 'You can return to Today or your alarm library now.'
+                    ? `Your next saved checkpoint is ${formatAlarmTime(state.alarms[0].hour, state.alarms[0].minute)}.`
+                    : 'You can return to Today or your checkpoint library now.'
                 }
                 colors={colors}
                 title="What still works"
@@ -132,7 +132,7 @@ export default function PaywallScreen() {
 
           <View style={styles.buttonGroup}>
             <AppButton
-              label={canCreateAnother ? 'Create another alarm' : 'Manage alarms'}
+              label={canCreateAnother ? 'Create another checkpoint' : 'Manage checkpoints'}
               onPress={() => router.replace(canCreateAnother ? '/create' : '/alarms')}
             />
             <AppButton label="Back to today" onPress={() => router.replace('/')} variant="secondary" />

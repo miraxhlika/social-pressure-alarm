@@ -13,16 +13,25 @@ import { SectionHeader } from '@/components/ui/section-header';
 import { StatusPill } from '@/components/ui/status-pill';
 import { Fonts, getAppColors, Radius, Spacing, TextPresets } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { trackAnalyticsEvent } from '@/lib/analytics';
 import { hydrateAlarmRuntimeForCurrentUser, readAlarmStore, saveNewAlarm, updateAlarm } from '@/lib/alarms';
+import {
+  CHECKPOINT_TEMPLATES,
+  formatGracePeriodLabel,
+  getCheckpointTemplate,
+  getCheckpointTemplateDefaults,
+  getUseCaseLabel,
+} from '@/lib/checkpoint-templates';
 import {
   cancelAlarmNotificationAsync,
   ensureNotificationPermissionsAsync,
   scheduleAlarmNotificationAsync,
 } from '@/lib/notifications';
+import { markOnboardingCompleted } from '@/lib/onboarding';
 import { listMySocialCircles } from '@/lib/social/circles';
 import { SocialCircleSummary } from '@/lib/social/types';
 import { useSocialSession } from '@/providers/social-session-provider';
-import { Alarm, CheckpointPreset, FREE_ALARM_LIMIT, RepeatSchedule } from '@/types/alarm';
+import { Alarm, CheckpointPreset, FREE_ALARM_LIMIT, RepeatSchedule, UseCaseType } from '@/types/alarm';
 
 const REPEAT_OPTIONS: { value: RepeatSchedule; label: string; help: string }[] = [
   { value: 'once', label: 'Once', help: 'One scheduled run' },
@@ -61,13 +70,55 @@ function getModeLabel(isEditMode: boolean, isReuseMode: boolean) {
   return 'New';
 }
 
+function normalizeRepeatScheduleParam(value: string | undefined, fallback: RepeatSchedule) {
+  return value === 'daily' || value === 'weekdays' || value === 'once' ? value : fallback;
+}
+
+function buildCheckpointPlanSummary({
+  useCaseType,
+  label,
+  formattedTime,
+  repeatSchedule,
+  gracePeriodSeconds,
+  hasCode,
+  socialLabel,
+}: {
+  useCaseType: UseCaseType;
+  label: string;
+  formattedTime: string;
+  repeatSchedule: RepeatSchedule;
+  gracePeriodSeconds: number;
+  hasCode: boolean;
+  socialLabel: string;
+}) {
+  const useCaseLabel = getUseCaseLabel(useCaseType);
+  const repeatLabel =
+    repeatSchedule === 'daily' ? 'every day' : repeatSchedule === 'weekdays' ? 'on weekdays' : 'once';
+  const checkpointLabel = label.trim() || getCheckpointTemplate(useCaseType).defaultLabel || 'your checkpoint';
+  const codeLabel = hasCode ? 'Code ready.' : 'Code still needed.';
+
+  return `${useCaseLabel} at ${formattedTime}, ${repeatLabel}. You will have ${formatGracePeriodLabel(
+    gracePeriodSeconds
+  )} to scan ${checkpointLabel}. ${socialLabel}. ${codeLabel}`;
+}
+
 export default function CreateAlarmScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ alarmId?: string; mode?: string }>();
+  const params = useLocalSearchParams<{
+    alarmId?: string;
+    mode?: string;
+    onboardingMode?: string;
+    recoveryFocus?: string;
+    prefillUseCaseType?: string;
+    prefillLabel?: string;
+    prefillRepeatSchedule?: string;
+    prefillGracePeriodSeconds?: string;
+  }>();
   const colors = getAppColors(useColorScheme());
   const { configured, isProfileComplete, user } = useSocialSession();
   const [time, setTime] = useState(createInitialTime);
   const [label, setLabel] = useState('');
+  const [useCaseType, setUseCaseType] = useState<UseCaseType>('custom');
   const [expectedQrPayload, setExpectedQrPayload] = useState('');
   const [repeatSchedule, setRepeatSchedule] = useState<RepeatSchedule>('once');
   const [gracePeriodSeconds, setGracePeriodSeconds] = useState('120');
@@ -92,6 +143,8 @@ export default function CreateAlarmScreen() {
   const scannerTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isEditMode = params.mode === 'edit' && typeof params.alarmId === 'string';
   const isReuseMode = params.mode === 'reuse' && typeof params.alarmId === 'string';
+  const isOnboardingConversion = params.onboardingMode === 'convert_demo';
+  const recoveryFocus = params.recoveryFocus === 'grace' || params.recoveryFocus === 'time' ? params.recoveryFocus : undefined;
 
   const formattedTime = useMemo(
     () =>
@@ -107,16 +160,26 @@ export default function CreateAlarmScreen() {
   }, [gracePeriodSeconds]);
 
   const screenTitle = isEditMode
-    ? 'Edit alarm'
+    ? 'Edit checkpoint'
     : isReuseMode
-      ? 'Reuse alarm'
-      : 'New alarm';
+      ? 'Reuse checkpoint'
+      : isOnboardingConversion
+        ? 'Finish the real checkpoint'
+        : 'New checkpoint';
   const screenSubtitle = isEditMode
-    ? 'Update time, checkpoint, or sharing.'
+    ? 'Update the timing, proof, or accountability rules.'
     : isReuseMode
-      ? 'Start from an existing setup.'
-      : 'Set time, QR code, and rules.';
-  const primaryActionLabel = isEditMode ? 'Save changes' : 'Save alarm';
+      ? 'Start from an existing checkpoint and edit anything.'
+      : isOnboardingConversion
+        ? 'Your practice choice is already loaded. Set the real schedule and scan the real checkpoint code.'
+        : 'Start from a use-case template, then fine-tune the details.';
+  const primaryActionLabel = isEditMode ? 'Save changes' : isOnboardingConversion ? 'Save real checkpoint' : 'Save checkpoint';
+  const recoveryBannerCopy =
+    recoveryFocus === 'grace'
+      ? 'The last miss suggests the checkpoint may be too hard to reach in time. Start by adjusting the reach window.'
+      : recoveryFocus === 'time'
+        ? 'The last miss suggests the trigger time may not fit the real routine yet. Move the checkpoint to a better moment.'
+        : null;
   const socialEnabled = configured && user && isProfileComplete;
   const selectedCircle = availableCircles.find((circle) => circle.id === selectedCircleId) ?? null;
   const socialShareCount = Number(shareSuccesses) + Number(shareMisses);
@@ -129,11 +192,13 @@ export default function CreateAlarmScreen() {
         : shareMisses
           ? `Shares misses with ${selectedCircle.name}`
           : `Circle selected: ${selectedCircle.name}`;
+  const socialSummaryLabel = !selectedCircle ? 'Private' : setupSummary;
   const visiblePresets = arePresetsExpanded ? savedPresets : savedPresets.slice(0, 3);
   const selectedGracePreset =
     GRACE_PRESET_OPTIONS.find((option) => option.value === Number.parseInt(gracePeriodSeconds, 10)) ?? null;
   const parsedGracePeriod = Number.parseInt(gracePeriodSeconds, 10);
   const checkpointLabelPreview = label.trim() || sourceAlarm?.label || 'Choose a checkpoint';
+  const selectedTemplate = getCheckpointTemplate(useCaseType);
   const checkpointStatusLabel = isScannerVisible
     ? 'Scanner live'
     : expectedQrPayload
@@ -151,6 +216,19 @@ export default function CreateAlarmScreen() {
         { id: 1 as const, label: 'Checkpoint', detail: 'Time and code' },
         { id: 2 as const, label: 'Rules', detail: 'Repeat and reach time' },
       ];
+  const checkpointPlanSummary = useMemo(
+    () =>
+      buildCheckpointPlanSummary({
+        useCaseType,
+        label,
+        formattedTime,
+        repeatSchedule,
+        gracePeriodSeconds: gracePreviewSeconds,
+        hasCode: expectedQrPayload.trim().length > 0,
+        socialLabel: socialSummaryLabel,
+      }),
+    [expectedQrPayload, formattedTime, gracePreviewSeconds, label, repeatSchedule, socialSummaryLabel, useCaseType]
+  );
 
   const handleTimeChange = (_event: DateTimePickerEvent, selectedDate?: Date) => {
     if (!selectedDate) {
@@ -166,13 +244,32 @@ export default function CreateAlarmScreen() {
       const store = await readAlarmStore();
       setSavedPresets(store.checkpointPresets);
       setErrors({});
-      setActiveStep(1);
+      setActiveStep(recoveryFocus === 'grace' ? 2 : 1);
 
       if (!params.alarmId || (!isEditMode && !isReuseMode)) {
+        const prefilledTemplate = getCheckpointTemplateDefaults(params.prefillUseCaseType);
+        const prefilledGracePeriod = Number.parseInt(params.prefillGracePeriodSeconds ?? '', 10);
+
         setSourceAlarm(null);
+        setUseCaseType(prefilledTemplate.useCaseType);
+        setLabel(typeof params.prefillLabel === 'string' ? params.prefillLabel : prefilledTemplate.label);
+        setExpectedQrPayload('');
+        setRepeatSchedule(normalizeRepeatScheduleParam(params.prefillRepeatSchedule, prefilledTemplate.repeatSchedule));
+        setGracePeriodSeconds(
+          Number.isFinite(prefilledGracePeriod) && prefilledGracePeriod >= 15
+            ? String(prefilledGracePeriod)
+            : String(prefilledTemplate.gracePeriodSeconds)
+        );
         setSelectedCircleId('');
         setIsSocialExpanded(false);
-        setIsCustomGraceExpanded(false);
+        setIsCustomGraceExpanded(
+          !GRACE_PRESET_OPTIONS.some((option) =>
+            option.value ===
+            (Number.isFinite(prefilledGracePeriod) && prefilledGracePeriod >= 15
+              ? prefilledGracePeriod
+              : prefilledTemplate.gracePeriodSeconds)
+          )
+        );
         setShareSuccesses(false);
         setShareMisses(false);
         return;
@@ -182,6 +279,7 @@ export default function CreateAlarmScreen() {
 
       if (!alarm) {
         setSourceAlarm(null);
+        setUseCaseType('custom');
         setSelectedCircleId('');
         setIsSocialExpanded(false);
         setIsCustomGraceExpanded(false);
@@ -196,6 +294,7 @@ export default function CreateAlarmScreen() {
       setSourceAlarm(alarm);
       setTime(nextTime);
       setLabel(alarm.label);
+      setUseCaseType(alarm.useCaseType);
       setExpectedQrPayload(alarm.expectedQrPayload);
       setRepeatSchedule(alarm.repeatSchedule);
       setGracePeriodSeconds(String(alarm.gracePeriodSeconds));
@@ -209,7 +308,16 @@ export default function CreateAlarmScreen() {
     };
 
     void loadFormData();
-  }, [isEditMode, isReuseMode, params.alarmId]);
+  }, [
+    isEditMode,
+    isReuseMode,
+    params.alarmId,
+    params.prefillGracePeriodSeconds,
+    params.prefillLabel,
+    params.prefillRepeatSchedule,
+    params.prefillUseCaseType,
+    recoveryFocus,
+  ]);
 
   useEffect(() => {
     if (!socialEnabled) {
@@ -395,6 +503,56 @@ export default function CreateAlarmScreen() {
     [isScannerEnabled]
   );
 
+  const handleCheckpointLimitReached = useCallback(
+    async (source: 'create' | 'checkpoints_tab') => {
+      const store = await readAlarmStore();
+      await trackAnalyticsEvent('checkpoint_limit_reached', {
+        limit: FREE_ALARM_LIMIT,
+        creationCount: store.lifetimeAlarmCreations,
+        source,
+      });
+
+      Alert.alert(
+        'Checkpoint limit reached',
+        `This preview build currently allows ${FREE_ALARM_LIMIT} saved checkpoints per device. Edit, reuse, or delete an existing checkpoint for now.`,
+        [
+          {
+            text: 'Manage checkpoints',
+            onPress: () => router.replace('/alarms'),
+          },
+          {
+            text: 'Cancel',
+            style: 'cancel',
+          },
+        ]
+      );
+    },
+    [router]
+  );
+
+  const handleTemplateSelect = useCallback(
+    (nextUseCaseType: UseCaseType) => {
+      const defaults = getCheckpointTemplateDefaults(nextUseCaseType);
+
+      setUseCaseType(defaults.useCaseType);
+      setLabel(defaults.label);
+      setRepeatSchedule(defaults.repeatSchedule);
+      setGracePeriodSeconds(String(defaults.gracePeriodSeconds));
+      setIsCustomGraceExpanded(false);
+      setErrors((currentErrors) => ({
+        ...currentErrors,
+        label: undefined,
+        gracePeriodSeconds: undefined,
+      }));
+
+      void trackAnalyticsEvent('use_case_selected', {
+        source: 'create',
+        useCaseType: defaults.useCaseType,
+      });
+    },
+    []
+  );
+
   const handleContinueToRules = () => {
     if (!validateCheckpointStep()) {
       return;
@@ -412,14 +570,14 @@ export default function CreateAlarmScreen() {
     setIsSocialExpanded(true);
   };
 
-  const handleSave = async () => {
+  const handleSave = useCallback(async () => {
     const trimmedLabel = label.trim();
     const trimmedExpectedQrPayload = expectedQrPayload.trim();
     const gracePeriod = Number.parseInt(gracePeriodSeconds, 10);
     const nextErrors: FormErrors = {};
 
     if (!trimmedLabel) {
-      nextErrors.label = 'Give this alarm a short label you will recognize immediately.';
+      nextErrors.label = 'Give this checkpoint a short label you will recognize immediately.';
     }
 
     if (!trimmedExpectedQrPayload) {
@@ -440,7 +598,7 @@ export default function CreateAlarmScreen() {
     const store = await readAlarmStore();
 
     if (!isEditMode && store.lifetimeAlarmCreations >= FREE_ALARM_LIMIT) {
-      router.replace('/paywall');
+      await handleCheckpointLimitReached('create');
       return;
     }
 
@@ -462,6 +620,7 @@ export default function CreateAlarmScreen() {
         hour: time.getHours(),
         minute: time.getMinutes(),
         label: trimmedLabel,
+        useCaseType,
         expectedQrPayload: trimmedExpectedQrPayload,
         repeatSchedule,
         gracePeriodSeconds: gracePeriod,
@@ -488,12 +647,45 @@ export default function CreateAlarmScreen() {
         ...baseAlarm,
         notificationIds: scheduled.notificationIds,
         scheduledFor: scheduled.scheduledFor,
+        notificationStrategyKey: scheduled.strategyKey,
       };
 
       if (isEditMode && sourceAlarm) {
         await updateAlarm(nextAlarm);
       } else {
         await saveNewAlarm(nextAlarm);
+        await trackAnalyticsEvent('recurring_checkpoint_saved', {
+          checkpointId: nextAlarm.id,
+          useCaseType,
+          repeatSchedule,
+          gracePeriodSeconds: gracePeriod,
+          creationCountBeforeSave: store.lifetimeAlarmCreations,
+          source: isReuseMode ? 'reuse' : 'new',
+          socialMode: selectedCircleId ? 'circle' : 'private',
+        });
+
+        if (store.lifetimeAlarmCreations === 1) {
+          await trackAnalyticsEvent('second_checkpoint_created', {
+            checkpointId: nextAlarm.id,
+            useCaseType,
+            repeatSchedule,
+            gracePeriodSeconds: gracePeriod,
+          });
+        }
+      }
+
+      if (isOnboardingConversion && !isEditMode) {
+        await markOnboardingCompleted();
+        router.replace({
+          pathname: '/success',
+          params: {
+            alarmId: nextAlarm.id,
+            label: nextAlarm.label,
+            mode: 'setup_complete',
+            promptSecondCheckpoint: store.lifetimeAlarmCreations === 0 ? '1' : '0',
+          },
+        });
+        return;
       }
 
       router.replace('/');
@@ -503,13 +695,29 @@ export default function CreateAlarmScreen() {
       }
 
       const errorMessage =
-        error instanceof Error ? error.message : 'The alarm could not be saved right now.';
+        error instanceof Error ? error.message : 'The checkpoint could not be saved right now.';
 
-      Alert.alert('Unable to save alarm', errorMessage);
+      Alert.alert('Unable to save checkpoint', errorMessage);
     } finally {
       setIsSaving(false);
     }
-  };
+  }, [
+    expectedQrPayload,
+    gracePeriodSeconds,
+    handleCheckpointLimitReached,
+    isEditMode,
+    isReuseMode,
+    label,
+    repeatSchedule,
+    router,
+    selectedCircleId,
+    shareMisses,
+    shareSuccesses,
+    sourceAlarm,
+    time,
+    useCaseType,
+    isOnboardingConversion,
+  ]);
 
   return (
     <AppScreen
@@ -558,6 +766,22 @@ export default function CreateAlarmScreen() {
         title={screenTitle}
       />
 
+      {isOnboardingConversion ? (
+        <AppCard elevated tone="primary" variant="inline">
+          <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>From practice to real setup</Text>
+          <Text style={[TextPresets.body, { color: colors.textSoft }]}>
+            The use case, cadence, and reach window came from your practice run. Add the real QR code and choose the real time now.
+          </Text>
+        </AppCard>
+      ) : null}
+
+      {recoveryBannerCopy ? (
+        <AppCard elevated tone="warning" variant="inline">
+          <Text style={[TextPresets.eyebrow, { color: colors.warning }]}>Recovery edit</Text>
+          <Text style={[TextPresets.body, { color: colors.textSoft }]}>{recoveryBannerCopy}</Text>
+        </AppCard>
+      ) : null}
+
       <View style={styles.stepRail}>
         {stepItems.map((step) => {
           const isActive = activeStep === step.id;
@@ -596,18 +820,82 @@ export default function CreateAlarmScreen() {
         })}
       </View>
 
+      <AppCard elevated tone="canvas" style={styles.summaryCard}>
+        <View style={styles.summaryHeader}>
+          <View style={styles.summaryCopy}>
+            <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Live preview</Text>
+            <Text style={[styles.summaryTitle, { color: colors.text }]}>
+              {selectedTemplate.title} {formattedTime}
+            </Text>
+          </View>
+          <StatusPill label={expectedQrPayload ? 'Ready to save' : 'Needs code'} tone={expectedQrPayload ? 'success' : 'warning'} />
+        </View>
+        <Text style={[TextPresets.body, { color: colors.textSoft }]}>{checkpointPlanSummary}</Text>
+      </AppCard>
+
       {activeStep === 1 ? (
         <AppCard elevated tone="primary">
           <SectionHeader
             kicker="Step 1"
             title="Set the checkpoint"
-            description="Choose the time and the exact code you will need to scan."
+            description="Start from a template, then choose the exact time and proof."
             action={<StatusPill label="Required" tone="primary" />}
           />
 
+          <View style={styles.templateSection}>
+            <View style={styles.templateSectionCopy}>
+              <Text style={[TextPresets.label, { color: colors.text }]}>Use-case templates</Text>
+              <Text style={[TextPresets.body, { color: colors.muted }]}>
+                Pick the setup that is closest to the commitment you want to protect.
+              </Text>
+            </View>
+
+            <View style={styles.templateGrid}>
+              {CHECKPOINT_TEMPLATES.map((template) => {
+                const isSelected = template.id === useCaseType;
+
+                return (
+                  <Pressable
+                    key={template.id}
+                    accessibilityHint={`Loads the ${template.title} defaults into this checkpoint.`}
+                    accessibilityLabel={`${template.title} template`}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: isSelected }}
+                    onPress={() => handleTemplateSelect(template.id)}
+                    style={[
+                      styles.templateCard,
+                      {
+                        backgroundColor: isSelected ? colors.primarySurface : colors.elevated,
+                        borderColor: isSelected ? colors.primary : colors.line,
+                      },
+                    ]}>
+                    <View style={styles.templateCardHeader}>
+                      <Text style={[TextPresets.label, { color: isSelected ? colors.primary : colors.text }]}>
+                        {template.title}
+                      </Text>
+                      <StatusPill
+                        label={formatGracePeriodLabel(template.gracePeriodSeconds)}
+                        tone={isSelected ? 'primary' : 'default'}
+                      />
+                    </View>
+                    <Text style={[TextPresets.body, { color: colors.textSoft }]}>{template.description}</Text>
+                    <Text style={[TextPresets.body, { color: colors.muted }]}>
+                      {template.defaultLabel ? `Starts with "${template.defaultLabel}"` : 'Starts with a blank label'} ·{' '}
+                      {template.repeatSchedule === 'daily'
+                        ? 'Every day'
+                        : template.repeatSchedule === 'weekdays'
+                          ? 'Weekdays'
+                          : 'One time'}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+
           <View style={[styles.timePanel, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
             <View style={styles.timeCopy}>
-              <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Alarm time</Text>
+              <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Trigger time</Text>
               <Text style={[styles.timeValue, { color: colors.text }]}>{formattedTime}</Text>
               <Text style={[TextPresets.body, { color: colors.textSoft }]}>When this checkpoint goes live.</Text>
             </View>
@@ -628,7 +916,7 @@ export default function CreateAlarmScreen() {
               setLabel(nextValue);
               setErrors((currentErrors) => ({ ...currentErrors, label: undefined }));
             }}
-            placeholder="Bathroom sink"
+            placeholder={selectedTemplate.defaultLabel || 'Front door'}
             value={label}
           />
 
@@ -693,7 +981,7 @@ export default function CreateAlarmScreen() {
             <View style={[styles.inlineSection, { borderTopColor: colors.line }]}>
               <View style={styles.inlineSectionHeader}>
                 <View style={styles.inlineSectionCopy}>
-                  <Text style={[TextPresets.label, { color: colors.text }]}>Saved checkpoints</Text>
+                  <Text style={[TextPresets.label, { color: colors.text }]}>Saved checkpoint codes</Text>
                   <Text style={[TextPresets.body, { color: colors.muted }]}>Reuse a trusted code and keep moving.</Text>
                 </View>
                 <AppButton
@@ -750,7 +1038,7 @@ export default function CreateAlarmScreen() {
             autoCapitalize="none"
             autoCorrect={false}
             error={errors.expectedQrPayload}
-            helper="This must match exactly when the alarm rings."
+            helper="This must match exactly when the checkpoint goes live."
             label="Checkpoint code"
             onChangeText={(nextValue) => {
               setExpectedQrPayload(nextValue);
@@ -801,7 +1089,7 @@ export default function CreateAlarmScreen() {
               <View style={styles.ruleSectionCopy}>
                 <Text style={[TextPresets.label, { color: colors.text }]}>Reach time</Text>
                 <Text style={[TextPresets.body, { color: colors.muted }]}>
-                  How long you have to get to the checkpoint after it rings.
+                  How long you have to reach the checkpoint after it goes live.
                 </Text>
               </View>
               <StatusPill
@@ -898,7 +1186,7 @@ export default function CreateAlarmScreen() {
             <SocialInfoCard
               actionLabel="Finish account"
               colors={colors}
-              copy="Finish your profile before attaching this alarm to a circle."
+              copy="Finish your profile before attaching this checkpoint to a circle."
               onPress={() => router.push('/account')}
               title="Profile required"
             />
@@ -917,7 +1205,7 @@ export default function CreateAlarmScreen() {
                 <View style={styles.socialSummaryCopy}>
                   <View style={styles.socialSummaryHeader}>
                     <Text style={[TextPresets.label, { color: colors.text }]}>
-                      {selectedCircle ? selectedCircle.name : 'Private alarm'}
+                      {selectedCircle ? selectedCircle.name : 'Private checkpoint'}
                     </Text>
                     <StatusPill
                       label={!selectedCircleId ? 'Private' : socialShareCount > 0 ? 'Sharing on' : 'Circle linked'}
@@ -926,9 +1214,9 @@ export default function CreateAlarmScreen() {
                   </View>
                   <Text style={[TextPresets.body, { color: colors.muted }]}>
                     {!selectedCircleId
-                      ? 'Nothing is shared unless you attach this alarm to a circle.'
+                      ? 'Nothing is shared unless you attach this checkpoint to a circle.'
                       : socialShareCount === 0
-                        ? `This alarm is linked to ${selectedCircle?.name ?? 'your circle'}, but sharing is still off.`
+                        ? `This checkpoint is linked to ${selectedCircle?.name ?? 'your circle'}, but sharing is still off.`
                         : setupSummary}
                   </Text>
                 </View>
@@ -938,8 +1226,8 @@ export default function CreateAlarmScreen() {
                 <>
                   <View style={styles.selectionList}>
                     <Pressable
-                      accessibilityHint="Keeps this alarm private and turns off social sharing."
-                      accessibilityLabel="Private alarm option"
+                      accessibilityHint="Keeps this checkpoint private and turns off social sharing."
+                      accessibilityLabel="Private checkpoint option"
                       accessibilityRole="button"
                       accessibilityState={{ selected: !selectedCircleId }}
                       onPress={() => {
@@ -955,7 +1243,7 @@ export default function CreateAlarmScreen() {
                         },
                       ]}>
                       <Text style={[TextPresets.label, { color: !selectedCircleId ? colors.primary : colors.text }]}>
-                        Private alarm
+                        Private checkpoint
                       </Text>
                       <Text style={[TextPresets.body, { color: colors.muted }]}>Nothing is shared.</Text>
                     </Pressable>
@@ -966,7 +1254,7 @@ export default function CreateAlarmScreen() {
                       return (
                         <Pressable
                           key={circle.id}
-                          accessibilityHint={`Shares this alarm with ${circle.memberCount} ${
+                          accessibilityHint={`Shares this checkpoint with ${circle.memberCount} ${
                             circle.memberCount === 1 ? 'member' : 'members'
                           } in ${circle.name}.`}
                           accessibilityLabel={`Circle option ${circle.name}`}
@@ -1066,11 +1354,30 @@ function SocialInfoCard({
 function alertNotificationPermission() {
   Alert.alert(
     'Notification permission needed',
-    'Notifications are required so the alarm can ring on time.'
+    'Notifications are required so the checkpoint can go live on time.'
   );
 }
 
 const styles = StyleSheet.create({
+  summaryCard: {
+    gap: Spacing.sm,
+  },
+  summaryHeader: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.md,
+    justifyContent: 'space-between',
+  },
+  summaryCopy: {
+    flex: 1,
+    gap: Spacing.xs,
+  },
+  summaryTitle: {
+    ...TextPresets.title,
+    fontSize: 22,
+    lineHeight: 28,
+  },
   stepRail: {
     flexDirection: 'row',
     gap: Spacing.sm,
@@ -1129,6 +1436,32 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     gap: Spacing.md,
     padding: Spacing.lg,
+  },
+  templateSection: {
+    gap: Spacing.md,
+  },
+  templateSectionCopy: {
+    gap: Spacing.xs,
+  },
+  templateGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.sm,
+  },
+  templateCard: {
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    flexBasis: 180,
+    flexGrow: 1,
+    gap: Spacing.sm,
+    minHeight: 132,
+    padding: Spacing.md,
+  },
+  templateCardHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    justifyContent: 'space-between',
   },
   timeCopy: {
     gap: Spacing.xs,

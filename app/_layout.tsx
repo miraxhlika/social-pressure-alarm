@@ -1,5 +1,6 @@
+import { useEffect, useState } from 'react';
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
-import { Stack } from 'expo-router';
+import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import 'react-native-reanimated';
 
@@ -7,11 +8,17 @@ import { getAppColors } from '@/constants/theme';
 import { useAlarmRuntime } from '@/hooks/use-alarm-runtime';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useSocialRuntime } from '@/hooks/use-social-runtime';
+import { readAlarmStore } from '@/lib/alarms';
+import { markOnboardingCompleted, readOnboardingState } from '@/lib/onboarding';
 import { SocialSessionProvider } from '@/providers/social-session-provider';
 
 export default function RootLayout() {
+  const router = useRouter();
+  const segments = useSegments();
+  const rootSegment = segments[0];
   const colorScheme = useColorScheme();
   const colors = getAppColors(colorScheme);
+  const [isOnboardingGateReady, setIsOnboardingGateReady] = useState(false);
   const navigationTheme = {
     ...(colorScheme === 'dark' ? DarkTheme : DefaultTheme),
     colors: {
@@ -27,6 +34,44 @@ export default function RootLayout() {
 
   useAlarmRuntime();
   useSocialRuntime();
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const syncOnboardingGate = async () => {
+      try {
+        const [onboardingState, store] = await Promise.all([readOnboardingState(), readAlarmStore()]);
+        const hasExistingUsage =
+          store.alarms.length > 0 ||
+          store.lifetimeAlarmCreations > 0 ||
+          store.successHistory.length > 0 ||
+          store.failureHistory.length > 0;
+
+        if (onboardingState.status === 'pending' && hasExistingUsage) {
+          await markOnboardingCompleted();
+          return;
+        }
+
+        if (onboardingState.status === 'pending' && rootSegment !== 'onboarding') {
+          router.replace('/onboarding');
+        }
+      } finally {
+        if (isMounted) {
+          setIsOnboardingGateReady(true);
+        }
+      }
+    };
+
+    void syncOnboardingGate();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [rootSegment, router]);
+
+  if (!isOnboardingGateReady) {
+    return null;
+  }
 
   return (
     <SocialSessionProvider>
@@ -56,6 +101,18 @@ export default function RootLayout() {
           />
           <Stack.Screen
             name="success"
+            options={{
+              animation: 'slide_from_right',
+            }}
+          />
+          <Stack.Screen
+            name="missed"
+            options={{
+              animation: 'slide_from_right',
+            }}
+          />
+          <Stack.Screen
+            name="onboarding"
             options={{
               animation: 'slide_from_right',
             }}

@@ -1,4 +1,5 @@
 import { Alarm } from '@/types/alarm';
+import { formatGracePeriodLabel } from '@/lib/checkpoint-templates';
 import { SocialFeedItem, SocialRuntimeSnapshot } from '@/lib/social/types';
 import { formatScheduledFor, getAlarmPhase, getNextActionableAlarm } from '@/lib/alarms';
 
@@ -23,7 +24,7 @@ export function formatFeedInsight(item: SocialFeedItem) {
       parts.push(`${item.sharePayload.timeToScanSeconds}s scan`);
     }
 
-    parts.push(`streak ${item.sharePayload.currentStreak}`);
+    parts.push(`${item.sharePayload.weeklyCompletionRate}% week`);
     return parts.join(' · ');
   }
 
@@ -67,7 +68,7 @@ export function getAlarmPhaseTone(alarm: Alarm | null) {
 
 export function getAlarmPhaseLabel(alarm: Alarm | null) {
   if (!alarm) {
-    return 'No alarm';
+    return 'No checkpoint';
   }
 
   const phase = getAlarmPhase(alarm);
@@ -88,22 +89,24 @@ export function getAlarmPhaseLabel(alarm: Alarm | null) {
 
 export function getPrimaryAlarmCopy(alarm: Alarm | null) {
   if (!alarm) {
-    return 'Create your first alarm and place the QR code away from the bed.';
+    return 'Set one checkpoint around a commitment that matters today.';
   }
 
   const phase = getAlarmPhase(alarm);
 
   switch (phase) {
     case 'ringing':
-      return 'The timer is running. Scan the saved QR code now.';
+      return 'The proof window is open. Reach the saved checkpoint and scan now.';
     case 'missed':
-      return 'This alarm missed its window. Reschedule it for the next run.';
+      return 'This run was missed. Tighten the setup or reschedule the next attempt.';
     case 'inactive':
-      return 'This alarm is cleared. Reuse it or schedule it again.';
+      return 'This checkpoint already did its job. Reuse it when this commitment comes back.';
     case 'unscheduled':
-      return 'This alarm is saved but not scheduled yet.';
+      return 'This checkpoint is saved, but it still needs a real time on the calendar.';
     default:
-      return `Next trigger ${formatScheduledFor(alarm.scheduledFor)} with a ${alarm.gracePeriodSeconds}s grace window.`;
+      return `Next run ${formatScheduledFor(alarm.scheduledFor)} with a ${formatGracePeriodLabel(
+        alarm.gracePeriodSeconds
+      )} reach window.`;
   }
 }
 

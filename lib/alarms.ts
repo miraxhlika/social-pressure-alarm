@@ -15,6 +15,7 @@ import {
   RepeatSchedule,
   SuccessHistoryEntry,
 } from '@/types/alarm';
+import { normalizeUseCaseType } from '@/lib/checkpoint-templates';
 import { getWeeklyCompletionStats } from '@/lib/progress';
 import { hasSocialBackendConfig } from '@/lib/social/config';
 import {
@@ -153,7 +154,8 @@ function normalizeAlarm(rawAlarm: unknown): Alarm | null {
       getTrimmedString(legacyAlarm.label) ??
       getTrimmedString(legacyAlarm.title) ??
       getTrimmedString(legacyAlarm.contactName) ??
-      'Checkpoint alarm',
+      'Checkpoint',
+    useCaseType: normalizeUseCaseType(legacyAlarm.useCaseType),
     expectedQrPayload,
     repeatSchedule: getRepeatSchedule(legacyAlarm.repeatSchedule),
     gracePeriodSeconds: getBoundedNumber(legacyAlarm.gracePeriodSeconds, 15, 3600, 120),
@@ -178,6 +180,7 @@ function normalizeRuntimeMetadata(rawValue: unknown): AlarmRuntimeMetadata | nul
   }
 
   const scheduledFor = getOptionalIsoString(rawValue.scheduledFor);
+  const notificationStrategyKey = getTrimmedString(rawValue.notificationStrategyKey);
   const notificationIds = Array.isArray(rawValue.notificationIds)
     ? rawValue.notificationIds
         .map((value) => getTrimmedString(value))
@@ -191,6 +194,7 @@ function normalizeRuntimeMetadata(rawValue: unknown): AlarmRuntimeMetadata | nul
   return {
     notificationIds,
     scheduledFor,
+    notificationStrategyKey,
   };
 }
 
@@ -240,7 +244,7 @@ function normalizeFailureEntry(rawEntry: unknown): FailureHistoryEntry | null {
 
   return {
     alarmId,
-    label: getTrimmedString(rawEntry.label) ?? 'Checkpoint alarm',
+    label: getTrimmedString(rawEntry.label) ?? 'Checkpoint',
     scheduledFor: getOptionalIsoString(rawEntry.scheduledFor),
     failedAt,
   };
@@ -260,7 +264,7 @@ function normalizeSuccessEntry(rawEntry: unknown): SuccessHistoryEntry | null {
 
   return {
     alarmId,
-    label: getTrimmedString(rawEntry.label) ?? 'Checkpoint alarm',
+    label: getTrimmedString(rawEntry.label) ?? 'Checkpoint',
     scheduledFor: getOptionalIsoString(rawEntry.scheduledFor),
     confirmedAt,
     timeToScanSeconds: getBoundedNumber(rawEntry.timeToScanSeconds, 0, 86400, 0),
@@ -530,7 +534,12 @@ async function flushPendingAlarmSync(store: AlarmStore, runtimeStore: AlarmRunti
 }
 
 async function reconcileAlarmSchedules(store: AlarmStore, runtimeStore: AlarmRuntimeStore) {
-  const { cancelAlarmNotificationAsync, scheduleAlarmNotificationAsync } = await import('@/lib/notifications');
+  const {
+    cancelAlarmNotificationAsync,
+    getAlarmNotificationStrategyKey,
+    readNotificationPreferences,
+    scheduleAlarmNotificationAsync,
+  } = await import('@/lib/notifications');
   const knownAlarmIds = new Set(store.alarms.map((alarm) => alarm.id));
   let nextRuntimeStore: AlarmRuntimeStore = {
     ...runtimeStore,
@@ -539,6 +548,7 @@ async function reconcileAlarmSchedules(store: AlarmStore, runtimeStore: AlarmRun
   let nextAlarms = [...store.alarms];
   const alarmsToSyncRemotely = [] as AlarmDefinition[];
   const now = Date.now();
+  const notificationPreferences = await readNotificationPreferences();
 
   for (const [alarmId, metadata] of Object.entries(runtimeStore.alarms)) {
     if (knownAlarmIds.has(alarmId)) {
@@ -570,8 +580,17 @@ async function reconcileAlarmSchedules(store: AlarmStore, runtimeStore: AlarmRun
       continue;
     }
 
+    const strategyKey = getAlarmNotificationStrategyKey(
+      alarm,
+      notificationPreferences,
+      alarm.scheduledFor ? new Date(alarm.scheduledFor) : createNextAlarmDateForSchedule(alarm.hour, alarm.minute, alarm.repeatSchedule)
+    );
+
     if (runtimeMetadata?.notificationIds?.length) {
-      if (runtimeMetadata.scheduledFor === alarm.scheduledFor) {
+      if (
+        runtimeMetadata.scheduledFor === alarm.scheduledFor &&
+        runtimeMetadata.notificationStrategyKey === strategyKey
+      ) {
         continue;
       }
 
@@ -585,6 +604,7 @@ async function reconcileAlarmSchedules(store: AlarmStore, runtimeStore: AlarmRun
     nextRuntimeStore.alarms[alarm.id] = {
       notificationIds: scheduled.notificationIds,
       scheduledFor: scheduled.scheduledFor,
+      notificationStrategyKey: scheduled.strategyKey,
     };
 
     if (scheduled.scheduledFor !== alarm.scheduledFor) {
@@ -731,7 +751,7 @@ export async function saveNewAlarm(alarm: Alarm) {
   const { store, runtimeStore } = await readLocalAlarmState();
 
   if (store.lifetimeAlarmCreations >= FREE_ALARM_LIMIT) {
-    throw new Error('Free alarm limit reached.');
+    throw new Error('Checkpoint limit reached.');
   }
 
   const nextStore: AlarmStore = {
@@ -747,6 +767,7 @@ export async function saveNewAlarm(alarm: Alarm) {
       [alarm.id]: {
         notificationIds: alarm.notificationIds,
         scheduledFor: alarm.scheduledFor,
+        notificationStrategyKey: alarm.notificationStrategyKey,
       },
     },
     pendingUpserts: shouldSyncRemoteAlarms()
@@ -766,7 +787,7 @@ export async function saveNewAlarm(alarm: Alarm) {
       };
       await writeRuntimeStore(nextRuntimeStore);
     } catch {
-      // Keep the alarm cached locally and retry its remote write later.
+      // Keep the checkpoint cached locally and retry its remote write later.
     }
   }
 
@@ -792,6 +813,7 @@ export async function updateAlarm(updatedAlarm: Alarm) {
       [updatedAlarm.id]: {
         notificationIds: updatedAlarm.notificationIds,
         scheduledFor: updatedAlarm.scheduledFor,
+        notificationStrategyKey: updatedAlarm.notificationStrategyKey,
       },
     },
     pendingUpserts: shouldSyncRemoteAlarms()
@@ -820,6 +842,55 @@ export async function updateAlarm(updatedAlarm: Alarm) {
   }
 
   return updatedAlarm;
+}
+
+export async function rescheduleAlarm(
+  alarmOrId: Alarm | string,
+  options?: {
+    scheduledFor?: string;
+  }
+) {
+  const alarm = typeof alarmOrId === 'string' ? await getAlarmById(alarmOrId) : alarmOrId;
+
+  if (!alarm) {
+    return null;
+  }
+
+  const { cancelAlarmNotificationAsync, scheduleAlarmNotificationAsync } = await import('@/lib/notifications');
+  let scheduledNotificationIds: string[] | undefined;
+
+  try {
+    const scheduled = await scheduleAlarmNotificationAsync(
+      {
+        ...alarm,
+        isActive: true,
+        lastOutcome: undefined,
+      },
+      {
+        scheduledFor: options?.scheduledFor,
+      }
+    );
+
+    scheduledNotificationIds = scheduled.notificationIds;
+
+    const nextAlarm = await updateAlarm({
+      ...alarm,
+      isActive: true,
+      lastOutcome: undefined,
+      notificationIds: scheduled.notificationIds,
+      scheduledFor: scheduled.scheduledFor,
+      notificationStrategyKey: scheduled.strategyKey,
+    });
+
+    await cancelAlarmNotificationAsync(alarm.notificationIds).catch(() => null);
+    return nextAlarm;
+  } catch (error) {
+    if (scheduledNotificationIds) {
+      await cancelAlarmNotificationAsync(scheduledNotificationIds).catch(() => null);
+    }
+
+    throw error;
+  }
 }
 
 export async function deleteAlarm(id: string) {

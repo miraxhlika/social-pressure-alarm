@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { User } from '@supabase/supabase-js';
 import { Pressable, Platform, StyleSheet, Switch, Text, View } from 'react-native';
 
@@ -10,11 +10,22 @@ import { LoadingBlock } from '@/components/ui/loading-block';
 import { PageHeader } from '@/components/ui/page-header';
 import { SectionHeader } from '@/components/ui/section-header';
 import { StateCard } from '@/components/ui/state-card';
+import { StatusPill } from '@/components/ui/status-pill';
 import { Fonts, Radius, Spacing, TextPresets, Type, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import {
+  DEFAULT_NOTIFICATION_PREFERENCES,
+  NotificationPermissionState,
+  ensureNotificationPermissionsAsync,
+  getNotificationPermissionState,
+  readNotificationPreferences,
+  saveNotificationPreferences,
+  syncNotificationStrategyAsync,
+  syncWeeklyReviewReminderAsync,
+} from '@/lib/notifications';
 import { useSocialSession } from '@/providers/social-session-provider';
 
-type FormFeedbackTone = 'success' | 'danger';
+type FormFeedbackTone = 'success' | 'danger' | 'warning';
 type ProfileFieldErrors = {
   displayName?: string;
   handle?: string;
@@ -215,11 +226,56 @@ function getFeedbackColors(tone: FormFeedbackTone, colors: ReturnType<typeof get
     };
   }
 
+  if (tone === 'warning') {
+    return {
+      backgroundColor: colors.warningSurface,
+      borderColor: colors.warning,
+      textColor: colors.warning,
+    };
+  }
+
   return {
     backgroundColor: colors.successSurface,
     borderColor: colors.success,
     textColor: colors.success,
   };
+}
+
+function getNotificationPermissionLabel(state: NotificationPermissionState) {
+  switch (state) {
+    case 'granted':
+      return 'Allowed';
+    case 'provisional':
+      return 'Quietly allowed';
+    case 'denied':
+      return 'Blocked';
+    default:
+      return 'Not set';
+  }
+}
+
+function getNotificationPermissionTone(state: NotificationPermissionState) {
+  switch (state) {
+    case 'granted':
+      return 'success' as const;
+    case 'provisional':
+      return 'primary' as const;
+    default:
+      return 'warning' as const;
+  }
+}
+
+function getNotificationPermissionHelper(state: NotificationPermissionState) {
+  switch (state) {
+    case 'granted':
+      return 'Core checkpoint alerts can fire on time. Optional reminders use the switches below.';
+    case 'provisional':
+      return 'Notifications can arrive quietly. Open device settings if you want banners and sound.';
+    case 'denied':
+      return 'Device notifications are blocked right now. Core checkpoint alerts and optional reminders will stay quiet until you re-enable them in system settings.';
+    default:
+      return 'Turn notifications on when prompted so your live checkpoints can ring on time.';
+  }
 }
 
 export default function AccountScreen() {
@@ -250,6 +306,12 @@ export default function AccountScreen() {
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [hasAttemptedProfileSubmit, setHasAttemptedProfileSubmit] = useState(false);
   const [profileFeedback, setProfileFeedback] = useState<FormFeedback | null>(null);
+  const [notificationPermissionState, setNotificationPermissionState] =
+    useState<NotificationPermissionState>('undetermined');
+  const [reminderPreferences, setReminderPreferences] = useState(DEFAULT_NOTIFICATION_PREFERENCES);
+  const [isReminderPreferencesLoading, setIsReminderPreferencesLoading] = useState(true);
+  const [isReminderPreferencesSubmitting, setIsReminderPreferencesSubmitting] = useState(false);
+  const [reminderFeedback, setReminderFeedback] = useState<FormFeedback | null>(null);
   const suggestedDisplayName = createSuggestedDisplayName(user);
   const suggestedHandle = createSuggestedHandle(user);
   const signedInAccountLabel = getAccountLabel(user);
@@ -283,10 +345,34 @@ export default function AccountScreen() {
   const timezoneSuggestions = getSuggestedTimezones(timezone, profile?.timezone, DEFAULT_TIMEZONE);
   const authFeedbackColors = authFeedback ? getFeedbackColors(authFeedback.tone, colors) : null;
   const profileFeedbackColors = profileFeedback ? getFeedbackColors(profileFeedback.tone, colors) : null;
+  const reminderFeedbackColors = reminderFeedback ? getFeedbackColors(reminderFeedback.tone, colors) : null;
   const handleHelper =
     normalizedHandle.length >= 3
       ? `Circle members will see @${normalizedHandle}.`
       : 'Lowercase only, with letters, numbers, and underscores.';
+  const notificationPermissionLabel = getNotificationPermissionLabel(notificationPermissionState);
+  const notificationPermissionHelper = getNotificationPermissionHelper(notificationPermissionState);
+
+  const loadReminderSettings = useCallback(async () => {
+    setIsReminderPreferencesLoading(true);
+
+    try {
+      const [storedPreferences, permissionState] = await Promise.all([
+        readNotificationPreferences(),
+        getNotificationPermissionState(),
+      ]);
+
+      setReminderPreferences(storedPreferences);
+      setNotificationPermissionState(permissionState);
+      setReminderFeedback(null);
+    } finally {
+      setIsReminderPreferencesLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadReminderSettings();
+  }, [loadReminderSettings]);
 
   const handleContinueWithGoogle = async () => {
     setAuthFeedback(null);
@@ -368,6 +454,50 @@ export default function AccountScreen() {
     }
   };
 
+  const handleSaveReminderPreferences = async () => {
+    const wantsOptionalReminder =
+      reminderPreferences.urgencyRemindersEnabled ||
+      reminderPreferences.eveningReadinessRemindersEnabled ||
+      reminderPreferences.weeklyReviewRemindersEnabled;
+
+    setIsReminderPreferencesSubmitting(true);
+    setReminderFeedback(null);
+
+    try {
+      if (wantsOptionalReminder) {
+        const hasPermission = await ensureNotificationPermissionsAsync();
+        const nextPermissionState = await getNotificationPermissionState();
+        setNotificationPermissionState(nextPermissionState);
+
+        if (!hasPermission) {
+          await saveNotificationPreferences(reminderPreferences);
+          await syncWeeklyReviewReminderAsync(reminderPreferences, {
+            requestPermissions: false,
+          });
+          setReminderFeedback({
+            tone: 'warning',
+            message: 'Preferences were saved, but notifications are still blocked in device settings.',
+          });
+          return;
+        }
+      }
+
+      await syncNotificationStrategyAsync(reminderPreferences);
+      setNotificationPermissionState(await getNotificationPermissionState());
+      setReminderFeedback({
+        tone: 'success',
+        message: 'Reminder preferences saved.',
+      });
+    } catch (error) {
+      setReminderFeedback({
+        tone: 'danger',
+        message: error instanceof Error ? error.message : 'Reminder preferences could not be updated right now.',
+      });
+    } finally {
+      setIsReminderPreferencesSubmitting(false);
+    }
+  };
+
   return (
     <AppScreen keyboardAware>
         <PageHeader
@@ -377,6 +507,116 @@ export default function AccountScreen() {
           badgeLabel={user ? 'Signed in' : 'Guest'}
           badgeTone={user ? 'success' : 'warning'}
         />
+
+        <AppCard elevated tone="canvas">
+          <SectionHeader
+            action={
+              <StatusPill
+                label={notificationPermissionLabel}
+                tone={getNotificationPermissionTone(notificationPermissionState)}
+              />
+            }
+            kicker="Device reminders"
+            title="Optional notification strategy"
+            description="Core checkpoint alerts still follow your schedules. These switches only control extra nudges."
+          />
+
+          {isReminderPreferencesLoading ? (
+            <Text style={[styles.helperCaption, { color: colors.muted }]}>Loading reminder preferences...</Text>
+          ) : (
+            <>
+              <View style={[styles.preferenceRow, { borderColor: colors.border }]}>
+                <View style={styles.preferenceCopy}>
+                  <Text style={[TextPresets.label, { color: colors.text }]}>Urgency reminder</Text>
+                  <Text style={[TextPresets.body, { color: colors.muted }]}>
+                    Send one follow-up while a live checkpoint window is still open. Best for longer grace windows only.
+                  </Text>
+                </View>
+                <Switch
+                  accessibilityHint="Turns the in-window urgency reminder on or off."
+                  accessibilityLabel="Urgency reminder"
+                  onValueChange={(value) => {
+                    setReminderPreferences((current) => ({
+                      ...current,
+                      urgencyRemindersEnabled: value,
+                    }));
+                    setReminderFeedback(null);
+                  }}
+                  trackColor={{ false: colors.border, true: colors.primary }}
+                  value={reminderPreferences.urgencyRemindersEnabled}
+                />
+              </View>
+
+              <View style={[styles.preferenceRow, { borderColor: colors.border }]}>
+                <View style={styles.preferenceCopy}>
+                  <Text style={[TextPresets.label, { color: colors.text }]}>Evening readiness reminder</Text>
+                  <Text style={[TextPresets.body, { color: colors.muted }]}>
+                    For morning checkpoints, send one low-noise prep reminder the night before.
+                  </Text>
+                </View>
+                <Switch
+                  accessibilityHint="Turns the evening readiness reminder on or off."
+                  accessibilityLabel="Evening readiness reminder"
+                  onValueChange={(value) => {
+                    setReminderPreferences((current) => ({
+                      ...current,
+                      eveningReadinessRemindersEnabled: value,
+                    }));
+                    setReminderFeedback(null);
+                  }}
+                  trackColor={{ false: colors.border, true: colors.primary }}
+                  value={reminderPreferences.eveningReadinessRemindersEnabled}
+                />
+              </View>
+
+              <View style={[styles.preferenceRow, { borderColor: colors.border }]}>
+                <View style={styles.preferenceCopy}>
+                  <Text style={[TextPresets.label, { color: colors.text }]}>Weekly review reminder</Text>
+                  <Text style={[TextPresets.body, { color: colors.muted }]}>
+                    Send one Sunday-evening prompt to review what held and what needs work.
+                  </Text>
+                </View>
+                <Switch
+                  accessibilityHint="Turns the weekly review reminder on or off."
+                  accessibilityLabel="Weekly review reminder"
+                  onValueChange={(value) => {
+                    setReminderPreferences((current) => ({
+                      ...current,
+                      weeklyReviewRemindersEnabled: value,
+                    }));
+                    setReminderFeedback(null);
+                  }}
+                  trackColor={{ false: colors.border, true: colors.primary }}
+                  value={reminderPreferences.weeklyReviewRemindersEnabled}
+                />
+              </View>
+
+              <Text style={[styles.helperCaption, { color: colors.muted }]}>{notificationPermissionHelper}</Text>
+
+              {reminderFeedback && reminderFeedbackColors ? (
+                <View
+                  style={[
+                    styles.feedbackCard,
+                    {
+                      backgroundColor: reminderFeedbackColors.backgroundColor,
+                      borderColor: reminderFeedbackColors.borderColor,
+                    },
+                  ]}>
+                  <Text style={[TextPresets.body, { color: reminderFeedbackColors.textColor }]}>
+                    {reminderFeedback.message}
+                  </Text>
+                </View>
+              ) : null}
+
+              <AppButton
+                disabled={isReminderPreferencesSubmitting}
+                label={isReminderPreferencesSubmitting ? 'Saving...' : 'Save reminder preferences'}
+                onPress={handleSaveReminderPreferences}
+                variant="secondary"
+              />
+            </>
+          )}
+        </AppCard>
 
         {!configured ? (
           <StateCard
@@ -388,7 +628,7 @@ export default function AccountScreen() {
         ) : !user ? (
           <>
             <StateCard
-              description="Your alarms still run locally. Sign in only if you want sync and circles."
+              description="Your checkpoints still run locally. Sign in only if you want sync and circles."
               style={styles.authIntro}
               title="Sync and circles"
               tone="primary"
@@ -543,7 +783,7 @@ export default function AccountScreen() {
                     autoCapitalize="none"
                     autoCorrect={false}
                     error={hasAttemptedProfileSubmit ? profileErrors.timezone : undefined}
-                    helper="Used for circle timestamps and alarm follow-up timing."
+                    helper="Used for circle timestamps and checkpoint follow-up timing."
                     label="Timezone"
                     onChangeText={(value) => {
                       setTimezone(value);
@@ -619,9 +859,9 @@ export default function AccountScreen() {
 
                 <AppCard elevated tone="canvas">
                   <SectionHeader
-                    kicker="Notifications"
-                    title="Keep alerts useful"
-                    description="Only the notifications you want."
+                    kicker="Circle alerts"
+                    title="Shared accountability preferences"
+                    description="Controls for circle activity and miss-related follow-up on your account."
                   />
 
                   <View style={[styles.preferenceRow, { borderColor: colors.border }]}>
@@ -645,14 +885,14 @@ export default function AccountScreen() {
 
                   <View style={[styles.preferenceRow, { borderColor: colors.border }]}>
                     <View style={styles.preferenceCopy}>
-                      <Text style={[TextPresets.label, { color: colors.text }]}>Missed-alarm alerts</Text>
+                      <Text style={[TextPresets.label, { color: colors.text }]}>Missed-checkpoint alerts</Text>
                       <Text style={[TextPresets.body, { color: colors.muted }]}>
                         Alerts when you miss a scheduled checkpoint.
                       </Text>
                     </View>
                     <Switch
-                      accessibilityHint="Turns missed alarm alerts on or off."
-                      accessibilityLabel="Missed-alarm alerts"
+                      accessibilityHint="Turns missed checkpoint alerts on or off."
+                      accessibilityLabel="Missed-checkpoint alerts"
                       onValueChange={(value) => {
                         setAllowMissedAlarmAlerts(value);
                         setProfileFeedback(null);

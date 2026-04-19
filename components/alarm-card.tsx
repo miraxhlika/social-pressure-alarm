@@ -4,6 +4,7 @@ import { AppCard } from '@/components/ui/app-card';
 import { AppButton } from '@/components/ui/app-button';
 import { StatusPill } from '@/components/ui/status-pill';
 import { Fonts, getAppColors, Spacing, TextPresets } from '@/constants/theme';
+import { formatGracePeriodLabel, getUseCaseShortLabel } from '@/lib/checkpoint-templates';
 import { getAlarmPhase, formatAlarmTime, formatRepeatSchedule, formatScheduledFor } from '@/lib/alarms';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { Alarm } from '@/types/alarm';
@@ -11,6 +12,7 @@ import { Alarm } from '@/types/alarm';
 type AlarmCardProps = {
   alarm: Alarm;
   onEdit: (alarm: Alarm) => void;
+  onOpen: (alarm: Alarm) => void;
   onReschedule: (alarm: Alarm) => void;
   onReuse: (alarm: Alarm) => void;
   onDelete: (alarm: Alarm) => void;
@@ -33,7 +35,7 @@ const STATUS_TONES = {
 } as const;
 
 function getPrimaryActionLabel(phase: keyof typeof STATUS_COPY) {
-  return phase === 'missed' || phase === 'inactive' ? 'Reschedule' : phase === 'ringing' ? 'Open scanner' : 'Edit';
+  return phase === 'missed' || phase === 'inactive' ? 'Reschedule' : phase === 'ringing' ? 'Open live run' : 'Adjust';
 }
 
 function getLastOutcomeCopy(alarm: Alarm) {
@@ -45,19 +47,25 @@ function getLastOutcomeCopy(alarm: Alarm) {
     return 'Last run cleared';
   }
 
-  return 'No completed run yet';
+  return 'Awaiting first result';
 }
 
-export function AlarmCard({ alarm, onDelete, onEdit, onReschedule, onReuse }: AlarmCardProps) {
+export function AlarmCard({ alarm, onDelete, onEdit, onOpen, onReschedule, onReuse }: AlarmCardProps) {
   const colors = getAppColors(useColorScheme());
   const phase = getAlarmPhase(alarm);
   const sharesToCircle = Boolean(
     alarm.socialSettings?.circleId && (alarm.socialSettings.shareSuccesses || alarm.socialSettings.shareMisses)
   );
   const primaryActionLabel = getPrimaryActionLabel(phase);
-  const primaryAction = phase === 'missed' || phase === 'inactive' ? () => onReschedule(alarm) : () => onEdit(alarm);
-  const secondaryActionLabel = phase === 'ringing' ? 'Edit' : 'Reuse';
+  const primaryAction =
+    phase === 'missed' || phase === 'inactive'
+      ? () => onReschedule(alarm)
+      : phase === 'ringing'
+        ? () => onOpen(alarm)
+        : () => onEdit(alarm);
+  const secondaryActionLabel = phase === 'ringing' ? 'Adjust' : 'Reuse';
   const secondaryAction = phase === 'ringing' ? () => onEdit(alarm) : () => onReuse(alarm);
+  const accountabilityLabel = sharesToCircle ? 'Accountability on' : 'Private';
 
   return (
     <AppCard elevated style={styles.card}>
@@ -69,15 +77,16 @@ export function AlarmCard({ alarm, onDelete, onEdit, onReschedule, onReuse }: Al
       <View style={styles.copy}>
         <Text style={[styles.label, { color: colors.text }]}>{alarm.label}</Text>
         <Text style={[TextPresets.body, { color: colors.textSoft }]}>
-          {formatRepeatSchedule(alarm.repeatSchedule)} · {formatScheduledFor(alarm.scheduledFor)}
+          {getUseCaseShortLabel(alarm.useCaseType)} · {formatRepeatSchedule(alarm.repeatSchedule)}
         </Text>
+        <Text style={[styles.scheduleText, { color: colors.muted }]}>Next run {formatScheduledFor(alarm.scheduledFor)}</Text>
       </View>
 
       <View style={styles.metaRow}>
         <Text style={[styles.metaText, { color: colors.muted }]}>
-          {alarm.gracePeriodSeconds}s reach time · {getLastOutcomeCopy(alarm)}
+          {formatGracePeriodLabel(alarm.gracePeriodSeconds)} reach window · {getLastOutcomeCopy(alarm)}
         </Text>
-        {sharesToCircle ? <Text style={[styles.circleMeta, { color: colors.primary }]}>Circle linked</Text> : null}
+        <Text style={[styles.circleMeta, { color: sharesToCircle ? colors.primary : colors.muted }]}>{accountabilityLabel}</Text>
       </View>
 
       <View style={styles.actionRow}>
@@ -153,6 +162,11 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontWeight: '700',
     lineHeight: 28,
+  },
+  scheduleText: {
+    ...TextPresets.label,
+    fontSize: 13,
+    lineHeight: 18,
   },
   metaRow: {
     alignItems: 'center',

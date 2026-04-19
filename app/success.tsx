@@ -12,6 +12,7 @@ import { StatusPill } from '@/components/ui/status-pill';
 import { Fonts, Radius, Spacing, TextPresets, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { formatAlarmTime, readAlarmStore } from '@/lib/alarms';
+import { getCheckpointRoutineCopy, getUseCaseLabel } from '@/lib/checkpoint-templates';
 import { getPrimaryAlarm } from '@/lib/dashboard';
 import { ProgressSummary, getProgressSummary } from '@/lib/progress';
 import { getSocialQueueSummary } from '@/lib/social/queue';
@@ -20,6 +21,7 @@ import { Alarm, SuccessHistoryEntry } from '@/types/alarm';
 type SuccessState = {
   currentStreak: number;
   longestStreak: number;
+  alarm: Alarm | null;
   summary: ProgressSummary;
   successEntry: SuccessHistoryEntry | null;
   shareStatus: SuccessShareStatus | null;
@@ -31,6 +33,18 @@ type SuccessShareStatus = {
   title: string;
   copy: string;
 };
+
+function getRepeatScheduleLabel(value?: Alarm['repeatSchedule']) {
+  if (value === 'daily') {
+    return 'Daily';
+  }
+
+  if (value === 'weekdays') {
+    return 'Weekdays';
+  }
+
+  return 'Once';
+}
 
 function formatTimeToScan(successEntry: SuccessHistoryEntry | null) {
   if (!successEntry) {
@@ -83,30 +97,134 @@ function getShareTone(tone?: SuccessShareStatus['tone']) {
   }
 }
 
-function getHeroKicker(successState: SuccessState | null) {
+function getHeroKicker(successState: SuccessState | null, isSetupComplete: boolean) {
+  if (isSetupComplete) {
+    return 'Checkpoint saved';
+  }
+
   if (!successState) {
     return 'Checkpoint cleared';
   }
 
-  return successState.currentStreak >= 2 ? 'Streak extended' : 'Checkpoint cleared';
+  const weeklyStats = successState.summary.weeklyStats;
+  const weeklyReview = successState.summary.weeklyReview;
+
+  if (weeklyStats.attempts >= 3 && weeklyStats.completionRate === 100) {
+    return weeklyReview.strongestUseCase ? `${weeklyReview.strongestUseCase.label} held` : 'Reliable this week';
+  }
+
+  if (weeklyStats.attempts >= 2 && weeklyStats.completionRate >= 75) {
+    return 'Solid follow-through';
+  }
+
+  return successState.currentStreak >= 2 ? 'Back on track' : 'Checkpoint cleared';
 }
 
-function getHeroBody(successState: SuccessState | null, label?: string) {
+function getHeroBody(successState: SuccessState | null, label: string | undefined, isSetupComplete: boolean) {
+  if (isSetupComplete) {
+    if (successState?.alarm?.scheduledFor) {
+      return `${label ?? successState.alarm.label} is scheduled for ${new Date(
+        successState.alarm.scheduledFor
+      ).toLocaleString([], {
+        hour: 'numeric',
+        minute: '2-digit',
+        month: 'short',
+        day: 'numeric',
+      })}. You can still edit the timing or proof before the first live run.`;
+    }
+
+    return `${label ?? 'This checkpoint'} is saved. The next step is using it in a real routine, then adding one more commitment once the system feels real.`;
+  }
+
   if (!successState) {
     return label ? `${label} matched before the timer expired.` : 'The checkpoint matched before the timer expired.';
   }
 
-  if (successState.currentStreak >= 2) {
-    return successState.summary.nextGoalCopy;
-  }
-
   if (successState.successEntry) {
+    const routineCopy = getCheckpointRoutineCopy(successState.alarm?.useCaseType);
+
     return label
-      ? `${label} cleared in ${successState.successEntry.timeToScanSeconds}s.`
-      : `Cleared in ${successState.successEntry.timeToScanSeconds}s.`;
+      ? `${label} cleared in ${successState.successEntry.timeToScanSeconds}s. Your ${routineCopy} held when it mattered.`
+      : `Cleared in ${successState.successEntry.timeToScanSeconds}s. Your ${routineCopy} held when it mattered.`;
   }
 
   return label ? `${label} matched before time ran out.` : 'The checkpoint matched before time ran out.';
+}
+
+function getReliabilityStat(successState: SuccessState | null) {
+  const weeklyStats = successState?.summary.weeklyStats;
+
+  if (!weeklyStats || weeklyStats.attempts === 0) {
+    return {
+      value: '—',
+      helper: 'No weekly history yet',
+    };
+  }
+
+  return {
+    value: `${weeklyStats.completionRate}%`,
+    helper:
+      weeklyStats.averageTimeToClearSeconds === null
+        ? `${weeklyStats.successes}/${weeklyStats.attempts} cleared this week`
+        : `Avg clear ${weeklyStats.averageTimeToClearSeconds}s`,
+  };
+}
+
+function getNextRoutineCopy(successState: SuccessState | null, isSetupComplete: boolean, shouldPromptSecondCheckpoint: boolean) {
+  if (isSetupComplete && shouldPromptSecondCheckpoint) {
+    return 'The fastest way to make this stick is to protect one more routine while this setup is still fresh.';
+  }
+
+  if (isSetupComplete) {
+    return 'Your first live run is scheduled. Edit the setup if needed, or add another checkpoint for a second commitment.';
+  }
+
+  if (!successState?.nextAlarm) {
+    const routineCopy = getCheckpointRoutineCopy(successState?.alarm?.useCaseType);
+    return `Turn this win into the next protected ${routineCopy} while the proof is still fresh.`;
+  }
+
+  const nextRoutine = getCheckpointRoutineCopy(successState.nextAlarm.useCaseType);
+  return `${formatAlarmTime(successState.nextAlarm.hour, successState.nextAlarm.minute)} at ${
+    successState.nextAlarm.label
+  }. Keep your ${nextRoutine} protected.`;
+}
+
+function getWeeklyReliabilityCaption(successState: SuccessState | null) {
+  const weeklyReview = successState?.summary.weeklyReview;
+  const weeklyStats = successState?.summary.weeklyStats;
+
+  if (!weeklyStats || weeklyStats.attempts === 0) {
+    return 'First result recorded. Weekly reliability will build from here.';
+  }
+
+  return weeklyReview?.body ?? `${weeklyStats.completionRate}% reliable this week.`;
+}
+
+function getReviewPanels(successState: SuccessState | null) {
+  const weeklyReview = successState?.summary.weeklyReview;
+
+  if (!weeklyReview) {
+    return {
+      strongestTitle: 'No leading routine yet',
+      strongestBody: 'Weekly patterning appears once this checkpoint has live history.',
+      recoveryTitle: 'No weak spot yet',
+      recoveryBody: 'Misses or shaky routines will show up here when they need work.',
+    };
+  }
+
+  return {
+    strongestTitle: weeklyReview.strongestUseCase ? weeklyReview.strongestUseCase.label : 'No leading routine yet',
+    strongestBody: weeklyReview.strongestUseCase
+      ? `${weeklyReview.strongestUseCase.completionRate}% reliable across ${weeklyReview.strongestUseCase.attempts} attempt${
+          weeklyReview.strongestUseCase.attempts === 1 ? '' : 's'
+        }.`
+      : 'Repeat one commitment enough times and it will become the leading routine here.',
+    recoveryTitle: weeklyReview.recoveryUseCase ? weeklyReview.recoveryUseCase.label : 'No weak spot right now',
+    recoveryBody: weeklyReview.recoveryUseCase
+      ? `${weeklyReview.recoveryUseCase.failures} miss${weeklyReview.recoveryUseCase.failures === 1 ? '' : 'es'} this week. Tighten that setup before it drags the rest down.`
+      : 'Nothing is slipping hard enough to demand a reset right now.',
+  };
 }
 
 async function triggerSuccessArrival() {
@@ -119,7 +237,7 @@ async function triggerSuccessArrival() {
 
 export default function SuccessScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ alarmId?: string; label?: string }>();
+  const params = useLocalSearchParams<{ alarmId?: string; label?: string; mode?: string; promptSecondCheckpoint?: string }>();
   const colors = getAppColors(useColorScheme());
   const [isLoading, setIsLoading] = useState(true);
   const [successState, setSuccessState] = useState<SuccessState | null>(null);
@@ -130,6 +248,8 @@ export default function SuccessScreen() {
   const detailOpacity = useRef(new Animated.Value(0)).current;
   const detailTranslateY = useRef(new Animated.Value(20)).current;
   const didCelebrateRef = useRef(false);
+  const isSetupComplete = params.mode === 'setup_complete';
+  const shouldPromptSecondCheckpoint = params.promptSecondCheckpoint === '1';
 
   useEffect(() => {
     const loadProgress = async () => {
@@ -139,8 +259,9 @@ export default function SuccessScreen() {
         const [store, socialQueue] = await Promise.all([readAlarmStore(), getSocialQueueSummary()]);
         const summary = getProgressSummary(store);
         const alarm = store.alarms.find((entry) => entry.id === params.alarmId) ?? null;
-        const successEntry =
-          store.successHistory.find((entry) => entry.alarmId === params.alarmId) ?? summary.latestSuccess;
+        const successEntry = isSetupComplete
+          ? null
+          : store.successHistory.find((entry) => entry.alarmId === params.alarmId) ?? summary.latestSuccess;
         const eventId =
           params.alarmId && successEntry ? `${params.alarmId}-${successEntry.confirmedAt}` : null;
         const queuedEvent =
@@ -149,6 +270,7 @@ export default function SuccessScreen() {
         setSuccessState({
           currentStreak: store.currentStreak,
           longestStreak: store.longestStreak,
+          alarm,
           summary,
           successEntry,
           shareStatus: getSuccessShareStatus(alarm, successEntry, queuedEvent),
@@ -160,25 +282,44 @@ export default function SuccessScreen() {
     };
 
     void loadProgress();
-  }, [params.alarmId]);
+  }, [isSetupComplete, params.alarmId]);
 
   const progressWidth = useMemo(() => {
     if (!successState) {
       return '8%' as DimensionValue;
     }
 
-    return `${Math.max(8, Math.round(successState.summary.milestoneProgress.progressRatio * 100))}%` as DimensionValue;
+    const weeklyAttempts = successState.summary.weeklyStats.attempts;
+    const weeklyCompletionRate = successState.summary.weeklyStats.completionRate;
+
+    return `${Math.max(8, weeklyAttempts === 0 ? 8 : weeklyCompletionRate)}%` as DimensionValue;
   }, [successState]);
 
   const shareTone = getShareTone(successState?.shareStatus?.tone);
-  const heroKicker = getHeroKicker(successState);
-  const heroBody = getHeroBody(successState, params.label);
-  const keyStatLabel =
-    successState && successState.currentStreak >= 2 ? 'Current streak' : 'Time to scan';
-  const keyStatValue =
-    successState && successState.currentStreak >= 2
-      ? `${successState.currentStreak}`
-      : formatTimeToScan(successState?.successEntry ?? null);
+  const heroKicker = getHeroKicker(successState, isSetupComplete);
+  const heroBody = getHeroBody(successState, params.label, isSetupComplete);
+  const reliabilityStat = getReliabilityStat(successState);
+  const nextRoutineCopy = getNextRoutineCopy(successState, isSetupComplete, shouldPromptSecondCheckpoint);
+  const weeklyReliabilityCaption = getWeeklyReliabilityCaption(successState);
+  const reviewPanels = getReviewPanels(successState);
+  const primaryStatLabel = isSetupComplete ? 'Repeat' : 'Time to clear';
+  const primaryStatValue = isSetupComplete
+    ? getRepeatScheduleLabel(successState?.alarm?.repeatSchedule)
+    : formatTimeToScan(successState?.successEntry ?? null);
+  const primaryStatTone = isSetupComplete ? ('primary' as const) : ('success' as const);
+  const title = isSetupComplete ? 'Checkpoint ready' : 'Follow-through confirmed';
+  const statusLabel = isSetupComplete ? 'Saved' : 'Cleared';
+  const statusTone = isSetupComplete ? ('primary' as const) : ('success' as const);
+  const nextCardTitle = shouldPromptSecondCheckpoint
+    ? 'Add a second checkpoint'
+    : successState?.nextAlarm
+      ? `${formatAlarmTime(successState.nextAlarm.hour, successState.nextAlarm.minute)} · ${successState.nextAlarm.label}`
+      : 'Schedule the next checkpoint';
+  const primaryButtonLabel = shouldPromptSecondCheckpoint
+    ? 'Add second checkpoint'
+    : successState?.nextAlarm
+      ? 'Manage checkpoints'
+      : 'Create next checkpoint';
 
   useEffect(() => {
     if (isLoading || !successState || didCelebrateRef.current) {
@@ -254,10 +395,10 @@ export default function SuccessScreen() {
     <AppScreen>
       {isLoading ? (
         <LoadingBlock
-          description="Adding this clear to your streak."
+          description={isSetupComplete ? 'Preparing your first real checkpoint.' : 'Saving this clear to your progress.'}
           style={styles.loadingCard}
-          title="Saving the win"
-          tone="success"
+          title={isSetupComplete ? 'Finishing setup' : 'Saving the win'}
+          tone={isSetupComplete ? 'primary' : 'success'}
         />
       ) : null}
 
@@ -287,15 +428,15 @@ export default function SuccessScreen() {
 
             <AppCard elevated style={[styles.heroCard, { backgroundColor: colors.card, borderColor: colors.line }]}>
               <View style={styles.heroTopRow}>
-                <Text style={[TextPresets.eyebrow, { color: colors.success }]}>{heroKicker}</Text>
-                <StatusPill label="Cleared" tone="success" />
+                <Text style={[TextPresets.eyebrow, { color: isSetupComplete ? colors.primary : colors.success }]}>{heroKicker}</Text>
+                <StatusPill label={statusLabel} tone={statusTone} />
               </View>
-              <Text style={[styles.title, { color: colors.text }]}>Checkpoint cleared</Text>
+              <Text style={[styles.title, { color: colors.text }]}>{title}</Text>
               <Text style={[styles.heroBody, { color: colors.textSoft }]}>{heroBody}</Text>
 
               <View style={styles.heroHighlights}>
-                <StatTile label={keyStatLabel} tone="success" value={keyStatValue} />
-                <StatTile label="Best streak" tone="primary" value={`${successState.longestStreak}`} />
+                <StatTile label={primaryStatLabel} tone={primaryStatTone} value={primaryStatValue} />
+                <StatTile helper={reliabilityStat.helper} label="This week" tone="primary" value={reliabilityStat.value} />
               </View>
 
               {successState.shareStatus ? (
@@ -317,29 +458,36 @@ export default function SuccessScreen() {
             ]}>
             <AppCard elevated tone="canvas" style={styles.nextCard}>
               <View style={styles.nextHeader}>
-                <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Next</Text>
-                <Text style={[styles.nextTitle, { color: colors.text }]}>
-                  {successState.nextAlarm
-                    ? `${formatAlarmTime(successState.nextAlarm.hour, successState.nextAlarm.minute)} · ${successState.nextAlarm.label}`
-                    : 'Schedule the next checkpoint'}
-                </Text>
-                <Text style={[styles.nextBody, { color: colors.textSoft }]}>{successState.summary.nextGoalCopy}</Text>
+                <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Next routine</Text>
+                <Text style={[styles.nextTitle, { color: colors.text }]}>{nextCardTitle}</Text>
+                <Text style={[styles.nextBody, { color: colors.textSoft }]}>{nextRoutineCopy}</Text>
+              </View>
+              <View style={styles.nextMetaRow}>
+                {!isSetupComplete ? (
+                  <StatusPill
+                    label={successState.currentStreak > 0 ? `Run ${successState.currentStreak}` : 'Fresh start'}
+                    tone={successState.currentStreak > 0 ? 'success' : 'default'}
+                  />
+                ) : null}
+                {successState.alarm ? (
+                  <StatusPill label={getUseCaseLabel(successState.alarm.useCaseType)} tone="primary" />
+                ) : null}
+                {isSetupComplete && successState.alarm ? (
+                  <StatusPill label={getRepeatScheduleLabel(successState.alarm.repeatSchedule)} tone="default" />
+                ) : null}
               </View>
               <View style={[styles.progressTrack, { backgroundColor: colors.border }]}>
                 <View style={[styles.progressFill, { backgroundColor: colors.primary, width: progressWidth }]} />
               </View>
-              <Text style={[styles.progressCaption, { color: colors.textSoft }]}>
-                {successState.summary.currentStreakMilestone?.title ??
-                  successState.summary.milestoneProgress.currentLabel ??
-                  'Getting started'}
-                {successState.summary.milestoneProgress.nextLabel
-                  ? ` · ${successState.summary.milestoneProgress.remainingWins} to go`
-                  : ''}
-              </Text>
+              <Text style={[styles.progressCaption, { color: colors.textSoft }]}>{weeklyReliabilityCaption}</Text>
+              <View style={styles.reviewRow}>
+                <ReviewPanel body={reviewPanels.strongestBody} label="Holding strongest" title={reviewPanels.strongestTitle} />
+                <ReviewPanel body={reviewPanels.recoveryBody} label="Tighten next" title={reviewPanels.recoveryTitle} />
+              </View>
               <View style={styles.buttonRow}>
                 <AppButton
-                  label={successState.nextAlarm ? 'Manage alarms' : 'Create next alarm'}
-                  onPress={() => router.replace(successState.nextAlarm ? '/alarms' : '/create')}
+                  label={primaryButtonLabel}
+                  onPress={() => router.replace(shouldPromptSecondCheckpoint || !successState.nextAlarm ? '/create' : '/alarms')}
                   style={styles.buttonFill}
                 />
                 <AppButton
@@ -354,6 +502,26 @@ export default function SuccessScreen() {
         </>
       ) : null}
     </AppScreen>
+  );
+}
+
+function ReviewPanel({
+  label,
+  title,
+  body,
+}: {
+  label: string;
+  title: string;
+  body: string;
+}) {
+  const colors = getAppColors(useColorScheme());
+
+  return (
+    <View style={[styles.reviewPanel, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
+      <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>{label}</Text>
+      <Text style={[styles.reviewTitle, { color: colors.text }]}>{title}</Text>
+      <Text style={[styles.reviewBody, { color: colors.textSoft }]}>{body}</Text>
+    </View>
   );
 }
 
@@ -430,6 +598,11 @@ const styles = StyleSheet.create({
   nextHeader: {
     gap: Spacing.xs,
   },
+  nextMetaRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.sm,
+  },
   nextTitle: {
     fontFamily: Fonts.rounded,
     fontSize: 22,
@@ -449,6 +622,29 @@ const styles = StyleSheet.create({
     height: '100%',
   },
   progressCaption: {
+    ...TextPresets.body,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  reviewRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.sm,
+  },
+  reviewPanel: {
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    flex: 1,
+    gap: Spacing.xs,
+    minWidth: 150,
+    padding: Spacing.md,
+  },
+  reviewTitle: {
+    ...TextPresets.title,
+    fontSize: 18,
+    lineHeight: 24,
+  },
+  reviewBody: {
     ...TextPresets.body,
     fontSize: 14,
     lineHeight: 20,

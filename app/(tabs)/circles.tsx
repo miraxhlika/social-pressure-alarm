@@ -25,6 +25,7 @@ import { StateCard } from '@/components/ui/state-card';
 import { StatusPill } from '@/components/ui/status-pill';
 import { Fonts, Radius, Spacing, TextPresets, Type, getAppColors, withAlpha } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { trackAnalyticsEvent } from '@/lib/analytics';
 import { formatFeedInsight, formatSocialTimestamp } from '@/lib/dashboard';
 import {
   buildCircleInviteUrl,
@@ -76,6 +77,74 @@ function matchesFeedSearch(item: SocialFeedItem, query: string) {
     .toLowerCase();
 
   return searchableText.includes(query);
+}
+
+type AccountabilityPlan = {
+  title: string;
+  body: string;
+  actionLabel: string;
+  action: 'manage' | 'share' | 'create';
+};
+
+function getCircleCommitmentHint(circle: SocialCircleSummary, circleFeed: SocialFeedItem[]) {
+  if (circle.memberCount <= 1) {
+    return 'Invite one person who will actually notice a miss. One partner is enough.';
+  }
+
+  if (circleFeed.length === 0) {
+    return 'Attach one checkpoint and share clears first so this group has a real signal.';
+  }
+
+  if (circleFeed.some((item) => item.outcome === 'missed')) {
+    return 'A miss already surfaced here. Review it quickly, adjust the checkpoint, and keep the circle focused.';
+  }
+
+  return 'Clears are flowing. Decide together whether misses stay private or become opt-in for firmer pressure.';
+}
+
+function getAccountabilityPlan(circles: SocialCircleSummary[], feed: SocialFeedItem[]): AccountabilityPlan {
+  if (circles.length === 0) {
+    return {
+      title: 'Start with one person',
+      body: 'A useful circle can be one reliable person who would notice a miss. Build small, then attach one checkpoint.',
+      actionLabel: 'Set up a circle',
+      action: 'manage',
+    };
+  }
+
+  if (circles.every((circle) => circle.memberCount <= 1)) {
+    return {
+      title: 'Invite your first accountability partner',
+      body: 'You have the structure, but nobody else is in yet. Share one invite with someone who will actually notice when you slip.',
+      actionLabel: 'Share an invite',
+      action: 'share',
+    };
+  }
+
+  if (feed.length === 0) {
+    return {
+      title: 'Set the first shared checkpoint',
+      body: 'Your circle has members, but it still needs one real commitment. Start by sharing clears, then decide if misses should stay opt-in.',
+      actionLabel: 'Attach a checkpoint',
+      action: 'create',
+    };
+  }
+
+  if (feed.some((item) => item.outcome === 'missed')) {
+    return {
+      title: 'Keep misses useful, not noisy',
+      body: 'Use misses as fast recovery prompts. Adjust the checkpoint, keep the group small, and avoid turning accountability into chatter.',
+      actionLabel: 'Adjust a checkpoint',
+      action: 'create',
+    };
+  }
+
+  return {
+    title: 'Protect one routine this week',
+    body: 'Small circles work when everyone knows which checkpoint matters. Keep the group tight and the proof concrete.',
+    actionLabel: 'Create another checkpoint',
+    action: 'create',
+  };
 }
 
 const FEED_PAGE_SIZE = 12;
@@ -146,7 +215,7 @@ export default function CirclesScreen() {
   useEffect(() => {
     if (typeof params.inviteCode === 'string' && params.inviteCode.trim()) {
       setInviteCode(params.inviteCode.trim());
-      setScreenMessage('Invite code detected from the app link. Join when you are ready.');
+      setScreenMessage('Invite code detected from the app link. Join when you are ready, then attach one checkpoint to make the circle real.');
     }
   }, [params.inviteCode]);
 
@@ -184,7 +253,7 @@ export default function CirclesScreen() {
       setCircleName('');
       setCircleDescription('');
       setCircles((currentCircles) => [...currentCircles, createdCircle]);
-      setScreenMessage(`Created ${createdCircle.name}. Share the invite link so someone else can join.`);
+      setScreenMessage(`Created ${createdCircle.name}. The next move is sharing one invite with someone who will notice a miss.`);
     } catch (error) {
       Alert.alert('Unable to create circle', getErrorMessage(error, 'The circle could not be created right now.'));
     } finally {
@@ -203,12 +272,17 @@ export default function CirclesScreen() {
 
     try {
       const joinedCircle = await joinSocialCircleWithInviteCode(inviteCode);
+      await trackAnalyticsEvent('invite_accepted', {
+        circleId: joinedCircle.id,
+      });
       setInviteCode(joinedCircle.inviteCode);
       setCircles((currentCircles) => {
         const withoutJoinedCircle = currentCircles.filter((circle) => circle.id !== joinedCircle.id);
         return [...withoutJoinedCircle, joinedCircle].sort((left, right) => left.name.localeCompare(right.name));
       });
-      setScreenMessage(`Joined ${joinedCircle.name}. You can now attach alarms to this circle.`);
+      setScreenMessage(
+        `Joined ${joinedCircle.name}. Next: attach one checkpoint and decide whether this circle sees clears only or clears plus misses.`
+      );
     } catch (error) {
       Alert.alert('Unable to join circle', getErrorMessage(error, 'The invite code could not be used right now.'));
     } finally {
@@ -220,11 +294,18 @@ export default function CirclesScreen() {
     try {
       const inviteUrl = buildCircleInviteUrl(circle.inviteCode);
       await Share.share({
-        message: `Join my accountability circle "${circle.name}" in QR Checkpoint Alarm.\n\nInvite code: ${circle.inviteCode}\nInvite link: ${inviteUrl}`,
+        message: `Join my accountability circle "${circle.name}" in QR Checkpoint Alarm.\n\nSmall groups work best here, so this is meant for one or two people who would actually notice a miss.\n\nInvite code: ${circle.inviteCode}\nInvite link: ${inviteUrl}`,
+      });
+      await trackAnalyticsEvent('invite_sent', {
+        circleId: circle.id,
       });
     } catch (error) {
       Alert.alert('Unable to share invite', getErrorMessage(error, 'The invite link could not be shared.'));
     }
+  };
+
+  const handleCopyInviteLink = async (circle: SocialCircleSummary) => {
+    await handleCopyValue(buildCircleInviteUrl(circle.inviteCode), 'Invite link');
   };
 
   const handleCopyValue = async (value: string, label: string) => {
@@ -258,7 +339,7 @@ export default function CirclesScreen() {
     } finally {
       setIsLoadingMoreFeed(false);
     }
-  }, [configured, feed.length, hasMoreFeed, isLoadingMoreFeed, isProfileComplete, isRefreshing, user]);
+  }, [configured, feed, hasMoreFeed, isLoadingMoreFeed, isProfileComplete, isRefreshing, user]);
 
   const handleActivityScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -280,6 +361,17 @@ export default function CirclesScreen() {
   const latestFeedItem = feed[0] ?? null;
   const topChallenge = challenges[0] ?? null;
   const totalMembers = circles.reduce((count, circle) => count + circle.memberCount, 0);
+  const shareableCircle = circles.find((circle) => circle.myRole === 'owner') ?? circles[0] ?? null;
+  const feedByCircleId = useMemo(
+    () =>
+      feed.reduce<Record<string, SocialFeedItem[]>>((result, item) => {
+        const currentItems = result[item.circleId] ?? [];
+        result[item.circleId] = [...currentItems, item];
+        return result;
+      }, {}),
+    [feed]
+  );
+  const accountabilityPlan = useMemo(() => getAccountabilityPlan(circles, feed), [circles, feed]);
   const normalizedFeedSearchQuery = feedSearchQuery.trim().toLowerCase();
   const isFilteringFeed = selectedFeedCircleId !== ALL_CIRCLES_FILTER || normalizedFeedSearchQuery.length > 0;
   const filteredFeed = useMemo(
@@ -297,10 +389,28 @@ export default function CirclesScreen() {
       : `Showing ${filteredFeed.length} of ${feed.length} loaded`;
   const activitySummary =
     circles.length === 0
-      ? 'Create a circle to start seeing shared proof.'
+      ? 'Create one small circle and attach one checkpoint when you are ready for outside accountability.'
       : latestFeedItem
-        ? 'A quick read on the latest proof, your active members, and the streak worth watching.'
-        : 'Your circles are ready. New clears and misses will show up here.';
+        ? 'The latest accountability signal, the people involved, and the routine that currently matters most.'
+        : 'Your circles are ready. The first shared clear or miss will turn this into a real accountability board.';
+
+  const handleAccountabilityPlanAction = useCallback(() => {
+    if (accountabilityPlan.action === 'manage') {
+      setActiveView('manage');
+      return;
+    }
+
+    if (accountabilityPlan.action === 'share') {
+      if (shareableCircle) {
+        void handleShareCircle(shareableCircle);
+      } else {
+        setActiveView('manage');
+      }
+      return;
+    }
+
+    router.push('/create');
+  }, [accountabilityPlan.action, router, shareableCircle]);
 
   useEffect(() => {
     if (activeView !== 'activity' || !isFilteringFeed || filteredFeed.length > 0 || !hasMoreFeed || isLoadingMoreFeed) {
@@ -325,7 +435,7 @@ export default function CirclesScreen() {
         badgeLabel={user ? `@${profile?.handle ?? 'profile'}` : 'Guest'}
         badgeTone={user ? 'success' : 'warning'}
         eyebrow="Circles"
-        description="Shared proof without the noise."
+        description="Small-group accountability built on real proof."
         size="compact"
         title="Circles"
       />
@@ -342,7 +452,7 @@ export default function CirclesScreen() {
       ) : !user ? (
         <StateCard
           actionLabel="Go to account"
-          description="Sign in if you want stable invites and shared results."
+          description="Sign in if you want durable invites and small-group accountability."
           onAction={() => router.push('/account')}
           title="Sign in first"
         />
@@ -380,6 +490,31 @@ export default function CirclesScreen() {
             })}
           </View>
 
+          <AppCard elevated tone="primary" style={styles.accountabilityCard}>
+            <SectionHeader
+              kicker="Accountability"
+              size="compact"
+              title={accountabilityPlan.title}
+              description={accountabilityPlan.body}
+            />
+
+            <View style={styles.commitmentChecklist}>
+              {[
+                'Keep circles small: one to three people is enough.',
+                'Start with one checkpoint the whole group understands.',
+                'Keep miss sharing opt-in so pressure stays useful.',
+              ].map((step) => (
+                <View
+                  key={step}
+                  style={[styles.commitmentStep, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
+                  <Text style={[styles.commitmentStepText, { color: colors.textSoft }]}>{step}</Text>
+                </View>
+              ))}
+            </View>
+
+            <AppButton label={accountabilityPlan.actionLabel} onPress={handleAccountabilityPlanAction} />
+          </AppCard>
+
           {loadError ? (
             <StateCard
               actionLabel="Retry"
@@ -396,7 +531,7 @@ export default function CirclesScreen() {
                 <View style={styles.heroHeader}>
                   <View style={styles.heroCopy}>
                     <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Overview</Text>
-                    <Text style={[styles.heroTitle, { color: colors.text }]}>Circle pulse</Text>
+                    <Text style={[styles.heroTitle, { color: colors.text }]}>Accountability pulse</Text>
                     <Text style={[styles.heroBody, { color: colors.textSoft }]}>{activitySummary}</Text>
                   </View>
                   {isRefreshing ? (
@@ -423,7 +558,7 @@ export default function CirclesScreen() {
                 {latestFeedItem ? (
                   <View style={[styles.activityStrip, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
                     <View style={styles.activityStripCopy}>
-                      <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>Latest</Text>
+                      <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>Latest proof</Text>
                       <Text numberOfLines={2} style={[styles.activityStripTitle, { color: colors.text }]}>
                         {formatActivityTitle(latestFeedItem)}
                       </Text>
@@ -437,7 +572,7 @@ export default function CirclesScreen() {
                 {topChallenge ? (
                   <View style={[styles.challengeStrip, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
                     <View style={styles.challengeCopy}>
-                      <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>Focus</Text>
+                      <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>Commitment</Text>
                       <Text style={[TextPresets.label, { color: colors.text }]}>{topChallenge.title}</Text>
                       <Text style={[styles.challengeMeta, { color: colors.textSoft }]}>{topChallenge.progressLabel}</Text>
                     </View>
@@ -453,8 +588,8 @@ export default function CirclesScreen() {
                 <SectionHeader
                   kicker="Feed"
                   size="compact"
-                  title="Recent proof"
-                  description="All shared clears and misses from your circles."
+                  title="Follow-through feed"
+                  description="The clears and misses that matter inside your circles."
                 />
 
                 <View style={styles.feedTools}>
@@ -464,7 +599,7 @@ export default function CirclesScreen() {
                     containerStyle={styles.feedSearchWrap}
                     inputStyle={styles.feedSearchInput}
                     onChangeText={setFeedSearchQuery}
-                    placeholder="Search alarms, members, or circles"
+                    placeholder="Search checkpoints, members, or circles"
                     returnKeyType="search"
                     value={feedSearchQuery}
                   />
@@ -523,9 +658,9 @@ export default function CirclesScreen() {
                     description={
                       isFilteringFeed
                         ? 'Try a different circle filter or search term.'
-                        : 'Proof shows up here after someone in your circles clears or misses an alarm.'
+                        : 'Shared clears and misses appear here once someone in your circles protects or misses a checkpoint.'
                     }
-                    title={isFilteringFeed ? 'No matching activity' : 'No shared results yet'}
+                    title={isFilteringFeed ? 'No matching activity' : 'No accountability signals yet'}
                     variant="inline"
                   />
                 ) : (
@@ -589,8 +724,8 @@ export default function CirclesScreen() {
                 <SectionHeader
                   kicker="Manage"
                   size="compact"
-                  title="Start or join"
-                  description="Two quick actions when you need them."
+                  title="Start or join a small group"
+                  description="One or two reliable people is enough."
                 />
 
                 <View style={styles.quickActions}>
@@ -598,7 +733,7 @@ export default function CirclesScreen() {
                     <View style={styles.panelCopy}>
                       <Text style={[TextPresets.label, { color: colors.text }]}>Create a circle</Text>
                       <Text style={[styles.panelDescription, { color: colors.textSoft }]}>
-                        Start a small group and share one invite.
+                        Start small. One or two people who would notice a miss is enough.
                       </Text>
                     </View>
                     <AppInput
@@ -613,7 +748,7 @@ export default function CirclesScreen() {
                       label="Description"
                       multiline
                       onChangeText={setCircleDescription}
-                      placeholder="People who will notice missed weekday alarms."
+                      placeholder="People who will notice missed weekday checkpoints."
                       value={circleDescription}
                     />
                     <AppButton
@@ -627,7 +762,9 @@ export default function CirclesScreen() {
                     <View style={styles.panelCopy}>
                       <Text style={[TextPresets.label, { color: colors.text }]}>Join with an invite code</Text>
                       <Text style={[styles.panelDescription, { color: colors.textSoft }]}>
-                        {profile?.handle ? `You will join as @${profile.handle}.` : 'Join another circle from a shared code.'}
+                        {profile?.handle
+                          ? `You will join as @${profile.handle}, then you can attach one checkpoint to this circle.`
+                          : 'Join another accountability circle from a shared code.'}
                       </Text>
                     </View>
                     <AppInput
@@ -659,13 +796,13 @@ export default function CirclesScreen() {
                   action={isRefreshing ? <ActivityIndicator color={colors.primary} /> : undefined}
                   kicker="Your circles"
                   size="compact"
-                  title="Groups and invites"
-                  description="Members, roles, and invite codes."
+                  title="Groups, invites, and next moves"
+                  description="Everything a small accountability group needs to stay useful."
                 />
 
                 {circles.length === 0 ? (
                   <EmptyState
-                    description="Create your first circle or join one from an invite code."
+                    description="Create your first circle or join one. Small groups work best when they stay focused on one real commitment."
                     title="No circles yet"
                   />
                 ) : (
@@ -689,9 +826,16 @@ export default function CirclesScreen() {
                           <Text style={[styles.circleMetaText, { color: colors.muted }]}>Code {circle.inviteCode}</Text>
                         </View>
 
+                        <View style={[styles.commitmentHint, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
+                          <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Next move</Text>
+                          <Text style={[styles.commitmentHintText, { color: colors.textSoft }]}>
+                            {getCircleCommitmentHint(circle, feedByCircleId[circle.id] ?? [])}
+                          </Text>
+                        </View>
+
                         <View style={styles.circleActions}>
                           <AppButton
-                            label="Invite"
+                            label="Share invite"
                             onPress={() => {
                               void handleShareCircle(circle);
                             }}
@@ -700,9 +844,9 @@ export default function CirclesScreen() {
                             variant="secondary"
                           />
                           <AppButton
-                            label="Copy code"
+                            label="Copy link"
                             onPress={() => {
-                              void handleCopyValue(circle.inviteCode, 'Invite code');
+                              void handleCopyInviteLink(circle);
                             }}
                             size="compact"
                             style={styles.actionFill}
@@ -760,6 +904,23 @@ const styles = StyleSheet.create({
     flex: 1,
     minHeight: 40,
     justifyContent: 'center',
+  },
+  accountabilityCard: {
+    gap: Spacing.md,
+  },
+  commitmentChecklist: {
+    gap: Spacing.sm,
+  },
+  commitmentStep: {
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  commitmentStepText: {
+    ...TextPresets.body,
+    fontSize: 14,
+    lineHeight: 20,
   },
   heroCard: {
     gap: Spacing.md,
@@ -959,6 +1120,17 @@ const styles = StyleSheet.create({
     gap: Spacing.sm,
   },
   circleMetaText: {
+    ...TextPresets.body,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  commitmentHint: {
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    gap: 2,
+    padding: 12,
+  },
+  commitmentHintText: {
     ...TextPresets.body,
     fontSize: 14,
     lineHeight: 20,

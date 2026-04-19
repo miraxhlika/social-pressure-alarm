@@ -1,4 +1,5 @@
-import { AlarmStore, SuccessHistoryEntry } from '@/types/alarm';
+import { getUseCaseLabel } from '@/lib/checkpoint-templates';
+import { AlarmOutcome, AlarmStore, SuccessHistoryEntry, UseCaseType } from '@/types/alarm';
 
 const WEEK_IN_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -44,6 +45,30 @@ export type WeeklyCompletionStats = {
   successes: number;
   failures: number;
   completionRate: number;
+  averageTimeToClearSeconds: number | null;
+  fastestClearSeconds: number | null;
+};
+
+export type UseCaseReliability = {
+  useCaseType: UseCaseType;
+  label: string;
+  attempts: number;
+  successes: number;
+  failures: number;
+  completionRate: number;
+  averageTimeToClearSeconds: number | null;
+  fastestClearSeconds: number | null;
+  lastOutcome: AlarmOutcome | null;
+  lastResolvedAt: string | null;
+};
+
+export type WeeklyReview = {
+  title: string;
+  body: string;
+  strongestUseCase: UseCaseReliability | null;
+  recoveryUseCase: UseCaseReliability | null;
+  speedLabel: string;
+  speedBody: string;
 };
 
 export type MilestoneProgress = {
@@ -59,32 +84,90 @@ export type ProgressSummary = {
   nextStreakMilestone: (typeof STREAK_MILESTONES)[number] | null;
   milestoneProgress: MilestoneProgress;
   weeklyStats: WeeklyCompletionStats;
+  useCaseReliability: UseCaseReliability[];
+  weeklyReview: WeeklyReview;
   activeBadges: ProgressBadge[];
   recentWins: SuccessHistoryEntry[];
   latestSuccess: SuccessHistoryEntry | null;
   nextGoalCopy: string;
 };
 
+type AttemptRecord = {
+  alarmId: string;
+  label: string;
+  outcome: AlarmOutcome;
+  resolvedAt: string;
+  timeToScanSeconds: number | null;
+  gracePeriodSeconds: number | null;
+  useCaseType: UseCaseType;
+};
+
 function getTitleForScore(score: number) {
   return [...TITLE_LEVELS].reverse().find((level) => score >= level.threshold)?.title ?? TITLE_LEVELS[0].title;
 }
 
-export function getWeeklyCompletionStats(store: AlarmStore, now = Date.now()): WeeklyCompletionStats {
+function roundAverage(values: number[]) {
+  if (values.length === 0) {
+    return null;
+  }
+
+  const sum = values.reduce((total, value) => total + value, 0);
+  return Math.round(sum / values.length);
+}
+
+function getUseCaseTypeForAlarm(store: AlarmStore, alarmId: string): UseCaseType {
+  return store.alarms.find((alarm) => alarm.id === alarmId)?.useCaseType ?? 'custom';
+}
+
+function getWeeklyAttemptRecords(store: AlarmStore, now = Date.now()): AttemptRecord[] {
   const windowStart = now - WEEK_IN_MS;
-  const successes = store.successHistory.filter(
-    (entry) => new Date(entry.confirmedAt).getTime() >= windowStart
-  ).length;
-  const failures = store.failureHistory.filter(
-    (entry) => new Date(entry.failedAt).getTime() >= windowStart
-  ).length;
-  const attempts = successes + failures;
+  const successAttempts = store.successHistory
+    .filter((entry) => new Date(entry.confirmedAt).getTime() >= windowStart)
+    .map<AttemptRecord>((entry) => ({
+      alarmId: entry.alarmId,
+      label: entry.label,
+      outcome: 'confirmed',
+      resolvedAt: entry.confirmedAt,
+      timeToScanSeconds: entry.timeToScanSeconds,
+      gracePeriodSeconds: entry.gracePeriodSeconds,
+      useCaseType: getUseCaseTypeForAlarm(store, entry.alarmId),
+    }));
+  const failureAttempts = store.failureHistory
+    .filter((entry) => new Date(entry.failedAt).getTime() >= windowStart)
+    .map<AttemptRecord>((entry) => ({
+      alarmId: entry.alarmId,
+      label: entry.label,
+      outcome: 'missed',
+      resolvedAt: entry.failedAt,
+      timeToScanSeconds: null,
+      gracePeriodSeconds: null,
+      useCaseType: getUseCaseTypeForAlarm(store, entry.alarmId),
+    }));
+
+  return [...successAttempts, ...failureAttempts].sort(
+    (left, right) => new Date(right.resolvedAt).getTime() - new Date(left.resolvedAt).getTime()
+  );
+}
+
+function buildWeeklyCompletionStats(attempts: AttemptRecord[]): WeeklyCompletionStats {
+  const successes = attempts.filter((entry) => entry.outcome === 'confirmed');
+  const failures = attempts.length - successes.length;
+  const clearTimes = successes
+    .map((entry) => entry.timeToScanSeconds)
+    .filter((value): value is number => typeof value === 'number');
 
   return {
-    attempts,
-    successes,
+    attempts: attempts.length,
+    successes: successes.length,
     failures,
-    completionRate: attempts === 0 ? 0 : Math.round((successes / attempts) * 100),
+    completionRate: attempts.length === 0 ? 0 : Math.round((successes.length / attempts.length) * 100),
+    averageTimeToClearSeconds: roundAverage(clearTimes),
+    fastestClearSeconds: clearTimes.length > 0 ? Math.min(...clearTimes) : null,
   };
+}
+
+export function getWeeklyCompletionStats(store: AlarmStore, now = Date.now()): WeeklyCompletionStats {
+  return buildWeeklyCompletionStats(getWeeklyAttemptRecords(store, now));
 }
 
 export function getMilestoneProgress(currentStreak: number): MilestoneProgress {
@@ -150,6 +233,159 @@ export function getProgressBadges(store: AlarmStore, now = Date.now()): Progress
   return badges;
 }
 
+export function getUseCaseReliability(store: AlarmStore, now = Date.now()): UseCaseReliability[] {
+  const attempts = getWeeklyAttemptRecords(store, now);
+  const groupedAttempts = attempts.reduce<Record<UseCaseType, AttemptRecord[]>>((groups, entry) => {
+    const existingGroup = groups[entry.useCaseType] ?? [];
+    existingGroup.push(entry);
+    groups[entry.useCaseType] = existingGroup;
+    return groups;
+  }, {} as Record<UseCaseType, AttemptRecord[]>);
+
+  return (Object.entries(groupedAttempts) as [UseCaseType, AttemptRecord[]][])
+    .map(([useCaseType, groupedEntries]) => {
+      const stats = buildWeeklyCompletionStats(groupedEntries);
+      const lastAttempt = groupedEntries[0] ?? null;
+
+      return {
+        useCaseType,
+        label: getUseCaseLabel(useCaseType),
+        attempts: stats.attempts,
+        successes: stats.successes,
+        failures: stats.failures,
+        completionRate: stats.completionRate,
+        averageTimeToClearSeconds: stats.averageTimeToClearSeconds,
+        fastestClearSeconds: stats.fastestClearSeconds,
+        lastOutcome: lastAttempt?.outcome ?? null,
+        lastResolvedAt: lastAttempt?.resolvedAt ?? null,
+      };
+    })
+    .sort((left, right) => {
+      if (right.completionRate !== left.completionRate) {
+        return right.completionRate - left.completionRate;
+      }
+
+      if (right.attempts !== left.attempts) {
+        return right.attempts - left.attempts;
+      }
+
+      return left.failures - right.failures;
+    });
+}
+
+function getStrongestUseCase(useCaseReliability: UseCaseReliability[]) {
+  return (
+    [...useCaseReliability]
+      .filter((entry) => entry.successes > 0)
+      .sort((left, right) => {
+        if (right.completionRate !== left.completionRate) {
+          return right.completionRate - left.completionRate;
+        }
+
+        if (right.successes !== left.successes) {
+          return right.successes - left.successes;
+        }
+
+        return right.attempts - left.attempts;
+      })[0] ?? null
+  );
+}
+
+function getRecoveryUseCase(useCaseReliability: UseCaseReliability[]) {
+  return (
+    [...useCaseReliability]
+      .filter((entry) => entry.failures > 0)
+      .sort((left, right) => {
+        if (right.failures !== left.failures) {
+          return right.failures - left.failures;
+        }
+
+        if (left.completionRate !== right.completionRate) {
+          return left.completionRate - right.completionRate;
+        }
+
+        return right.attempts - left.attempts;
+      })[0] ?? null
+  );
+}
+
+export function getWeeklyReview(store: AlarmStore, now = Date.now()): WeeklyReview {
+  const weeklyStats = getWeeklyCompletionStats(store, now);
+  const useCaseReliability = getUseCaseReliability(store, now);
+  const strongestUseCase = getStrongestUseCase(useCaseReliability);
+  const recoveryUseCase = getRecoveryUseCase(useCaseReliability);
+
+  if (weeklyStats.attempts === 0) {
+    return {
+      title: 'No weekly review yet',
+      body: 'Your first live clear or miss will turn this into a weekly review instead of a setup placeholder.',
+      strongestUseCase: null,
+      recoveryUseCase: null,
+      speedLabel: 'No clear-time baseline yet',
+      speedBody: 'Once a checkpoint clears, the app will show how fast you reached proof.',
+    };
+  }
+
+  const speedLabel =
+    weeklyStats.averageTimeToClearSeconds === null
+      ? 'No clear-time baseline yet'
+      : `Average clear in ${weeklyStats.averageTimeToClearSeconds}s`;
+  const speedBody =
+    weeklyStats.fastestClearSeconds === null
+      ? 'Clear-time context appears once a successful run is logged.'
+      : `Fastest clear this week: ${weeklyStats.fastestClearSeconds}s.`;
+
+  if (weeklyStats.completionRate >= 90 && weeklyStats.attempts >= 3) {
+    return {
+      title: strongestUseCase ? `${strongestUseCase.label} is holding` : 'Your system held this week',
+      body: recoveryUseCase
+        ? `${weeklyStats.completionRate}% reliable overall. ${strongestUseCase?.label ?? 'Your routine'} led the week, and ${recoveryUseCase.label} is the only setup worth tightening next.`
+        : `${weeklyStats.completionRate}% reliable overall with no routine slipping hard enough to demand a reset.`,
+      strongestUseCase,
+      recoveryUseCase,
+      speedLabel,
+      speedBody,
+    };
+  }
+
+  if (weeklyStats.completionRate >= 70) {
+    return {
+      title: strongestUseCase ? `${strongestUseCase.label} stayed reliable` : 'Mostly reliable this week',
+      body: recoveryUseCase
+        ? `${weeklyStats.completionRate}% reliable overall. ${recoveryUseCase.label} caused ${recoveryUseCase.failures} miss${
+            recoveryUseCase.failures === 1 ? '' : 'es'
+          }, so adjust that setup before the next cycle.`
+        : `${weeklyStats.completionRate}% reliable overall. Keep the current setups and add repetition before making bigger changes.`,
+      strongestUseCase,
+      recoveryUseCase,
+      speedLabel,
+      speedBody,
+    };
+  }
+
+  if (recoveryUseCase) {
+    return {
+      title: `${recoveryUseCase.label} needs tightening`,
+      body: `${weeklyStats.completionRate}% reliable overall. ${recoveryUseCase.label} accounted for ${recoveryUseCase.failures} miss${
+        recoveryUseCase.failures === 1 ? '' : 'es'
+      }, so change the timing or reach window before the next run.`,
+      strongestUseCase,
+      recoveryUseCase,
+      speedLabel,
+      speedBody,
+    };
+  }
+
+  return {
+    title: 'This week needs a sturdier setup',
+    body: `${weeklyStats.completionRate}% reliable overall. Keep one commitment simple, reachable, and repeatable until the baseline improves.`,
+    strongestUseCase,
+    recoveryUseCase: null,
+    speedLabel,
+    speedBody,
+  };
+}
+
 export function getProgressSummary(store: AlarmStore, now = Date.now()): ProgressSummary {
   const currentStreakMilestone =
     [...STREAK_MILESTONES].reverse().find((milestone) => store.currentStreak >= milestone.threshold) ??
@@ -158,6 +394,8 @@ export function getProgressSummary(store: AlarmStore, now = Date.now()): Progres
     STREAK_MILESTONES.find((milestone) => store.currentStreak < milestone.threshold) ?? null;
   const milestoneProgress = getMilestoneProgress(store.currentStreak);
   const weeklyStats = getWeeklyCompletionStats(store, now);
+  const useCaseReliability = getUseCaseReliability(store, now);
+  const weeklyReview = getWeeklyReview(store, now);
 
   return {
     checkpointTitle: getTitleForScore(store.longestStreak),
@@ -165,6 +403,8 @@ export function getProgressSummary(store: AlarmStore, now = Date.now()): Progres
     nextStreakMilestone,
     milestoneProgress,
     weeklyStats,
+    useCaseReliability,
+    weeklyReview,
     activeBadges: getProgressBadges(store, now),
     recentWins: store.successHistory.slice(0, 3),
     latestSuccess: store.successHistory[0] ?? null,
