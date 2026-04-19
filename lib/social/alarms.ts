@@ -1,4 +1,5 @@
 import { getSocialSession, getSupabaseClient } from '@/lib/social/client';
+import { normalizeUseCaseType } from '@/lib/checkpoint-templates';
 import { AlarmDefinition, AlarmSocialSettings, RepeatSchedule } from '@/types/alarm';
 
 type RemoteAlarmRow = {
@@ -8,6 +9,7 @@ type RemoteAlarmRow = {
   expected_qr_payload: string;
   hour: number;
   minute: number;
+  use_case_type: string;
   repeat_schedule: RepeatSchedule;
   grace_period_seconds: number;
   is_active: boolean;
@@ -52,6 +54,7 @@ function mapRemoteAlarmRow(row: RemoteAlarmRow): AlarmDefinition {
     hour: row.hour,
     minute: row.minute,
     label: row.label,
+    useCaseType: normalizeUseCaseType(row.use_case_type),
     expectedQrPayload: row.expected_qr_payload,
     repeatSchedule: row.repeat_schedule,
     gracePeriodSeconds: row.grace_period_seconds,
@@ -71,6 +74,7 @@ function mapAlarmDefinitionForWrite(alarm: AlarmDefinition, userId: string) {
     expected_qr_payload: alarm.expectedQrPayload,
     hour: alarm.hour,
     minute: alarm.minute,
+    use_case_type: alarm.useCaseType,
     repeat_schedule: alarm.repeatSchedule,
     grace_period_seconds: alarm.gracePeriodSeconds,
     is_active: alarm.isActive,
@@ -86,7 +90,7 @@ async function getRequiredAlarmSyncContext() {
   const session = await getSocialSession();
 
   if (!client || !session?.user) {
-    throw new Error('Sign in to sync account alarms.');
+    throw new Error('Sign in to sync account checkpoints.');
   }
 
   return {
@@ -100,7 +104,7 @@ export async function listMyRemoteAlarms() {
   const { data, error } = await client
     .from('user_alarms')
     .select(
-      'id, user_id, label, expected_qr_payload, hour, minute, repeat_schedule, grace_period_seconds, is_active, scheduled_for, last_outcome, social_settings, created_at, updated_at'
+      'id, user_id, label, expected_qr_payload, hour, minute, use_case_type, repeat_schedule, grace_period_seconds, is_active, scheduled_for, last_outcome, social_settings, created_at, updated_at'
     )
     .eq('user_id', user.id)
     .order('created_at', { ascending: false });
@@ -120,7 +124,7 @@ export async function upsertMyRemoteAlarm(alarm: AlarmDefinition) {
       onConflict: 'user_id,id',
     })
     .select(
-      'id, user_id, label, expected_qr_payload, hour, minute, repeat_schedule, grace_period_seconds, is_active, scheduled_for, last_outcome, social_settings, created_at, updated_at'
+      'id, user_id, label, expected_qr_payload, hour, minute, use_case_type, repeat_schedule, grace_period_seconds, is_active, scheduled_for, last_outcome, social_settings, created_at, updated_at'
     )
     .single();
 
@@ -146,7 +150,7 @@ export async function upsertMyRemoteAlarms(alarms: AlarmDefinition[]) {
       }
     )
     .select(
-      'id, user_id, label, expected_qr_payload, hour, minute, repeat_schedule, grace_period_seconds, is_active, scheduled_for, last_outcome, social_settings, created_at, updated_at'
+      'id, user_id, label, expected_qr_payload, hour, minute, use_case_type, repeat_schedule, grace_period_seconds, is_active, scheduled_for, last_outcome, social_settings, created_at, updated_at'
     );
 
   if (error) {

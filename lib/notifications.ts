@@ -3,8 +3,30 @@ import * as Notifications from 'expo-notifications';
 
 import { Alarm } from '@/types/alarm';
 import { createNextAlarmDateForSchedule, formatAlarmTime } from '@/lib/alarms';
+import {
+  getCheckpointNotificationCopy,
+  getCheckpointReadinessNotificationCopy,
+  getWeeklyReviewNotificationCopy,
+} from '@/lib/checkpoint-templates';
+import { readScopedStorageValue, writeScopedStorageValue } from '@/lib/storage';
 
 const ALARM_CHANNEL_ID = 'social-pressure-alarm';
+const NOTIFICATION_PREFERENCES_STORAGE_KEY = 'social-pressure-alarm/notification-preferences';
+const WEEKLY_REVIEW_NOTIFICATION_STORAGE_KEY = 'social-pressure-alarm/weekly-review-notification';
+
+export type NotificationPreferences = {
+  urgencyRemindersEnabled: boolean;
+  eveningReadinessRemindersEnabled: boolean;
+  weeklyReviewRemindersEnabled: boolean;
+};
+
+export type NotificationPermissionState = 'granted' | 'provisional' | 'denied' | 'undetermined';
+
+export const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
+  urgencyRemindersEnabled: true,
+  eveningReadinessRemindersEnabled: false,
+  weeklyReviewRemindersEnabled: false,
+};
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -21,12 +43,114 @@ export async function configureNotificationsAsync() {
   }
 
   await Notifications.setNotificationChannelAsync(ALARM_CHANNEL_ID, {
-    name: 'Alarm reminders',
+    name: 'Checkpoint reminders',
     importance: Notifications.AndroidImportance.MAX,
     sound: 'default',
     vibrationPattern: [0, 300, 200, 300],
     lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
   });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function normalizeNotificationPreferences(value: unknown): NotificationPreferences {
+  if (!isRecord(value)) {
+    return DEFAULT_NOTIFICATION_PREFERENCES;
+  }
+
+  return {
+    urgencyRemindersEnabled:
+      typeof value.urgencyRemindersEnabled === 'boolean'
+        ? value.urgencyRemindersEnabled
+        : DEFAULT_NOTIFICATION_PREFERENCES.urgencyRemindersEnabled,
+    eveningReadinessRemindersEnabled:
+      typeof value.eveningReadinessRemindersEnabled === 'boolean'
+        ? value.eveningReadinessRemindersEnabled
+        : DEFAULT_NOTIFICATION_PREFERENCES.eveningReadinessRemindersEnabled,
+    weeklyReviewRemindersEnabled:
+      typeof value.weeklyReviewRemindersEnabled === 'boolean'
+        ? value.weeklyReviewRemindersEnabled
+        : DEFAULT_NOTIFICATION_PREFERENCES.weeklyReviewRemindersEnabled,
+  };
+}
+
+function getWeeklyReviewNotificationId(rawValue: string | null) {
+  return rawValue && rawValue.trim().length > 0 ? rawValue.trim() : null;
+}
+
+function getUrgencyReminderDelaySeconds(gracePeriodSeconds: number) {
+  if (gracePeriodSeconds < 90) {
+    return null;
+  }
+
+  const halfWindow = Math.floor(gracePeriodSeconds / 2);
+  return Math.min(gracePeriodSeconds - 30, Math.max(45, halfWindow));
+}
+
+function shouldScheduleEveningReadinessReminder(alarm: Alarm, scheduledFor: Date) {
+  const isMorningCheckpoint = scheduledFor.getHours() < 12;
+  return isMorningCheckpoint && alarm.repeatSchedule !== 'once';
+}
+
+function getEveningReadinessDate(scheduledFor: Date) {
+  const reminderDate = new Date(scheduledFor);
+  reminderDate.setDate(reminderDate.getDate() - 1);
+  reminderDate.setHours(20, 0, 0, 0);
+  return reminderDate;
+}
+
+function getNextWeeklyReviewDate() {
+  const reminderDate = new Date();
+  const day = reminderDate.getDay();
+  const daysUntilSunday = (7 - day) % 7;
+  reminderDate.setDate(reminderDate.getDate() + daysUntilSunday);
+  reminderDate.setHours(18, 0, 0, 0);
+
+  if (reminderDate.getTime() <= Date.now()) {
+    reminderDate.setDate(reminderDate.getDate() + 7);
+  }
+
+  return reminderDate;
+}
+
+export async function readNotificationPreferences() {
+  const storedValue = await readScopedStorageValue(NOTIFICATION_PREFERENCES_STORAGE_KEY);
+
+  if (!storedValue.value) {
+    return DEFAULT_NOTIFICATION_PREFERENCES;
+  }
+
+  try {
+    return normalizeNotificationPreferences(JSON.parse(storedValue.value));
+  } catch {
+    return DEFAULT_NOTIFICATION_PREFERENCES;
+  }
+}
+
+export async function saveNotificationPreferences(preferences: NotificationPreferences) {
+  const normalizedPreferences = normalizeNotificationPreferences(preferences);
+  await writeScopedStorageValue(NOTIFICATION_PREFERENCES_STORAGE_KEY, JSON.stringify(normalizedPreferences));
+  return normalizedPreferences;
+}
+
+export async function getNotificationPermissionState(): Promise<NotificationPermissionState> {
+  const currentSettings = await Notifications.getPermissionsAsync();
+
+  if (currentSettings.granted) {
+    return 'granted';
+  }
+
+  if (currentSettings.ios?.status === Notifications.IosAuthorizationStatus.PROVISIONAL) {
+    return 'provisional';
+  }
+
+  if (currentSettings.canAskAgain) {
+    return 'undetermined';
+  }
+
+  return 'denied';
 }
 
 export async function ensureNotificationPermissionsAsync() {
@@ -40,23 +164,41 @@ export async function ensureNotificationPermissionsAsync() {
   return requested.granted;
 }
 
+export function getAlarmNotificationStrategyKey(
+  alarm: Alarm,
+  preferences: NotificationPreferences,
+  scheduledFor: Date
+) {
+  return [
+    'core:1',
+    `urgency:${preferences.urgencyRemindersEnabled && getUrgencyReminderDelaySeconds(alarm.gracePeriodSeconds) ? 1 : 0}`,
+    `readiness:${
+      preferences.eveningReadinessRemindersEnabled && shouldScheduleEveningReadinessReminder(alarm, scheduledFor) ? 1 : 0
+    }`,
+  ].join('|');
+}
+
 export async function scheduleAlarmNotificationAsync(
   alarm: Alarm,
   options?: {
     scheduledFor?: string;
   }
 ) {
+  const preferences = await readNotificationPreferences();
   const scheduledFor = options?.scheduledFor
     ? new Date(options.scheduledFor)
     : createNextAlarmDateForSchedule(alarm.hour, alarm.minute, alarm.repeatSchedule);
+  const triggerContent = getCheckpointNotificationCopy(
+    alarm.useCaseType,
+    alarm.label,
+    alarm.gracePeriodSeconds
+  );
+  const strategyKey = getAlarmNotificationStrategyKey(alarm, preferences, scheduledFor);
 
   const primaryNotificationId = await Notifications.scheduleNotificationAsync({
     content: {
-      title: `Wake up: ${formatAlarmTime(alarm.hour, alarm.minute)}`,
-      body:
-        alarm.repeatSchedule === 'once'
-          ? `Scan the ${alarm.label} checkpoint within ${alarm.gracePeriodSeconds} seconds to clear this alarm.`
-          : `Your ${alarm.label} checkpoint starts now. You have ${alarm.gracePeriodSeconds} seconds to clear it.`,
+      title: `${triggerContent.title} · ${formatAlarmTime(alarm.hour, alarm.minute)}`,
+      body: triggerContent.body,
       sound: 'default',
       data: {
         alarmId: alarm.id,
@@ -70,17 +212,24 @@ export async function scheduleAlarmNotificationAsync(
   });
 
   const notificationIds = [primaryNotificationId];
-  const reminderDelaySeconds =
-    alarm.gracePeriodSeconds >= 30 ? Math.max(15, Math.floor(alarm.gracePeriodSeconds / 2)) : null;
+  const reminderDelaySeconds = preferences.urgencyRemindersEnabled
+    ? getUrgencyReminderDelaySeconds(alarm.gracePeriodSeconds)
+    : null;
 
   if (reminderDelaySeconds && reminderDelaySeconds < alarm.gracePeriodSeconds) {
     const reminderDate = new Date(scheduledFor.getTime() + reminderDelaySeconds * 1000);
     const secondsRemaining = alarm.gracePeriodSeconds - reminderDelaySeconds;
+    const reminderContent = getCheckpointNotificationCopy(
+      alarm.useCaseType,
+      alarm.label,
+      alarm.gracePeriodSeconds,
+      secondsRemaining
+    );
 
     const reminderNotificationId = await Notifications.scheduleNotificationAsync({
       content: {
-        title: `Keep moving: ${alarm.label}`,
-        body: `${secondsRemaining} seconds left to scan the QR checkpoint.`,
+        title: reminderContent.title,
+        body: reminderContent.body,
         sound: 'default',
         data: {
           alarmId: alarm.id,
@@ -96,9 +245,36 @@ export async function scheduleAlarmNotificationAsync(
     notificationIds.push(reminderNotificationId);
   }
 
+  if (preferences.eveningReadinessRemindersEnabled && shouldScheduleEveningReadinessReminder(alarm, scheduledFor)) {
+    const readinessDate = getEveningReadinessDate(scheduledFor);
+
+    if (readinessDate.getTime() > Date.now()) {
+      const readinessContent = getCheckpointReadinessNotificationCopy(alarm.useCaseType, alarm.label);
+      const readinessNotificationId = await Notifications.scheduleNotificationAsync({
+        content: {
+          title: readinessContent.title,
+          body: readinessContent.body,
+          sound: 'default',
+          data: {
+            alarmId: alarm.id,
+            kind: 'readiness',
+          },
+        },
+        trigger: {
+          type: Notifications.SchedulableTriggerInputTypes.DATE,
+          date: readinessDate,
+          channelId: ALARM_CHANNEL_ID,
+        },
+      });
+
+      notificationIds.push(readinessNotificationId);
+    }
+  }
+
   return {
     notificationIds,
     scheduledFor: scheduledFor.toISOString(),
+    strategyKey,
   };
 }
 
@@ -109,4 +285,70 @@ export async function cancelAlarmNotificationAsync(notificationIds?: string | st
 
   const ids = Array.isArray(notificationIds) ? notificationIds : [notificationIds];
   await Promise.all(ids.map((notificationId) => Notifications.cancelScheduledNotificationAsync(notificationId)));
+}
+
+export async function syncWeeklyReviewReminderAsync(
+  preferences?: NotificationPreferences,
+  options?: {
+    requestPermissions?: boolean;
+  }
+) {
+  const resolvedPreferences = preferences ?? (await readNotificationPreferences());
+  const weeklyReminderRecord = await readScopedStorageValue(WEEKLY_REVIEW_NOTIFICATION_STORAGE_KEY);
+  const existingNotificationId = getWeeklyReviewNotificationId(weeklyReminderRecord.value);
+
+  if (existingNotificationId) {
+    await Notifications.cancelScheduledNotificationAsync(existingNotificationId).catch(() => null);
+  }
+
+  if (!resolvedPreferences.weeklyReviewRemindersEnabled) {
+    await writeScopedStorageValue(WEEKLY_REVIEW_NOTIFICATION_STORAGE_KEY, '');
+    return null;
+  }
+
+  const requestPermissions = options?.requestPermissions ?? true;
+  const hasPermission = requestPermissions
+    ? await ensureNotificationPermissionsAsync()
+    : ['granted', 'provisional'].includes(await getNotificationPermissionState());
+
+  if (!hasPermission) {
+    await writeScopedStorageValue(WEEKLY_REVIEW_NOTIFICATION_STORAGE_KEY, '');
+    return null;
+  }
+
+  const weeklyReviewDate = getNextWeeklyReviewDate();
+  const weeklyReviewContent = getWeeklyReviewNotificationCopy();
+  const weeklyReviewNotificationId = await Notifications.scheduleNotificationAsync({
+    content: {
+      title: weeklyReviewContent.title,
+      body: weeklyReviewContent.body,
+      sound: 'default',
+      data: {
+        kind: 'weekly-review',
+      },
+    },
+    trigger: {
+      type: Notifications.SchedulableTriggerInputTypes.DATE,
+      date: weeklyReviewDate,
+      channelId: ALARM_CHANNEL_ID,
+    },
+  });
+
+  await writeScopedStorageValue(WEEKLY_REVIEW_NOTIFICATION_STORAGE_KEY, weeklyReviewNotificationId);
+
+  return {
+    notificationId: weeklyReviewNotificationId,
+    scheduledFor: weeklyReviewDate.toISOString(),
+  };
+}
+
+export async function syncNotificationStrategyAsync(preferences?: NotificationPreferences) {
+  const resolvedPreferences = preferences ?? (await readNotificationPreferences());
+  await saveNotificationPreferences(resolvedPreferences);
+  await syncWeeklyReviewReminderAsync(resolvedPreferences);
+
+  const { hydrateAlarmRuntimeForCurrentUser } = await import('@/lib/alarms');
+  await hydrateAlarmRuntimeForCurrentUser();
+
+  return resolvedPreferences;
 }

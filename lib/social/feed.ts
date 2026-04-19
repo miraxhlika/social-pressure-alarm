@@ -133,7 +133,7 @@ export async function listVisibleSocialFeed({ limitCount = 8, offsetCount = 0 }:
     .filter((item): item is SocialFeedItem => item !== null)
     .map((item) => ({
       ...item,
-      alarmLabel: getTrimmedString(item.alarmLabel) || 'Checkpoint alarm',
+      alarmLabel: getTrimmedString(item.alarmLabel) || 'Checkpoint',
       circleName: getTrimmedString(item.circleName) || 'Accountability circle',
       actorDisplayName: getTrimmedString(item.actorDisplayName) || 'Circle member',
       actorHandle: getTrimmedString(item.actorHandle) || 'member',

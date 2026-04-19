@@ -5,6 +5,14 @@ export const MAX_CHECKPOINT_PRESETS = 8;
 
 export type AlarmOutcome = 'confirmed' | 'missed';
 export type RepeatSchedule = 'once' | 'daily' | 'weekdays';
+export type UseCaseType =
+  | 'wake_up'
+  | 'medication'
+  | 'study_start'
+  | 'deep_work'
+  | 'leave_home'
+  | 'workout'
+  | 'custom';
 
 export type AlarmSocialSettings = {
   circleId?: string;
@@ -69,6 +77,7 @@ export type AlarmDefinition = {
   hour: number;
   minute: number;
   label: string;
+  useCaseType: UseCaseType;
   expectedQrPayload: string;
   repeatSchedule: RepeatSchedule;
   gracePeriodSeconds: number;
@@ -82,6 +91,7 @@ export type AlarmDefinition = {
 export type AlarmRuntimeMetadata = {
   notificationIds?: string[];
   scheduledFor?: string;
+  notificationStrategyKey?: string;
 };
 
 export type Alarm = AlarmDefinition & AlarmRuntimeMetadata;

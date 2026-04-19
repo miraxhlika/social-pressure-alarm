@@ -4,7 +4,7 @@ import * as Notifications from 'expo-notifications';
 import { useRouter } from 'expo-router';
 
 import { getAlarmPhase, getAlarms, getNextActionableAlarm, hydrateAlarmRuntimeForCurrentUser } from '@/lib/alarms';
-import { configureNotificationsAsync } from '@/lib/notifications';
+import { configureNotificationsAsync, syncWeeklyReviewReminderAsync } from '@/lib/notifications';
 import { getSupabaseClient } from '@/lib/social/client';
 
 function getAlarmIdFromNotification(
@@ -59,6 +59,9 @@ export function useAlarmRuntime() {
 
     const hydrateAndCheckForDueAlarms = async () => {
       await hydrateAlarmRuntimeForCurrentUser();
+      await syncWeeklyReviewReminderAsync(undefined, {
+        requestPermissions: false,
+      }).catch(() => null);
       const alarms = await getAlarms();
       const dueAlarm = getNextActionableAlarm(alarms);
 

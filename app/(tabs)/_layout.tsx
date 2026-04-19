@@ -69,7 +69,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="alarms"
         options={{
-          title: 'Alarms',
+          title: 'Checkpoints',
           tabBarIcon: ({ color, focused }) => (
             <Ionicons color={color} name={focused ? 'alarm' : 'alarm-outline'} size={20} />
           ),

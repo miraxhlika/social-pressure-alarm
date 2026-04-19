@@ -11,22 +11,25 @@ import { LoadingBlock } from '@/components/ui/loading-block';
 import { PageHeader } from '@/components/ui/page-header';
 import { Spacing, TextPresets, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { trackAnalyticsEvent } from '@/lib/analytics';
 import {
   deleteAlarm,
   formatAlarmTime,
   hydrateAlarmRuntimeForCurrentUser,
   readAlarmStore,
+  rescheduleAlarm,
   resetAlarmStore,
-  updateAlarm,
 } from '@/lib/alarms';
 import { getPrimaryAlarm } from '@/lib/dashboard';
-import { cancelAlarmNotificationAsync, scheduleAlarmNotificationAsync } from '@/lib/notifications';
+import { cancelAlarmNotificationAsync } from '@/lib/notifications';
+import { getProgressSummary, ProgressSummary } from '@/lib/progress';
 import { resetSocialSyncState } from '@/lib/social/queue';
 import { Alarm, FREE_ALARM_LIMIT } from '@/types/alarm';
 
 type AlarmScreenState = {
   alarms: Alarm[];
   lifetimeAlarmCreations: number;
+  progressSummary: ProgressSummary | null;
 };
 
 export default function AlarmsScreen() {
@@ -36,6 +39,7 @@ export default function AlarmsScreen() {
   const [state, setState] = useState<AlarmScreenState>({
     alarms: [],
     lifetimeAlarmCreations: 0,
+    progressSummary: null,
   });
 
   const loadData = useCallback(async () => {
@@ -48,6 +52,7 @@ export default function AlarmsScreen() {
       setState({
         alarms: store.alarms,
         lifetimeAlarmCreations: store.lifetimeAlarmCreations,
+        progressSummary: getProgressSummary(store),
       });
     } finally {
       setIsLoading(false);
@@ -62,7 +67,21 @@ export default function AlarmsScreen() {
 
   const handleCreateAlarmPress = () => {
     if (state.lifetimeAlarmCreations >= FREE_ALARM_LIMIT) {
-      router.push('/paywall');
+      void trackAnalyticsEvent('checkpoint_limit_reached', {
+        limit: FREE_ALARM_LIMIT,
+        creationCount: state.lifetimeAlarmCreations,
+        source: 'checkpoints_tab',
+      });
+      Alert.alert(
+        'Checkpoint limit reached',
+        `This preview build currently allows ${FREE_ALARM_LIMIT} saved checkpoints per device. Edit, reuse, or delete one that already works for you.`,
+        [
+          {
+            text: 'Keep browsing',
+            style: 'cancel',
+          },
+        ]
+      );
       return;
     }
 
@@ -70,7 +89,7 @@ export default function AlarmsScreen() {
   };
 
   const handleDeleteAlarm = (alarm: Alarm) => {
-    Alert.alert('Delete alarm?', `Remove the ${alarm.label} checkpoint alarm?`, [
+    Alert.alert('Delete checkpoint?', `Remove the ${alarm.label} checkpoint?`, [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete',
@@ -85,6 +104,16 @@ export default function AlarmsScreen() {
   };
 
   const handleEditAlarm = (alarm: Alarm) => {
+    if (alarm.lastOutcome === 'missed') {
+      void trackAnalyticsEvent('miss_recovery_action', {
+        checkpointId: alarm.id,
+        useCaseType: alarm.useCaseType,
+        repeatSchedule: alarm.repeatSchedule,
+        gracePeriodSeconds: alarm.gracePeriodSeconds,
+        action: 'edit',
+      });
+    }
+
     router.push({
       pathname: '/create',
       params: {
@@ -106,22 +135,23 @@ export default function AlarmsScreen() {
 
   const handleRescheduleAlarm = (alarm: Alarm) => {
     Alert.alert(
-      'Reschedule alarm?',
-      `Schedule the ${alarm.label} alarm for its next ${alarm.repeatSchedule === 'once' ? 'available slot' : 'repeat window'}?`,
+      'Reschedule checkpoint?',
+      `Schedule ${alarm.label} for its next ${alarm.repeatSchedule === 'once' ? 'available slot' : 'repeat window'}?`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Reschedule',
           onPress: async () => {
-            const scheduled = await scheduleAlarmNotificationAsync(alarm);
-            await cancelAlarmNotificationAsync(alarm.notificationIds);
-            await updateAlarm({
-              ...alarm,
-              isActive: true,
-              lastOutcome: undefined,
-              notificationIds: scheduled.notificationIds,
-              scheduledFor: scheduled.scheduledFor,
-            });
+            await rescheduleAlarm(alarm);
+            if (alarm.lastOutcome === 'missed') {
+              await trackAnalyticsEvent('miss_recovery_action', {
+                checkpointId: alarm.id,
+                useCaseType: alarm.useCaseType,
+                repeatSchedule: alarm.repeatSchedule,
+                gracePeriodSeconds: alarm.gracePeriodSeconds,
+                action: 'reschedule',
+              });
+            }
             await loadData();
           },
         },
@@ -129,10 +159,14 @@ export default function AlarmsScreen() {
     );
   };
 
+  const handleOpenAlarm = (alarm: Alarm) => {
+    router.push(`/ringing?alarmId=${alarm.id}`);
+  };
+
   const handleResetDemoData = () => {
     Alert.alert(
       'Reset local data?',
-      'This clears alarms, resets the free limit, and cancels scheduled notifications on this device.',
+      'This clears checkpoints, resets the preview limit, and cancels scheduled notifications on this device.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -150,41 +184,57 @@ export default function AlarmsScreen() {
 
   const primaryAlarm = useMemo(() => getPrimaryAlarm(state.alarms), [state.alarms]);
   const freeSlotsRemaining = Math.max(0, FREE_ALARM_LIMIT - state.lifetimeAlarmCreations);
+  const uniqueUseCaseCount = new Set(state.alarms.map((alarm) => alarm.useCaseType)).size;
+  const weeklyCompletionRate = state.progressSummary?.weeklyStats.attempts
+    ? `${state.progressSummary.weeklyStats.completionRate}%`
+    : '—';
+  const weeklyCompletionHelper = state.progressSummary?.weeklyStats.attempts
+    ? state.progressSummary.weeklyStats.averageTimeToClearSeconds === null
+      ? `${state.progressSummary.weeklyStats.successes}/${state.progressSummary.weeklyStats.attempts} cleared`
+      : `Avg clear ${state.progressSummary.weeklyStats.averageTimeToClearSeconds}s`
+    : 'No attempts yet';
 
   return (
     <AppScreen>
       <PageHeader
-        action={<AppButton label="New" onPress={handleCreateAlarmPress} size="compact" />}
-        eyebrow="Alarms"
-        title="Saved checkpoints"
-        description="Edit fast. Reuse what works."
+        action={<AppButton label="New checkpoint" onPress={handleCreateAlarmPress} size="compact" />}
+        eyebrow="Checkpoints"
+        title="Checkpoint library"
+        description="Keep reusable proof setups for the commitments you repeat."
       />
 
       {isLoading ? (
         <LoadingBlock
-          description="Loading your saved alarms."
+          description="Loading your saved checkpoints."
           style={styles.loadingBlock}
-          title="Loading alarms"
+          title="Loading checkpoints"
         />
       ) : state.alarms.length === 0 ? (
         <EmptyState
-          actionLabel="Create alarm"
-          description="Create one checkpoint alarm, then edit or reuse it here."
+          actionLabel="Create checkpoint"
+          description="Save one checkpoint for a real commitment, then return here to adjust or reuse it instead of starting over."
           onAction={handleCreateAlarmPress}
           style={styles.emptyCard}
-          title="No alarms yet"
+          title="Your library is empty"
         />
       ) : (
         <>
           <AppCard elevated tone="canvas" style={styles.summaryCard}>
-            <View style={styles.summaryRow}>
-              <MiniMetric label="Saved" value={`${state.alarms.length}`} />
-              <MiniMetric label="New left" value={`${freeSlotsRemaining}`} />
-            </View>
+            <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Reusable setups</Text>
+            <Text style={[styles.summaryTitle, { color: colors.text }]}>
+              {state.alarms.length} checkpoint{state.alarms.length === 1 ? '' : 's'} ready to reuse
+            </Text>
             <Text style={[TextPresets.body, { color: colors.textSoft }]}>
+              Edit timing, proof, or accountability from any saved checkpoint below.
+            </Text>
+            <View style={styles.summaryRow}>
+              <MiniMetric label="Use cases" value={`${uniqueUseCaseCount}`} />
+              <MiniMetric helper={weeklyCompletionHelper} label="This week" value={weeklyCompletionRate} />
+            </View>
+            <Text style={[styles.summaryFooter, { color: colors.textSoft }]}>
               {primaryAlarm
                 ? `Next up: ${formatAlarmTime(primaryAlarm.hour, primaryAlarm.minute)} · ${primaryAlarm.label}`
-                : 'No next alarm scheduled yet.'}
+                : `You can still save ${freeSlotsRemaining} more checkpoint${freeSlotsRemaining === 1 ? '' : 's'} in this preview build.`}
             </Text>
           </AppCard>
 
@@ -195,6 +245,7 @@ export default function AlarmsScreen() {
                 alarm={alarm}
                 onDelete={handleDeleteAlarm}
                 onEdit={handleEditAlarm}
+                onOpen={handleOpenAlarm}
                 onReschedule={handleRescheduleAlarm}
                 onReuse={handleReuseAlarm}
               />
@@ -208,13 +259,14 @@ export default function AlarmsScreen() {
   );
 }
 
-function MiniMetric({ label, value }: { label: string; value: string }) {
+function MiniMetric({ label, value, helper }: { label: string; value: string; helper?: string }) {
   const colors = getAppColors(useColorScheme());
 
   return (
     <View style={[styles.metricCard, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
       <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>{label}</Text>
       <Text style={[styles.metricValue, { color: colors.text }]}>{value}</Text>
+      {helper ? <Text style={[styles.metricHelper, { color: colors.textSoft }]}>{helper}</Text> : null}
     </View>
   );
 }
@@ -229,9 +281,20 @@ const styles = StyleSheet.create({
   summaryCard: {
     gap: Spacing.md,
   },
+  summaryTitle: {
+    ...TextPresets.title,
+    fontSize: 22,
+    lineHeight: 28,
+  },
   summaryRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: Spacing.sm,
+  },
+  summaryFooter: {
+    ...TextPresets.body,
+    fontSize: 14,
+    lineHeight: 20,
   },
   metricCard: {
     borderRadius: 18,
@@ -244,6 +307,11 @@ const styles = StyleSheet.create({
     ...TextPresets.title,
     fontSize: 20,
     lineHeight: 26,
+  },
+  metricHelper: {
+    ...TextPresets.body,
+    fontSize: 13,
+    lineHeight: 18,
   },
   alarmList: {
     gap: Spacing.md,
