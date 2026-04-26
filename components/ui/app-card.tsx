@@ -41,6 +41,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     gap: Spacing.lg,
     margin: 0,
+    minWidth: 0,
     overflow: 'hidden',
   },
   hero: {

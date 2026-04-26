@@ -7,13 +7,13 @@ import {
   AlarmSocialSettings,
   AlarmStore,
   CheckpointPreset,
-  FREE_ALARM_LIMIT,
   FailureHistoryEntry,
   MAX_CHECKPOINT_PRESETS,
   MAX_FAILURE_HISTORY,
   MAX_SUCCESS_HISTORY,
   RepeatSchedule,
   SuccessHistoryEntry,
+  AlarmProofStrictness,
 } from '@/types/alarm';
 import { normalizeUseCaseType } from '@/lib/checkpoint-templates';
 import { getWeeklyCompletionStats } from '@/lib/progress';
@@ -103,6 +103,10 @@ function getRepeatSchedule(value: unknown): RepeatSchedule {
   return value === 'daily' || value === 'weekdays' ? value : 'once';
 }
 
+function getProofStrictness(value: unknown): AlarmProofStrictness {
+  return value === 'standard' ? 'standard' : 'strict';
+}
+
 function normalizeSocialSettings(value: unknown): AlarmSocialSettings | undefined {
   if (!isRecord(value)) {
     return undefined;
@@ -156,6 +160,9 @@ function normalizeAlarm(rawAlarm: unknown): Alarm | null {
       getTrimmedString(legacyAlarm.contactName) ??
       'Checkpoint',
     useCaseType: normalizeUseCaseType(legacyAlarm.useCaseType),
+    placeObject: getTrimmedString(legacyAlarm.placeObject),
+    notes: getTrimmedString(legacyAlarm.notes),
+    proofStrictness: getProofStrictness(legacyAlarm.proofStrictness),
     expectedQrPayload,
     repeatSchedule: getRepeatSchedule(legacyAlarm.repeatSchedule),
     gracePeriodSeconds: getBoundedNumber(legacyAlarm.gracePeriodSeconds, 15, 3600, 120),
@@ -742,6 +749,32 @@ export async function resetAlarmStore() {
   return createDefaultStore();
 }
 
+export async function clearUnusedCheckpointPresets() {
+  const { store, runtimeStore } = await readLocalAlarmState();
+  const linkedPresetKeys = new Set(
+    store.alarms.map((alarm) => `${alarm.label.trim().toLowerCase()}::${alarm.expectedQrPayload}`)
+  );
+  const nextCheckpointPresets = store.checkpointPresets.filter((preset) =>
+    linkedPresetKeys.has(`${preset.label.trim().toLowerCase()}::${preset.expectedQrPayload}`)
+  );
+  const removedCount = store.checkpointPresets.length - nextCheckpointPresets.length;
+
+  if (removedCount > 0) {
+    await writeLocalAlarmState(
+      {
+        ...store,
+        checkpointPresets: nextCheckpointPresets,
+      },
+      runtimeStore
+    );
+  }
+
+  return {
+    removedCount,
+    remainingCount: nextCheckpointPresets.length,
+  };
+}
+
 export async function getAlarmById(id: string) {
   const alarms = await getAlarms();
   return alarms.find((alarm) => alarm.id === id) ?? null;
@@ -749,10 +782,6 @@ export async function getAlarmById(id: string) {
 
 export async function saveNewAlarm(alarm: Alarm) {
   const { store, runtimeStore } = await readLocalAlarmState();
-
-  if (store.lifetimeAlarmCreations >= FREE_ALARM_LIMIT) {
-    throw new Error('Checkpoint limit reached.');
-  }
 
   const nextStore: AlarmStore = {
     ...store,

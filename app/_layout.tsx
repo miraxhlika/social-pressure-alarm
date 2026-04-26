@@ -52,7 +52,10 @@ export default function RootLayout() {
           return;
         }
 
-        if (onboardingState.status === 'pending' && rootSegment !== 'onboarding') {
+        if (
+          (onboardingState.status === 'pending' || onboardingState.status === 'active') &&
+          rootSegment !== 'onboarding'
+        ) {
           router.replace('/onboarding');
         }
       } finally {
@@ -107,6 +110,18 @@ export default function RootLayout() {
           />
           <Stack.Screen
             name="missed"
+            options={{
+              animation: 'slide_from_right',
+            }}
+          />
+          <Stack.Screen
+            name="checkpoint/[id]"
+            options={{
+              animation: 'slide_from_right',
+            }}
+          />
+          <Stack.Screen
+            name="history"
             options={{
               animation: 'slide_from_right',
             }}

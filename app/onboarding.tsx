@@ -1,64 +1,112 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { useCameraPermissions } from 'expo-camera';
+import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
+import { ReactNode, useEffect, useRef, useState } from 'react';
+import {
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  useWindowDimensions,
+  View,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { AppButton } from '@/components/ui/app-button';
-import { AppCard } from '@/components/ui/app-card';
-import { AppScreen } from '@/components/ui/app-screen';
-import { PageHeader } from '@/components/ui/page-header';
-import { StatusPill } from '@/components/ui/status-pill';
-import { Fonts, Radius, Spacing, TextPresets, getAppColors } from '@/constants/theme';
-import { useColorScheme } from '@/hooks/use-color-scheme';
+import { Fonts, Radius, Spacing } from '@/constants/theme';
 import { trackAnalyticsEvent } from '@/lib/analytics';
-import { CHECKPOINT_TEMPLATES, formatGracePeriodLabel } from '@/lib/checkpoint-templates';
-import { markOnboardingActive, markOnboardingSkipped, readOnboardingState } from '@/lib/onboarding';
-import { UseCaseType } from '@/types/alarm';
+import {
+  ensureNotificationPermissionsAsync,
+  getNotificationPermissionState,
+  NotificationPermissionState,
+} from '@/lib/notifications';
+import { markOnboardingActive, markOnboardingCompleted, readOnboardingState } from '@/lib/onboarding';
 
-const DEMO_DURATION_SECONDS = 18;
-const TIER_ONE_TEMPLATES = CHECKPOINT_TEMPLATES;
+type OnboardingStep = 'welcome' | 'how' | 'permissions';
+type CameraPermissionState = 'granted' | 'denied' | 'undetermined';
 
-type OnboardingPhase = 'choose' | 'practice' | 'cleared';
+const STEPS: OnboardingStep[] = ['welcome', 'how', 'permissions'];
+const ONBOARDING_HERO_IMAGE = require('../assets/Onboarding_Screen.png');
 
-function getRepeatLabel(value: string) {
-  if (value === 'daily') {
-    return 'Daily';
-  }
+const palette = {
+  canvas: '#FBFAF7',
+  ink: '#151A25',
+  inkSoft: '#626B78',
+  muted: '#8B94A1',
+  navy: '#111827',
+  card: '#FFFFFF',
+  line: '#E8E2DA',
+  lineStrong: '#D8D0C7',
+  gold: '#C7A46D',
+  goldSoft: '#F4EDE2',
+  lilac: '#ECEBFF',
+  lilacInk: '#6973A6',
+  blueWash: '#F3F6FF',
+  green: '#3D9D70',
+  greenSoft: '#EBF7F0',
+  shadow: '#1F2937',
+};
 
-  if (value === 'weekdays') {
-    return 'Weekdays';
-  }
+const HOW_STEPS = [
+  {
+    icon: 'calendar-outline',
+    number: '1',
+    title: 'Schedule checkpoint',
+    description: "Set when you'll check in. We'll remind you.",
+  },
+  {
+    icon: 'location-outline',
+    number: '2',
+    title: 'Go to the real place/object',
+    description: 'Be at the right place or in front of the right thing.',
+  },
+  {
+    icon: 'qr-code-outline',
+    number: '3',
+    title: 'Scan the saved code',
+    description: 'Scan the QR code or barcode to clear the checkpoint.',
+  },
+] as const;
 
-  return 'Once';
+function getStepIndex(step: OnboardingStep) {
+  return STEPS.indexOf(step);
 }
 
 export default function OnboardingScreen() {
   const router = useRouter();
-  const colors = getAppColors(useColorScheme());
-  const [selectedUseCaseType, setSelectedUseCaseType] = useState<UseCaseType>('wake_up');
-  const [phase, setPhase] = useState<OnboardingPhase>('choose');
-  const [remainingSeconds, setRemainingSeconds] = useState(DEMO_DURATION_SECONDS);
-  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const { width } = useWindowDimensions();
+  const pagerRef = useRef<ScrollView | null>(null);
   const onboardingTrackedRef = useRef(false);
-  const selectedTemplate = useMemo(
-    () => TIER_ONE_TEMPLATES.find((template) => template.id === selectedUseCaseType) ?? TIER_ONE_TEMPLATES[0],
-    [selectedUseCaseType]
-  );
+  const [notificationState, setNotificationState] = useState<NotificationPermissionState>('undetermined');
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+  const cameraState: CameraPermissionState = cameraPermission?.granted
+    ? 'granted'
+    : cameraPermission?.canAskAgain === false
+      ? 'denied'
+      : 'undetermined';
 
   useEffect(() => {
     let isMounted = true;
 
     const beginOnboarding = async () => {
-      const onboardingState = await readOnboardingState();
+      const [onboardingState, permissionState] = await Promise.all([
+        readOnboardingState(),
+        getNotificationPermissionState().catch(() => 'undetermined' as NotificationPermissionState),
+      ]);
 
-      if (!isMounted || onboardingTrackedRef.current || onboardingState.status !== 'pending') {
+      if (!isMounted) {
+        return;
+      }
+
+      setNotificationState(permissionState);
+
+      if (onboardingTrackedRef.current || onboardingState.status === 'completed') {
         return;
       }
 
       onboardingTrackedRef.current = true;
       await markOnboardingActive();
-      await trackAnalyticsEvent('onboarding_started', {
-        source: 'app_launch',
-      });
+      await trackAnalyticsEvent('onboarding_started', { source: 'app_launch' });
     };
 
     void beginOnboarding();
@@ -68,329 +116,979 @@ export default function OnboardingScreen() {
     };
   }, []);
 
-  useEffect(() => {
-    if (phase !== 'practice' || startedAt === null) {
-      return;
-    }
+  const scrollToStep = (step: OnboardingStep) => {
+    pagerRef.current?.scrollTo({ animated: true, x: getStepIndex(step) * width });
+  };
 
-    const interval = setInterval(() => {
-      const secondsLeft = Math.max(0, DEMO_DURATION_SECONDS - Math.floor((Date.now() - startedAt) / 1000));
-      setRemainingSeconds(secondsLeft);
-
-      if (secondsLeft === 0) {
-        clearInterval(interval);
-      }
-    }, 250);
-
-    return () => clearInterval(interval);
-  }, [phase, startedAt]);
-
-  const handleSkip = async () => {
-    await markOnboardingSkipped();
+  const handleContinueLocally = async () => {
+    await markOnboardingCompleted();
+    await trackAnalyticsEvent('onboarding_completed', {
+      cameraPermission: cameraState,
+      mode: 'local',
+      notificationPermission: notificationState,
+    });
     router.replace('/');
   };
 
-  const handleUseCaseSelect = async (useCaseType: UseCaseType) => {
-    setSelectedUseCaseType(useCaseType);
-    await trackAnalyticsEvent('use_case_selected', {
-      source: 'onboarding',
-      useCaseType,
+  const handleOptionalSignIn = async () => {
+    await markOnboardingCompleted();
+    await trackAnalyticsEvent('onboarding_completed', {
+      cameraPermission: cameraState,
+      mode: 'optional_sign_in',
+      notificationPermission: notificationState,
     });
+    router.replace('/account');
   };
 
-  const handleStartPractice = async () => {
-    setPhase('practice');
-    setStartedAt(Date.now());
-    setRemainingSeconds(DEMO_DURATION_SECONDS);
-
-    await trackAnalyticsEvent('demo_checkpoint_created', {
-      useCaseType: selectedTemplate.id,
-    });
-  };
-
-  const handleClearPractice = async () => {
-    const timeToClearSeconds =
-      startedAt === null ? undefined : Math.max(1, Math.round((Date.now() - startedAt) / 1000));
-
-    await trackAnalyticsEvent('demo_checkpoint_cleared', {
-      useCaseType: selectedTemplate.id,
-      timeToClearSeconds,
-    });
-
-    setPhase('cleared');
-  };
-
-  const handleBuildRealCheckpoint = () => {
-    router.push({
-      pathname: '/create',
-      params: {
-        onboardingMode: 'convert_demo',
-        prefillUseCaseType: selectedTemplate.id,
-        prefillLabel: selectedTemplate.defaultLabel,
-        prefillRepeatSchedule: selectedTemplate.repeatSchedule,
-        prefillGracePeriodSeconds: String(selectedTemplate.gracePeriodSeconds),
-      },
-    });
+  const handleRequestNotifications = async () => {
+    const granted = await ensureNotificationPermissionsAsync().catch(() => false);
+    const nextState = granted
+      ? await getNotificationPermissionState().catch(() => 'granted' as NotificationPermissionState)
+      : await getNotificationPermissionState().catch(() => 'denied' as NotificationPermissionState);
+    setNotificationState(nextState);
   };
 
   return (
-    <AppScreen>
-      <PageHeader
-        action={<AppButton label="Skip" onPress={() => void handleSkip()} size="compact" variant="ghost" />}
-        badgeLabel="First run"
-        badgeTone="primary"
-        eyebrow="Start here"
-        title="Build follow-through before you need it."
-        description="Pick one routine, feel the live checkpoint loop in practice, then save the real recurring version."
-      />
-
-      <AppCard elevated tone="primary" variant="hero" style={styles.heroCard}>
-        <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>What this app actually does</Text>
-        <Text style={[styles.heroTitle, { color: colors.text }]}>It protects a real commitment with physical proof.</Text>
-        <Text style={[TextPresets.body, { color: colors.textSoft }]}>
-          When the checkpoint goes live, you have a short window to reach the saved place and scan the exact QR code there.
-        </Text>
-        <View style={styles.heroPillRow}>
-          <StatusPill label="No account required" tone="success" />
-          <StatusPill label="Practice first" tone="primary" />
-          <StatusPill label="Real schedule next" tone="default" />
-        </View>
-      </AppCard>
-
-      <AppCard elevated tone="canvas" style={styles.sectionCard}>
-        <View style={styles.sectionHeader}>
-          <View style={styles.sectionCopy}>
-            <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Step 1</Text>
-            <Text style={[styles.sectionTitle, { color: colors.text }]}>Choose the routine you want to protect</Text>
-            <Text style={[TextPresets.body, { color: colors.textSoft }]}>
-              This decides the default cadence and coaching in the next step.
-            </Text>
-          </View>
-          <StatusPill label={selectedTemplate.title} tone="primary" />
-        </View>
-
-        <View style={styles.templateGrid}>
-          {TIER_ONE_TEMPLATES.map((template) => {
-            const isSelected = template.id === selectedUseCaseType;
-
-            return (
-              <Pressable
-                key={template.id}
-                accessibilityLabel={`Choose ${template.title}`}
-                accessibilityRole="button"
-                accessibilityState={{ selected: isSelected }}
-                onPress={() => {
-                  void handleUseCaseSelect(template.id);
-                }}
-                style={[
-                  styles.templateCard,
-                  {
-                    backgroundColor: isSelected ? colors.primarySurface : colors.elevated,
-                    borderColor: isSelected ? colors.primary : colors.line,
-                  },
-                ]}>
-                <View style={styles.templateHeader}>
-                  <Text style={[styles.templateTitle, { color: isSelected ? colors.primary : colors.text }]}>
-                    {template.id === 'custom' ? 'Other' : template.title}
-                  </Text>
-                  <StatusPill label={getRepeatLabel(template.repeatSchedule)} tone={isSelected ? 'primary' : 'default'} />
-                </View>
-                <Text style={[TextPresets.body, { color: colors.textSoft }]}>{template.description}</Text>
-                <Text style={[styles.templateMeta, { color: colors.muted }]}>
-                  {template.defaultLabel ? `Starts at ${template.defaultLabel}` : 'Starts with your own label'} ·{' '}
-                  {formatGracePeriodLabel(template.gracePeriodSeconds)}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </View>
-      </AppCard>
-
-      {phase === 'choose' ? (
-        <AppCard elevated tone="canvas" style={styles.sectionCard}>
-          <View style={styles.sectionHeader}>
-            <View style={styles.sectionCopy}>
-              <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Step 2</Text>
-              <Text style={[styles.sectionTitle, { color: colors.text }]}>Run a short practice checkpoint</Text>
-              <Text style={[TextPresets.body, { color: colors.textSoft }]}>
-                This walkthrough is a safe rehearsal. It does not schedule notifications or require a real QR code yet.
-              </Text>
-            </View>
-            <StatusPill label={`${DEMO_DURATION_SECONDS}s practice`} tone="warning" />
-          </View>
-
-          <View style={[styles.practicePlan, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
-            <Text style={[TextPresets.label, { color: colors.text }]}>Practice plan</Text>
-            <Text style={[styles.practiceTitle, { color: colors.text }]}>
-              {selectedTemplate.title} at a saved checkpoint like {selectedTemplate.defaultLabel || 'your own spot'}
-            </Text>
-            <Text style={[TextPresets.body, { color: colors.textSoft }]}>{selectedTemplate.coaching}</Text>
-          </View>
-
-          <View style={styles.buttonStack}>
-            <AppButton label="Start practice run" onPress={() => void handleStartPractice()} />
-            <AppButton label="Skip practice and set up the real one" onPress={handleBuildRealCheckpoint} variant="secondary" />
-          </View>
-        </AppCard>
-      ) : null}
-
-      {phase === 'practice' ? (
-        <AppCard elevated tone="primary" variant="hero" style={styles.practiceStage}>
-          <View style={styles.practiceStageHeader}>
-            <View style={styles.sectionCopy}>
-              <Text style={[TextPresets.eyebrow, { color: colors.warning }]}>Practice run live</Text>
-              <Text style={[styles.sectionTitle, { color: colors.text }]}>Imagine the real QR is at {selectedTemplate.defaultLabel || 'your checkpoint'}.</Text>
-              <Text style={[TextPresets.body, { color: colors.textSoft }]}>
-                In the real product, this is when you would physically move and scan. Here, clear the practice run to learn the rhythm.
-              </Text>
-            </View>
-            <StatusPill label="Practice only" tone="warning" />
-          </View>
-
-          <View style={styles.practiceCountdownWrap}>
-            <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>Time left</Text>
-            <Text style={[styles.practiceCountdown, { color: colors.text }]}>{remainingSeconds}s</Text>
-            <Text style={[styles.practiceCountdownCopy, { color: colors.textSoft }]}>
-              Short window, exact place, no ambiguity.
-            </Text>
-          </View>
-
-          <View style={styles.buttonStack}>
-            <AppButton label="Practice clear" onPress={() => void handleClearPractice()} />
-            <AppButton label="Restart practice" onPress={() => void handleStartPractice()} variant="secondary" />
-          </View>
-        </AppCard>
-      ) : null}
-
-      {phase === 'cleared' ? (
-        <AppCard elevated tone="success" variant="hero" style={styles.practiceStage}>
-          <View style={styles.practiceStageHeader}>
-            <View style={styles.sectionCopy}>
-              <Text style={[TextPresets.eyebrow, { color: colors.success }]}>Practice cleared</Text>
-              <Text style={[styles.sectionTitle, { color: colors.text }]}>Now turn that into a real recurring checkpoint.</Text>
-              <Text style={[TextPresets.body, { color: colors.textSoft }]}>
-                The next screen will already carry this use case forward. You only need to set the real time and scan the real QR.
-              </Text>
-            </View>
-            <StatusPill label="Ready for real setup" tone="success" />
-          </View>
-
-          <View style={[styles.practicePlan, { backgroundColor: colors.card, borderColor: colors.line }]}>
-            <Text style={[TextPresets.label, { color: colors.text }]}>What will be prefilled</Text>
-            <Text style={[styles.practiceTitle, { color: colors.text }]}>
-              {selectedTemplate.title} · {getRepeatLabel(selectedTemplate.repeatSchedule)} ·{' '}
-              {formatGracePeriodLabel(selectedTemplate.gracePeriodSeconds)}
-            </Text>
-            <Text style={[TextPresets.body, { color: colors.textSoft }]}>
-              You can still change the schedule, checkpoint name, and reach window before saving.
-            </Text>
-          </View>
-
-          <View style={styles.buttonStack}>
-            <AppButton label="Build the real checkpoint" onPress={handleBuildRealCheckpoint} />
-            <AppButton label="Explore the app first" onPress={() => void handleSkip()} variant="secondary" />
-          </View>
-        </AppCard>
-      ) : null}
-    </AppScreen>
+    <SafeAreaView style={styles.safeArea}>
+      <ScrollView
+        bounces={false}
+        contentContainerStyle={styles.pagerContent}
+        horizontal
+        keyboardShouldPersistTaps="handled"
+        pagingEnabled
+        ref={pagerRef}
+        showsHorizontalScrollIndicator={false}>
+        <WelcomeStep width={width} onNext={() => scrollToStep('how')} />
+        <HowItWorksStep width={width} onSelectStep={scrollToStep} />
+        <PermissionsStep
+          cameraState={cameraState}
+          notificationState={notificationState}
+          onContinueLocally={() => void handleContinueLocally()}
+          onOptionalSignIn={() => void handleOptionalSignIn()}
+          onRequestCamera={() => void requestCameraPermission()}
+          onRequestNotifications={() => void handleRequestNotifications()}
+          width={width}
+        />
+      </ScrollView>
+    </SafeAreaView>
   );
 }
 
+function WelcomeStep({ onNext, width }: { onNext: () => void; width: number }) {
+  return (
+    <View style={[styles.screen, { width }]}>
+      <Header
+        title={
+          <>
+            Don&apos;t dismiss it.{'\n'}Prove it.
+          </>
+        }
+        description="Checkpoints only clear when you scan the QR code or barcode you've saved."
+      />
+
+      <View style={styles.heroArt}>
+        <Image
+          accessibilityLabel="Illustration of a QR code, barcode, checkpoint pin, and shield on a winding path"
+          contentFit="cover"
+          contentPosition="center"
+          source={ONBOARDING_HERO_IMAGE}
+          style={styles.heroImage}
+        />
+      </View>
+
+      <View style={styles.actions}>
+        <OnboardingButton icon="chevron-forward" label="Get Started" onPress={onNext} />
+        <OnboardingButton label="See how it works" onPress={onNext} variant="secondary" />
+      </View>
+    </View>
+  );
+}
+
+function HowItWorksStep({
+  onSelectStep,
+  width,
+}: {
+  onSelectStep: (step: OnboardingStep) => void;
+  width: number;
+}) {
+  return (
+    <View style={[styles.screen, styles.howScreen, { width }]}>
+      <Header title="How it works" description="Three simple steps to prove you were really there." />
+
+      <View style={styles.howList}>
+        {HOW_STEPS.map((step) => (
+          <View key={step.number} style={styles.howRow}>
+            <View style={styles.howIcon}>
+              {step.number === '3' ? <StepProofIcon /> : <Ionicons color={palette.navy} name={step.icon} size={43} />}
+            </View>
+            <View style={styles.rowCopy}>
+              <View style={styles.titleRow}>
+                <View style={styles.numberBadge}>
+                  <Text style={styles.numberText}>{step.number}</Text>
+                </View>
+                <Text style={styles.rowTitle}>{step.title}</Text>
+              </View>
+              <Text style={styles.rowDescription}>{step.description}</Text>
+            </View>
+          </View>
+        ))}
+      </View>
+
+      <View style={styles.worksWithCard}>
+        <View>
+          <Text style={styles.worksLabel}>Works with</Text>
+          <Text style={styles.worksBody}>QR codes and barcodes</Text>
+        </View>
+        <View style={styles.codeSamples}>
+          <MiniQr />
+          <MiniBarcode />
+        </View>
+      </View>
+
+      <PaginationDots onSelectStep={onSelectStep} />
+    </View>
+  );
+}
+
+function PermissionsStep({
+  cameraState,
+  notificationState,
+  onContinueLocally,
+  onOptionalSignIn,
+  onRequestCamera,
+  onRequestNotifications,
+  width,
+}: {
+  cameraState: CameraPermissionState;
+  notificationState: NotificationPermissionState;
+  onContinueLocally: () => void;
+  onOptionalSignIn: () => void;
+  onRequestCamera: () => void;
+  onRequestNotifications: () => void;
+  width: number;
+}) {
+  const isNotificationEnabled = notificationState === 'granted' || notificationState === 'provisional';
+  const isCameraEnabled = cameraState === 'granted';
+  const canCompleteOnboarding = isNotificationEnabled && isCameraEnabled;
+  const notificationBadge = isNotificationEnabled ? 'Enabled' : notificationState === 'denied' ? 'Denied' : 'Required';
+  const cameraBadge = isCameraEnabled ? 'Enabled' : cameraState === 'denied' ? 'Denied' : 'Required';
+  const requirementMessage = canCompleteOnboarding
+    ? "You're ready. Sync is still optional."
+    : 'Notifications and camera access are required to run checkpoints on this device.';
+
+  return (
+    <View style={[styles.screen, { width }]}>
+      <Header
+        title={
+          <>
+            Permissions &amp;{'\n'}Local-First
+          </>
+        }
+        description="A few quick settings so you can start without an account."
+      />
+
+      <View style={styles.permissionList}>
+        <PermissionRow
+          badge={notificationBadge}
+          description={
+            notificationState === 'denied'
+              ? 'Notifications are required for checkpoint reminders. Enable them in system settings to continue.'
+              : isNotificationEnabled
+                ? 'Checkpoint reminders are enabled.'
+                : 'Required so checkpoints can remind you at the scheduled time.'
+          }
+          icon="notifications-outline"
+          onPress={isNotificationEnabled ? undefined : onRequestNotifications}
+          title="Notifications"
+        />
+        <PermissionRow
+          badge={cameraBadge}
+          description={
+            cameraState === 'denied'
+              ? 'Camera access is required for scans. Enable it in system settings to continue.'
+              : isCameraEnabled
+                ? 'Camera access is enabled for scans.'
+                : 'Required to scan QR codes and barcodes.'
+          }
+          icon="camera-outline"
+          onPress={isCameraEnabled ? undefined : onRequestCamera}
+          title="Camera Access"
+        />
+        <View style={styles.localCard}>
+          <View style={styles.permissionIcon}>
+            <Ionicons color={palette.lilacInk} name="lock-closed" size={29} />
+          </View>
+          <View style={styles.rowCopy}>
+            <Text style={styles.rowTitle}>Local-first by default</Text>
+            <Text style={styles.rowDescription}>Your data stays on your device. You can sync later if you choose.</Text>
+          </View>
+        </View>
+      </View>
+
+      <View style={styles.actions}>
+        <OnboardingButton
+          disabled={!canCompleteOnboarding}
+          icon="chevron-forward"
+          label="Continue Locally"
+          onPress={onContinueLocally}
+        />
+        <OnboardingButton
+          disabled={!canCompleteOnboarding}
+          icon="person"
+          iconPosition="left"
+          label="Optional Sign In"
+          onPress={onOptionalSignIn}
+          variant="secondary"
+        />
+        <View style={[styles.controlNote, !canCompleteOnboarding ? styles.requirementNote : null]}>
+          <Ionicons
+            color={canCompleteOnboarding ? palette.muted : palette.gold}
+            name={canCompleteOnboarding ? 'shield-checkmark-outline' : 'alert-circle-outline'}
+            size={18}
+          />
+          <Text style={[styles.controlText, !canCompleteOnboarding ? styles.requirementText : null]}>{requirementMessage}</Text>
+        </View>
+      </View>
+    </View>
+  );
+}
+
+function Header({
+  description,
+  title,
+}: {
+  description: string;
+  title: ReactNode;
+}) {
+  return (
+    <View style={styles.header}>
+      <Text style={styles.title}>{title}</Text>
+      <View style={styles.rule} />
+      <Text style={styles.subtitle}>{description}</Text>
+    </View>
+  );
+}
+
+function PermissionRow({
+  badge,
+  description,
+  icon,
+  onPress,
+  title,
+}: {
+  badge: string;
+  description: string;
+  icon: keyof typeof Ionicons.glyphMap;
+  onPress?: () => void;
+  title: string;
+}) {
+  return (
+    <Pressable
+      accessibilityRole={onPress ? 'button' : undefined}
+      disabled={!onPress}
+      onPress={onPress}
+      style={({ pressed }) => [styles.permissionRow, pressed ? styles.pressed : null]}>
+      <View style={styles.permissionIcon}>
+        <Ionicons color={palette.lilacInk} name={icon} size={29} />
+      </View>
+      <View style={styles.rowCopy}>
+        <View style={styles.permissionTitleRow}>
+          <Text style={styles.rowTitle}>{title}</Text>
+          <View style={styles.badge}>
+            <Text style={styles.badgeText}>{badge}</Text>
+          </View>
+        </View>
+        <Text style={styles.rowDescription}>{description}</Text>
+      </View>
+      <Ionicons color={palette.muted} name="chevron-forward" size={18} />
+    </Pressable>
+  );
+}
+
+function OnboardingButton({
+  disabled = false,
+  icon,
+  iconPosition = 'right',
+  label,
+  onPress,
+  variant = 'primary',
+}: {
+  disabled?: boolean;
+  icon?: keyof typeof Ionicons.glyphMap;
+  iconPosition?: 'left' | 'right';
+  label: string;
+  onPress: () => void;
+  variant?: 'primary' | 'secondary';
+}) {
+  const isPrimary = variant === 'primary';
+
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityState={{ disabled }}
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.button,
+        isPrimary ? styles.primaryButton : styles.secondaryButton,
+        disabled ? styles.disabledButton : null,
+        pressed && !disabled ? styles.pressed : null,
+      ]}>
+      {icon && iconPosition === 'left' ? (
+        <Ionicons color={isPrimary ? palette.card : palette.navy} name={icon} size={18} />
+      ) : null}
+      <Text style={[styles.buttonText, isPrimary ? styles.primaryText : styles.secondaryText]}>{label}</Text>
+      {icon && iconPosition === 'right' ? (
+        <Ionicons color={isPrimary ? palette.card : palette.navy} name={icon} size={18} />
+      ) : null}
+    </Pressable>
+  );
+}
+
+function PaginationDots({
+  onSelectStep,
+}: {
+  onSelectStep: (step: OnboardingStep) => void;
+}) {
+  return (
+    <View accessibilityLabel="How it works detail 1 of 3" style={styles.dots}>
+      {STEPS.map((step, index) => (
+        <Pressable
+          accessibilityRole="button"
+          hitSlop={10}
+          key={step}
+          onPress={() => onSelectStep(step)}
+          style={[styles.dot, index === 0 ? styles.dotActive : null]}
+        />
+      ))}
+    </View>
+  );
+}
+
+function StepProofIcon() {
+  return (
+    <View style={styles.stepProofIcon}>
+      <QrCodeGlyph variant="step" />
+      <BarcodeGlyph variant="step" />
+    </View>
+  );
+}
+
+function MiniQr() {
+  return (
+    <View style={styles.miniQr}>
+      <QrCodeGlyph variant="mini" />
+    </View>
+  );
+}
+
+function MiniBarcode() {
+  return (
+    <View style={styles.miniBarcode}>
+      <BarcodeGlyph variant="mini" />
+    </View>
+  );
+}
+
+function QrCodeGlyph({ variant }: { variant: 'mini' | 'step' }) {
+  const cellStyle = variant === 'step' ? styles.qrCellStep : styles.qrCellMini;
+
+  return (
+    <View style={[styles.qrCodeGlyph, variant === 'step' ? styles.qrCodeStep : styles.qrCodeMini]}>
+      {Array.from({ length: 49 }).map((_, index) => {
+        const row = Math.floor(index / 7);
+        const col = index % 7;
+
+        return <View key={index} style={[cellStyle, isQrCellOn(row, col) ? styles.qrBitOn : null]} />;
+      })}
+    </View>
+  );
+}
+
+function BarcodeGlyph({ variant }: { variant: 'mini' | 'step' }) {
+  const bars = variant === 'step' ? STEP_BARCODE_BARS : MINI_BARCODE_BARS;
+
+  return (
+    <View style={[styles.barcodeGlyph, variant === 'step' ? styles.barcodeStep : styles.barcodeMini]}>
+      {bars.map((bar, index) => (
+        <View
+          key={`${bar.height}-${bar.width}-${index}`}
+          style={[styles.barcodeGlyphBar, { height: bar.height, width: bar.width }]}
+        />
+      ))}
+    </View>
+  );
+}
+
+function isQrCellOn(row: number, col: number) {
+  const inTopLeft = row <= 2 && col <= 2;
+  const inTopRight = row <= 2 && col >= 4;
+  const inBottomLeft = row >= 4 && col <= 2;
+  const inFinder = inTopLeft || inTopRight || inBottomLeft;
+
+  if (inFinder) {
+    return !((row === 1 && col === 1) || (row === 1 && col === 5) || (row === 5 && col === 1));
+  }
+
+  return QR_DETAIL_CELLS.some(([detailRow, detailCol]) => detailRow === row && detailCol === col);
+}
+
+const QR_DETAIL_CELLS = [
+  [0, 3],
+  [1, 3],
+  [2, 3],
+  [3, 0],
+  [3, 2],
+  [3, 4],
+  [3, 6],
+  [4, 3],
+  [4, 4],
+  [5, 3],
+  [5, 5],
+  [6, 3],
+  [6, 5],
+] as const;
+const STEP_BARCODE_BARS = [
+  { height: 15, width: 2 },
+  { height: 9, width: 1 },
+  { height: 16, width: 3 },
+  { height: 11, width: 1 },
+  { height: 17, width: 2 },
+  { height: 13, width: 3 },
+  { height: 8, width: 1 },
+  { height: 16, width: 2 },
+  { height: 10, width: 1 },
+] as const;
+const MINI_BARCODE_BARS = [
+  { height: 23, width: 2 },
+  { height: 13, width: 1 },
+  { height: 25, width: 3 },
+  { height: 17, width: 1 },
+  { height: 27, width: 2 },
+  { height: 20, width: 3 },
+  { height: 12, width: 1 },
+  { height: 25, width: 2 },
+  { height: 15, width: 1 },
+] as const;
+
 const styles = StyleSheet.create({
-  heroCard: {
-    gap: Spacing.md,
+  safeArea: {
+    backgroundColor: palette.canvas,
+    flex: 1,
   },
-  heroTitle: {
-    fontFamily: Fonts.rounded,
+  pagerContent: {
+    flexGrow: 1,
+  },
+  screen: {
+    flex: 1,
+    justifyContent: 'space-between',
+    paddingBottom: Spacing.lg,
+    paddingHorizontal: 26,
+    paddingTop: Spacing.xl,
+  },
+  howScreen: {
+    paddingBottom: Spacing.xxl,
+  },
+  header: {
+    alignItems: 'center',
+    gap: Spacing.sm,
+    paddingTop: Spacing.md,
+  },
+  title: {
+    color: palette.ink,
+    fontFamily: Fonts.serif,
     fontSize: 30,
     fontWeight: '800',
-    letterSpacing: -0.6,
-    lineHeight: 34,
+    letterSpacing: -0.7,
+    lineHeight: 36,
+    textAlign: 'center',
   },
-  heroPillRow: {
+  rule: {
+    backgroundColor: palette.gold,
+    borderRadius: Radius.pill,
+    height: 2,
+    width: 45,
+  },
+  subtitle: {
+    color: palette.inkSoft,
+    fontFamily: Fonts.sans,
+    fontSize: 15,
+    fontWeight: '500',
+    lineHeight: 22,
+    maxWidth: 260,
+    textAlign: 'center',
+  },
+  heroArt: {
+    alignItems: 'center',
+    backgroundColor: palette.canvas,
+    flex: 1,
+    justifyContent: 'center',
+    minHeight: 378,
+    marginHorizontal: -26,
+    overflow: 'hidden',
+  },
+  heroImage: {
+    height: '112%',
+    width: '116%',
+  },
+  heroGlow: {
+    backgroundColor: 'rgba(244, 237, 226, 0.82)',
+    borderRadius: 180,
+    height: 310,
+    position: 'absolute',
+    top: 58,
+    width: 340,
+  },
+  skyline: {
+    alignItems: 'flex-end',
+    bottom: 143,
+    flexDirection: 'row',
+    gap: 7,
+    justifyContent: 'center',
+    position: 'absolute',
+  },
+  tower: {
+    backgroundColor: '#B8BBC9',
+    borderTopLeftRadius: 7,
+    borderTopRightRadius: 7,
+    width: 14,
+  },
+  roadOuter: {
+    backgroundColor: '#ECE7E1',
+    borderColor: '#DFD7CE',
+    borderRadius: 130,
+    borderWidth: 1,
+    height: 154,
+    position: 'absolute',
+    right: -42,
+    top: 166,
+    transform: [{ rotate: '-17deg' }],
+    width: 326,
+  },
+  roadInner: {
+    backgroundColor: palette.canvas,
+    borderRadius: 110,
+    height: 102,
+    position: 'absolute',
+    right: -4,
+    top: 188,
+    transform: [{ rotate: '-17deg' }],
+    width: 258,
+  },
+  foregroundHill: {
+    backgroundColor: '#F2EEE8',
+    borderColor: '#E6DED5',
+    borderRadius: 160,
+    borderWidth: 1,
+    bottom: 18,
+    height: 145,
+    left: -84,
+    position: 'absolute',
+    transform: [{ rotate: '8deg' }],
+    width: 338,
+  },
+  leftPlant: {
+    bottom: 70,
+    flexDirection: 'row',
+    gap: 3,
+    left: 3,
+    position: 'absolute',
+  },
+  rightPlant: {
+    bottom: 86,
+    flexDirection: 'row',
+    gap: 3,
+    position: 'absolute',
+    right: 12,
+    transform: [{ scaleX: -1 }],
+  },
+  blade: {
+    backgroundColor: '#A3A997',
+    borderRadius: Radius.pill,
+    width: 8,
+  },
+  bladeTall: {
+    height: 48,
+    transform: [{ rotate: '5deg' }],
+  },
+  bladeLeft: {
+    height: 38,
+    marginTop: 11,
+    transform: [{ rotate: '-31deg' }],
+  },
+  bladeRight: {
+    height: 32,
+    marginTop: 17,
+    transform: [{ rotate: '31deg' }],
+  },
+  pinShadow: {
+    backgroundColor: 'rgba(34, 42, 54, 0.12)',
+    borderRadius: Radius.pill,
+    height: 14,
+    position: 'absolute',
+    top: 174,
+    width: 58,
+  },
+  pin: {
+    alignItems: 'center',
+    backgroundColor: palette.gold,
+    borderColor: palette.card,
+    borderRadius: 32,
+    borderWidth: 3,
+    height: 68,
+    justifyContent: 'center',
+    position: 'absolute',
+    top: 92,
+    transform: [{ rotate: '45deg' }],
+    width: 68,
+  },
+  pinInner: {
+    alignItems: 'center',
+    backgroundColor: '#D8BC89',
+    borderRadius: Radius.pill,
+    height: 44,
+    justifyContent: 'center',
+    transform: [{ rotate: '-45deg' }],
+    width: 44,
+  },
+  codeCard: {
+    alignItems: 'center',
+    backgroundColor: palette.card,
+    borderColor: palette.line,
+    borderRadius: 12,
+    borderWidth: 1,
+    bottom: 47,
+    gap: Spacing.sm,
+    padding: 14,
+    position: 'absolute',
+    shadowColor: palette.shadow,
+    shadowOffset: { height: 16, width: 0 },
+    shadowOpacity: 0.12,
+    shadowRadius: 20,
+    left: 71,
+    transform: [{ rotate: '-11deg' }],
+    width: 132,
+  },
+  qrGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: Spacing.sm,
+    gap: 3,
+    width: 82,
   },
-  sectionCard: {
-    gap: Spacing.lg,
+  qrBit: {
+    backgroundColor: '#EEF0F3',
+    height: 13,
+    width: 13,
   },
-  sectionHeader: {
+  qrBitOn: {
+    backgroundColor: palette.navy,
+  },
+  barcode: {
+    alignItems: 'flex-end',
     flexDirection: 'row',
+    gap: 3,
+    height: 25,
+  },
+  bar: {
+    backgroundColor: palette.navy,
+    borderRadius: 1,
+    width: 3,
+  },
+  proofShield: {
+    alignItems: 'center',
+    backgroundColor: palette.navy,
+    borderColor: palette.card,
+    borderRadius: Radius.pill,
+    borderWidth: 3,
+    bottom: 72,
+    height: 49,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: 76,
+    width: 49,
+  },
+  actions: {
     gap: Spacing.md,
-    justifyContent: 'space-between',
   },
-  sectionCopy: {
-    flex: 1,
-    gap: Spacing.xs,
-  },
-  sectionTitle: {
-    fontFamily: Fonts.rounded,
-    fontSize: 23,
-    fontWeight: '800',
-    lineHeight: 29,
-  },
-  templateGrid: {
-    gap: Spacing.md,
-  },
-  templateCard: {
-    borderRadius: Radius.lg,
+  button: {
+    alignItems: 'center',
+    borderRadius: 9,
     borderWidth: 1,
+    flexDirection: 'row',
     gap: Spacing.sm,
+    justifyContent: 'center',
+    minHeight: 55,
+    paddingHorizontal: Spacing.lg,
+  },
+  primaryButton: {
+    backgroundColor: palette.navy,
+    borderColor: palette.navy,
+  },
+  secondaryButton: {
+    backgroundColor: palette.card,
+    borderColor: palette.lineStrong,
+  },
+  pressed: {
+    opacity: 0.86,
+    transform: [{ scale: 0.995 }],
+  },
+  disabledButton: {
+    opacity: 0.46,
+  },
+  buttonText: {
+    fontFamily: Fonts.rounded,
+    fontSize: 15,
+    fontWeight: '800',
+    lineHeight: 20,
+  },
+  primaryText: {
+    color: palette.card,
+  },
+  secondaryText: {
+    color: palette.navy,
+  },
+  howList: {
+    gap: Spacing.md,
+  },
+  howRow: {
+    alignItems: 'center',
+    backgroundColor: palette.card,
+    borderColor: palette.line,
+    borderRadius: 15,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: Spacing.lg,
+    minHeight: 118,
     padding: Spacing.lg,
   },
-  templateHeader: {
-    alignItems: 'flex-start',
+  howIcon: {
+    alignItems: 'center',
+    backgroundColor: '#F4EFE8',
+    borderRadius: 17,
+    height: 82,
+    justifyContent: 'center',
+    width: 82,
+  },
+  stepProofIcon: {
+    alignItems: 'center',
+    gap: 4,
+    justifyContent: 'center',
+  },
+  rowCopy: {
+    flex: 1,
+    gap: 6,
+    minWidth: 0,
+  },
+  titleRow: {
+    alignItems: 'center',
     flexDirection: 'row',
-    gap: Spacing.md,
-    justifyContent: 'space-between',
+    gap: Spacing.sm,
   },
-  templateTitle: {
-    ...TextPresets.label,
-    fontSize: 15,
+  numberBadge: {
+    alignItems: 'center',
+    backgroundColor: palette.navy,
+    borderRadius: Radius.pill,
+    height: 24,
+    justifyContent: 'center',
+    width: 24,
   },
-  templateMeta: {
-    ...TextPresets.body,
+  numberText: {
+    color: palette.card,
+    fontFamily: Fonts.rounded,
     fontSize: 13,
+    fontWeight: '800',
+  },
+  rowTitle: {
+    color: palette.ink,
+    flexShrink: 1,
+    fontFamily: Fonts.rounded,
+    fontSize: 15,
+    fontWeight: '800',
+    lineHeight: 20,
+  },
+  rowDescription: {
+    color: palette.inkSoft,
+    flexShrink: 1,
+    fontFamily: Fonts.sans,
+    fontSize: 13,
+    fontWeight: '600',
     lineHeight: 18,
   },
-  practicePlan: {
-    borderRadius: Radius.lg,
+  worksWithCard: {
+    alignItems: 'center',
+    backgroundColor: '#F6F4F1',
+    borderColor: palette.line,
+    borderRadius: 14,
     borderWidth: 1,
-    gap: Spacing.sm,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     padding: Spacing.lg,
   },
-  practiceTitle: {
+  worksLabel: {
+    color: palette.ink,
     fontFamily: Fonts.rounded,
-    fontSize: 18,
-    fontWeight: '700',
-    lineHeight: 24,
+    fontSize: 13,
+    fontWeight: '800',
+    lineHeight: 18,
   },
-  buttonStack: {
+  worksBody: {
+    color: palette.inkSoft,
+    fontFamily: Fonts.sans,
+    fontSize: 13,
+    fontWeight: '600',
+    lineHeight: 18,
+  },
+  codeSamples: {
+    alignItems: 'center',
+    flexDirection: 'row',
     gap: Spacing.sm,
   },
-  practiceStage: {
-    gap: Spacing.lg,
+  miniQr: {
+    alignItems: 'center',
+    backgroundColor: palette.card,
+    borderColor: palette.line,
+    borderRadius: 8,
+    borderWidth: 1,
+    height: 44,
+    justifyContent: 'center',
+    padding: 6,
+    width: 44,
   },
-  practiceStageHeader: {
+  miniBarcode: {
+    alignItems: 'center',
+    backgroundColor: palette.card,
+    borderColor: palette.line,
+    borderRadius: 8,
+    borderWidth: 1,
+    height: 44,
+    justifyContent: 'center',
+    paddingHorizontal: 6,
+  },
+  qrCodeGlyph: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  qrCodeStep: {
+    height: 40,
+    width: 40,
+  },
+  qrCodeMini: {
+    height: 28,
+    width: 28,
+  },
+  qrCellStep: {
+    backgroundColor: 'transparent',
+    height: 5.7,
+    width: 5.7,
+  },
+  qrCellMini: {
+    backgroundColor: palette.card,
+    height: 4,
+    width: 4,
+  },
+  barcodeGlyph: {
+    alignItems: 'flex-end',
+    flexDirection: 'row',
+    gap: 2.5,
+  },
+  barcodeStep: {
+    height: 20,
+  },
+  barcodeMini: {
+    height: 28,
+  },
+  barcodeGlyphBar: {
+    backgroundColor: palette.navy,
+    borderRadius: 1,
+  },
+  dots: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 7,
+    justifyContent: 'center',
+  },
+  dot: {
+    backgroundColor: '#D8D9DD',
+    borderRadius: Radius.pill,
+    height: 9,
+    width: 9,
+  },
+  dotActive: {
+    backgroundColor: '#263A5E',
+  },
+  permissionList: {
     gap: Spacing.md,
   },
-  practiceCountdownWrap: {
+  permissionRow: {
     alignItems: 'center',
-    borderRadius: Radius.xl,
-    gap: Spacing.xs,
-    paddingHorizontal: Spacing.lg,
-    paddingVertical: Spacing.xl,
+    backgroundColor: palette.card,
+    borderColor: palette.line,
+    borderRadius: 15,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: Spacing.md,
+    minHeight: 87,
+    padding: Spacing.md,
   },
-  practiceCountdown: {
+  permissionIcon: {
+    alignItems: 'center',
+    backgroundColor: palette.lilac,
+    borderRadius: 13,
+    height: 56,
+    justifyContent: 'center',
+    width: 56,
+  },
+  permissionTitleRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    justifyContent: 'space-between',
+  },
+  badge: {
+    backgroundColor: palette.greenSoft,
+    borderRadius: Radius.pill,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  badgeText: {
+    color: palette.green,
     fontFamily: Fonts.rounded,
-    fontSize: 56,
+    fontSize: 10,
     fontWeight: '800',
-    letterSpacing: -1.6,
-    lineHeight: 60,
+    lineHeight: 13,
   },
-  practiceCountdownCopy: {
-    ...TextPresets.body,
+  localCard: {
+    alignItems: 'center',
+    backgroundColor: palette.blueWash,
+    borderColor: '#E4E8F5',
+    borderRadius: 15,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: Spacing.md,
+    minHeight: 87,
+    padding: Spacing.md,
+  },
+  controlNote: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    justifyContent: 'center',
+    paddingTop: Spacing.xs,
+  },
+  requirementNote: {
+    alignItems: 'flex-start',
+  },
+  controlText: {
+    color: palette.inkSoft,
+    flexShrink: 1,
+    fontFamily: Fonts.sans,
+    fontSize: 12,
+    fontWeight: '600',
+    lineHeight: 16,
     textAlign: 'center',
+  },
+  requirementText: {
+    color: palette.ink,
+    textAlign: 'left',
   },
 });

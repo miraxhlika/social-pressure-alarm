@@ -33,6 +33,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: Spacing.sm - 2,
     justifyContent: 'center',
+    maxWidth: '100%',
     minHeight: 30,
     paddingHorizontal: 12,
     paddingVertical: 7,
@@ -44,6 +45,7 @@ const styles = StyleSheet.create({
   },
   label: {
     ...TextPresets.eyebrow,
+    flexShrink: 1,
     letterSpacing: 0.5,
   },
 });

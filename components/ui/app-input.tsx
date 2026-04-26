@@ -62,9 +62,11 @@ export const AppInput = forwardRef<TextInput, AppInputProps>(function AppInput(
 const styles = StyleSheet.create({
   container: {
     gap: Spacing.sm,
+    minWidth: 0,
   },
   label: {
     ...TextPresets.label,
+    flexShrink: 1,
   },
   input: {
     borderRadius: Radius.lg,
@@ -72,6 +74,7 @@ const styles = StyleSheet.create({
     fontFamily: Fonts.sans,
     fontSize: 16,
     minHeight: 54,
+    minWidth: 0,
     paddingHorizontal: Spacing.lg,
     paddingVertical: 15,
   },
@@ -87,6 +90,7 @@ const styles = StyleSheet.create({
   },
   supporting: {
     ...TextPresets.body,
+    flexShrink: 1,
     fontSize: 14,
     lineHeight: 20,
   },

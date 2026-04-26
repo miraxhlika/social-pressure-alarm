@@ -12,7 +12,7 @@ import { StatusPill } from '@/components/ui/status-pill';
 import { Radius, Spacing, TextPresets, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { formatAlarmTime, hydrateAlarmRuntimeForCurrentUser, readAlarmStore } from '@/lib/alarms';
-import { Alarm, FREE_ALARM_LIMIT } from '@/types/alarm';
+import { Alarm } from '@/types/alarm';
 
 type PaywallState = {
   alarms: Alarm[];
@@ -50,18 +50,16 @@ export default function PaywallScreen() {
     }, [loadPaywallState])
   );
 
-  const usedSlots = Math.min(state.lifetimeAlarmCreations, FREE_ALARM_LIMIT);
   const activeAlarmCount = state.alarms.length;
-  const canCreateAnother = state.lifetimeAlarmCreations < FREE_ALARM_LIMIT;
 
   return (
     <AppScreen>
       <PageHeader
-        badgeLabel={`${usedSlots}/${FREE_ALARM_LIMIT}`}
-        badgeTone={canCreateAnother ? 'warning' : 'danger'}
-        eyebrow="Checkpoint limit"
-        title={canCreateAnother ? 'You still have room for another checkpoint.' : 'This preview build has reached its checkpoint limit.'}
-        description="A local preview rule, not a checkout."
+        badgeLabel="Unlimited"
+        badgeTone="success"
+        eyebrow="Checkpoints"
+        title="Checkpoint limits are removed."
+        description="Create as many saved proof routines as you need."
       />
 
       {isLoading ? (
@@ -72,51 +70,42 @@ export default function PaywallScreen() {
         />
       ) : (
         <>
-          <AppCard elevated tone="primary" style={styles.heroCard}>
+          <AppCard elevated tone="success" style={styles.heroCard}>
             <View style={styles.heroHeader}>
               <View style={styles.heroCopy}>
-                <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Current build rule</Text>
-                <Text style={[styles.heroTitle, { color: colors.text }]}>
-                  {canCreateAnother ? 'You can keep building for now.' : 'Your saved checkpoints still keep working.'}
-                </Text>
+                <Text style={[TextPresets.eyebrow, { color: colors.success }]}>No active cap</Text>
+                <Text style={[styles.heroTitle, { color: colors.text }]}>You can keep building checkpoints.</Text>
                 <Text style={[TextPresets.body, { color: colors.textSoft }]}>
-                  {canCreateAnother
-                    ? `This preview build allows ${FREE_ALARM_LIMIT} total checkpoint saves on this device.`
-                    : 'You can still edit, reuse, reschedule, and delete the checkpoints already on this device.'}
+                  Saved checkpoints still work as before, and creating a new one no longer stops at three.
                 </Text>
               </View>
-              <StatusPill label={canCreateAnother ? 'Preview limit' : 'Limit reached'} tone={canCreateAnother ? 'warning' : 'danger'} />
+              <StatusPill label="Open" tone="success" />
             </View>
 
             <View style={styles.metricGrid}>
-              <UsageMetric colors={colors} helper="Total saves" label="Used" value={`${usedSlots}`} />
+              <UsageMetric colors={colors} helper="Total saves" label="Created" value={`${state.lifetimeAlarmCreations}`} />
               <UsageMetric colors={colors} helper="Saved right now" label="Active" value={`${activeAlarmCount}`} />
-              <UsageMetric
-                colors={colors}
-                helper="New saves left"
-                label="Left"
-                value={`${Math.max(0, FREE_ALARM_LIMIT - state.lifetimeAlarmCreations)}`}
-              />
+              <UsageMetric colors={colors} helper="New saves left" label="Left" value="∞" />
             </View>
           </AppCard>
 
           <AppCard elevated tone="canvas">
             <SectionHeader
-              kicker="What it means"
-              title="No hidden checkout"
-              description="This page explains the rule and sends you somewhere useful."
+              kicker="What changed"
+              title="No checkpoint ceiling"
+              description="This screen is kept as a status page in case an old route sends you here."
             />
 
             <View style={styles.noteList}>
               <InfoRow
-                body="There is no payment flow behind this screen."
+                body="Create, edit, reuse, reschedule, and delete checkpoints without a preview save cap."
                 colors={colors}
-                title="No checkout"
+                title="Create freely"
               />
               <InfoRow
-                body="Deleting a checkpoint does not reopen a slot because the cap is based on total saves in this build."
+                body="Your existing local checkpoint data is unchanged."
                 colors={colors}
-                title="Why a slot may stay used"
+                title="Existing data stays"
               />
               <InfoRow
                 body={
@@ -125,15 +114,15 @@ export default function PaywallScreen() {
                     : 'You can return to Today or your checkpoint library now.'
                 }
                 colors={colors}
-                title="What still works"
+                title="What is next"
               />
             </View>
           </AppCard>
 
           <View style={styles.buttonGroup}>
             <AppButton
-              label={canCreateAnother ? 'Create another checkpoint' : 'Manage checkpoints'}
-              onPress={() => router.replace(canCreateAnother ? '/create' : '/alarms')}
+              label="Create another checkpoint"
+              onPress={() => router.replace('/create')}
             />
             <AppButton label="Back to today" onPress={() => router.replace('/')} variant="secondary" />
           </View>

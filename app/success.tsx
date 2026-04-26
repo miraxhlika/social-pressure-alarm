@@ -1,230 +1,110 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, DimensionValue, Easing, StyleSheet, Text, View } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { AppButton } from '@/components/ui/app-button';
-import { AppCard } from '@/components/ui/app-card';
 import { AppScreen } from '@/components/ui/app-screen';
 import { LoadingBlock } from '@/components/ui/loading-block';
-import { StatTile } from '@/components/ui/stat-tile';
-import { StatusPill } from '@/components/ui/status-pill';
-import { Fonts, Radius, Spacing, TextPresets, getAppColors } from '@/constants/theme';
+import { Fonts, Radius, Spacing, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { formatAlarmTime, readAlarmStore } from '@/lib/alarms';
-import { getCheckpointRoutineCopy, getUseCaseLabel } from '@/lib/checkpoint-templates';
 import { getPrimaryAlarm } from '@/lib/dashboard';
 import { ProgressSummary, getProgressSummary } from '@/lib/progress';
-import { getSocialQueueSummary } from '@/lib/social/queue';
-import { Alarm, SuccessHistoryEntry } from '@/types/alarm';
+import { Alarm, FailureHistoryEntry, SuccessHistoryEntry } from '@/types/alarm';
 
 type SuccessState = {
-  currentStreak: number;
-  longestStreak: number;
   alarm: Alarm | null;
+  completedToday: number;
+  currentStreak: number;
+  failuresToday: number;
+  nextAlarm: Alarm | null;
   summary: ProgressSummary;
   successEntry: SuccessHistoryEntry | null;
-  shareStatus: SuccessShareStatus | null;
-  nextAlarm: Alarm | null;
+  totalToday: number;
 };
 
-type SuccessShareStatus = {
-  tone: 'private' | 'queued' | 'shared';
-  title: string;
-  copy: string;
-};
+function isSameLocalDay(timestamp: string, day = new Date()) {
+  const date = new Date(timestamp);
 
-function getRepeatScheduleLabel(value?: Alarm['repeatSchedule']) {
-  if (value === 'daily') {
-    return 'Daily';
+  if (Number.isNaN(date.getTime())) {
+    return false;
   }
 
-  if (value === 'weekdays') {
-    return 'Weekdays';
-  }
-
-  return 'Once';
+  return (
+    date.getFullYear() === day.getFullYear() &&
+    date.getMonth() === day.getMonth() &&
+    date.getDate() === day.getDate()
+  );
 }
 
-function formatTimeToScan(successEntry: SuccessHistoryEntry | null) {
-  if (!successEntry) {
-    return '--';
+function getScheduledDateForToday(alarm: Alarm, day = new Date()) {
+  if (alarm.scheduledFor) {
+    return new Date(alarm.scheduledFor);
   }
 
-  return `${successEntry.timeToScanSeconds}s`;
+  const scheduledDate = new Date(day);
+  scheduledDate.setHours(alarm.hour, alarm.minute, 0, 0);
+  return scheduledDate;
 }
 
-function getSuccessShareStatus(
-  alarm: Alarm | null,
-  successEntry: SuccessHistoryEntry | null,
-  queuedEvent: { lastSyncError?: string } | null
-): SuccessShareStatus | null {
-  if (!alarm || !successEntry) {
-    return null;
-  }
+function getLatestSuccessForAlarm(successHistory: SuccessHistoryEntry[], alarmId?: string) {
+  const entries = alarmId ? successHistory.filter((entry) => entry.alarmId === alarmId) : successHistory;
 
-  if (!alarm.socialSettings?.circleId || !alarm.socialSettings.shareSuccesses) {
-    return {
-      tone: 'private',
-      title: 'Private',
-      copy: 'Saved only to your account.',
-    };
-  }
-
-  if (queuedEvent) {
-    return {
-      tone: 'queued',
-      title: 'Queued',
-      copy: queuedEvent.lastSyncError ? 'Circle sync will retry automatically.' : 'Syncing to your circle.',
-    };
-  }
-
-  return {
-    tone: 'shared',
-    title: 'Shared',
-    copy: 'Available in your circle.',
-  };
+  return [...entries].sort((left, right) => new Date(right.confirmedAt).getTime() - new Date(left.confirmedAt).getTime())[0] ?? null;
 }
 
-function getShareTone(tone?: SuccessShareStatus['tone']) {
-  switch (tone) {
-    case 'shared':
-      return 'success' as const;
-    case 'queued':
-      return 'primary' as const;
-    default:
-      return 'default' as const;
-  }
-}
-
-function getHeroKicker(successState: SuccessState | null, isSetupComplete: boolean) {
-  if (isSetupComplete) {
-    return 'Checkpoint saved';
-  }
-
-  if (!successState) {
-    return 'Checkpoint cleared';
-  }
-
-  const weeklyStats = successState.summary.weeklyStats;
-  const weeklyReview = successState.summary.weeklyReview;
-
-  if (weeklyStats.attempts >= 3 && weeklyStats.completionRate === 100) {
-    return weeklyReview.strongestUseCase ? `${weeklyReview.strongestUseCase.label} held` : 'Reliable this week';
-  }
-
-  if (weeklyStats.attempts >= 2 && weeklyStats.completionRate >= 75) {
-    return 'Solid follow-through';
-  }
-
-  return successState.currentStreak >= 2 ? 'Back on track' : 'Checkpoint cleared';
-}
-
-function getHeroBody(successState: SuccessState | null, label: string | undefined, isSetupComplete: boolean) {
-  if (isSetupComplete) {
-    if (successState?.alarm?.scheduledFor) {
-      return `${label ?? successState.alarm.label} is scheduled for ${new Date(
-        successState.alarm.scheduledFor
-      ).toLocaleString([], {
-        hour: 'numeric',
-        minute: '2-digit',
-        month: 'short',
-        day: 'numeric',
-      })}. You can still edit the timing or proof before the first live run.`;
+function getTodayProgress(
+  alarms: Alarm[],
+  successHistory: SuccessHistoryEntry[],
+  failureHistory: FailureHistoryEntry[]
+) {
+  const successesToday = successHistory.filter((entry) => isSameLocalDay(entry.confirmedAt));
+  const failuresToday = failureHistory.filter((entry) => isSameLocalDay(entry.failedAt));
+  const resolvedAlarmIds = new Set([
+    ...successesToday.map((entry) => entry.alarmId),
+    ...failuresToday.map((entry) => entry.alarmId),
+  ]);
+  const pendingToday = alarms.filter((alarm) => {
+    if (!alarm.isActive || resolvedAlarmIds.has(alarm.id)) {
+      return false;
     }
 
-    return `${label ?? 'This checkpoint'} is saved. The next step is using it in a real routine, then adding one more commitment once the system feels real.`;
-  }
-
-  if (!successState) {
-    return label ? `${label} matched before the timer expired.` : 'The checkpoint matched before the timer expired.';
-  }
-
-  if (successState.successEntry) {
-    const routineCopy = getCheckpointRoutineCopy(successState.alarm?.useCaseType);
-
-    return label
-      ? `${label} cleared in ${successState.successEntry.timeToScanSeconds}s. Your ${routineCopy} held when it mattered.`
-      : `Cleared in ${successState.successEntry.timeToScanSeconds}s. Your ${routineCopy} held when it mattered.`;
-  }
-
-  return label ? `${label} matched before time ran out.` : 'The checkpoint matched before time ran out.';
-}
-
-function getReliabilityStat(successState: SuccessState | null) {
-  const weeklyStats = successState?.summary.weeklyStats;
-
-  if (!weeklyStats || weeklyStats.attempts === 0) {
-    return {
-      value: '—',
-      helper: 'No weekly history yet',
-    };
-  }
+    return isSameLocalDay(getScheduledDateForToday(alarm).toISOString());
+  });
 
   return {
-    value: `${weeklyStats.completionRate}%`,
-    helper:
-      weeklyStats.averageTimeToClearSeconds === null
-        ? `${weeklyStats.successes}/${weeklyStats.attempts} cleared this week`
-        : `Avg clear ${weeklyStats.averageTimeToClearSeconds}s`,
+    completedToday: successesToday.length,
+    failuresToday: failuresToday.length,
+    totalToday: Math.max(1, successesToday.length + failuresToday.length + pendingToday.length),
   };
 }
 
-function getNextRoutineCopy(successState: SuccessState | null, isSetupComplete: boolean, shouldPromptSecondCheckpoint: boolean) {
-  if (isSetupComplete && shouldPromptSecondCheckpoint) {
-    return 'The fastest way to make this stick is to protect one more routine while this setup is still fresh.';
-  }
+function formatTimestampLabel(timestamp: string) {
+  const completedAt = new Date(timestamp);
+  const prefix = isSameLocalDay(completedAt.toISOString())
+    ? 'Today'
+    : completedAt.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const time = completedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
-  if (isSetupComplete) {
-    return 'Your first live run is scheduled. Edit the setup if needed, or add another checkpoint for a second commitment.';
-  }
-
-  if (!successState?.nextAlarm) {
-    const routineCopy = getCheckpointRoutineCopy(successState?.alarm?.useCaseType);
-    return `Turn this win into the next protected ${routineCopy} while the proof is still fresh.`;
-  }
-
-  const nextRoutine = getCheckpointRoutineCopy(successState.nextAlarm.useCaseType);
-  return `${formatAlarmTime(successState.nextAlarm.hour, successState.nextAlarm.minute)} at ${
-    successState.nextAlarm.label
-  }. Keep your ${nextRoutine} protected.`;
+  return `${prefix}, ${time}`;
 }
 
-function getWeeklyReliabilityCaption(successState: SuccessState | null) {
-  const weeklyReview = successState?.summary.weeklyReview;
-  const weeklyStats = successState?.summary.weeklyStats;
-
-  if (!weeklyStats || weeklyStats.attempts === 0) {
-    return 'First result recorded. Weekly reliability will build from here.';
-  }
-
-  return weeklyReview?.body ?? `${weeklyStats.completionRate}% reliable this week.`;
+function formatCompletedAt(successEntry: SuccessHistoryEntry | null) {
+  return formatTimestampLabel(successEntry?.confirmedAt ?? new Date().toISOString());
 }
 
-function getReviewPanels(successState: SuccessState | null) {
-  const weeklyReview = successState?.summary.weeklyReview;
-
-  if (!weeklyReview) {
-    return {
-      strongestTitle: 'No leading routine yet',
-      strongestBody: 'Weekly patterning appears once this checkpoint has live history.',
-      recoveryTitle: 'No weak spot yet',
-      recoveryBody: 'Misses or shaky routines will show up here when they need work.',
-    };
+function getNextDueLabel(nextAlarm: Alarm | null) {
+  if (!nextAlarm) {
+    return 'No more checkpoints today';
   }
 
-  return {
-    strongestTitle: weeklyReview.strongestUseCase ? weeklyReview.strongestUseCase.label : 'No leading routine yet',
-    strongestBody: weeklyReview.strongestUseCase
-      ? `${weeklyReview.strongestUseCase.completionRate}% reliable across ${weeklyReview.strongestUseCase.attempts} attempt${
-          weeklyReview.strongestUseCase.attempts === 1 ? '' : 's'
-        }.`
-      : 'Repeat one commitment enough times and it will become the leading routine here.',
-    recoveryTitle: weeklyReview.recoveryUseCase ? weeklyReview.recoveryUseCase.label : 'No weak spot right now',
-    recoveryBody: weeklyReview.recoveryUseCase
-      ? `${weeklyReview.recoveryUseCase.failures} miss${weeklyReview.recoveryUseCase.failures === 1 ? '' : 'es'} this week. Tighten that setup before it drags the rest down.`
-      : 'Nothing is slipping hard enough to demand a reset right now.',
-  };
+  if (nextAlarm.scheduledFor) {
+    return `Due around ${new Date(nextAlarm.scheduledFor).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+  }
+
+  return `Due around ${formatAlarmTime(nextAlarm.hour, nextAlarm.minute)}`;
 }
 
 async function triggerSuccessArrival() {
@@ -241,12 +121,10 @@ export default function SuccessScreen() {
   const colors = getAppColors(useColorScheme());
   const [isLoading, setIsLoading] = useState(true);
   const [successState, setSuccessState] = useState<SuccessState | null>(null);
-  const heroOpacity = useRef(new Animated.Value(0)).current;
-  const heroTranslateY = useRef(new Animated.Value(24)).current;
-  const heroScale = useRef(new Animated.Value(0.94)).current;
-  const glowPulse = useRef(new Animated.Value(0)).current;
-  const detailOpacity = useRef(new Animated.Value(0)).current;
-  const detailTranslateY = useRef(new Animated.Value(20)).current;
+  const arrivalOpacity = useRef(new Animated.Value(0)).current;
+  const arrivalTranslateY = useRef(new Animated.Value(20)).current;
+  const confettiBurst = useRef(new Animated.Value(0)).current;
+  const medalScale = useRef(new Animated.Value(0.86)).current;
   const didCelebrateRef = useRef(false);
   const isSetupComplete = params.mode === 'setup_complete';
   const shouldPromptSecondCheckpoint = params.promptSecondCheckpoint === '1';
@@ -256,25 +134,23 @@ export default function SuccessScreen() {
       setIsLoading(true);
 
       try {
-        const [store, socialQueue] = await Promise.all([readAlarmStore(), getSocialQueueSummary()]);
+        const store = await readAlarmStore();
         const summary = getProgressSummary(store);
         const alarm = store.alarms.find((entry) => entry.id === params.alarmId) ?? null;
         const successEntry = isSetupComplete
           ? null
-          : store.successHistory.find((entry) => entry.alarmId === params.alarmId) ?? summary.latestSuccess;
-        const eventId =
-          params.alarmId && successEntry ? `${params.alarmId}-${successEntry.confirmedAt}` : null;
-        const queuedEvent =
-          eventId ? socialQueue.queuedEvents.find((entry) => entry.id === eventId) ?? null : null;
+          : getLatestSuccessForAlarm(store.successHistory, params.alarmId) ?? summary.latestSuccess;
+        const todayProgress = getTodayProgress(store.alarms, store.successHistory, store.failureHistory);
 
         setSuccessState({
-          currentStreak: store.currentStreak,
-          longestStreak: store.longestStreak,
           alarm,
+          completedToday: todayProgress.completedToday,
+          currentStreak: store.currentStreak,
+          failuresToday: todayProgress.failuresToday,
+          nextAlarm: getPrimaryAlarm(store.alarms),
           summary,
           successEntry,
-          shareStatus: getSuccessShareStatus(alarm, successEntry, queuedEvent),
-          nextAlarm: getPrimaryAlarm(store.alarms),
+          totalToday: todayProgress.totalToday,
         });
       } finally {
         setIsLoading(false);
@@ -284,378 +160,523 @@ export default function SuccessScreen() {
     void loadProgress();
   }, [isSetupComplete, params.alarmId]);
 
-  const progressWidth = useMemo(() => {
-    if (!successState) {
-      return '8%' as DimensionValue;
-    }
-
-    const weeklyAttempts = successState.summary.weeklyStats.attempts;
-    const weeklyCompletionRate = successState.summary.weeklyStats.completionRate;
-
-    return `${Math.max(8, weeklyAttempts === 0 ? 8 : weeklyCompletionRate)}%` as DimensionValue;
-  }, [successState]);
-
-  const shareTone = getShareTone(successState?.shareStatus?.tone);
-  const heroKicker = getHeroKicker(successState, isSetupComplete);
-  const heroBody = getHeroBody(successState, params.label, isSetupComplete);
-  const reliabilityStat = getReliabilityStat(successState);
-  const nextRoutineCopy = getNextRoutineCopy(successState, isSetupComplete, shouldPromptSecondCheckpoint);
-  const weeklyReliabilityCaption = getWeeklyReliabilityCaption(successState);
-  const reviewPanels = getReviewPanels(successState);
-  const primaryStatLabel = isSetupComplete ? 'Repeat' : 'Time to clear';
-  const primaryStatValue = isSetupComplete
-    ? getRepeatScheduleLabel(successState?.alarm?.repeatSchedule)
-    : formatTimeToScan(successState?.successEntry ?? null);
-  const primaryStatTone = isSetupComplete ? ('primary' as const) : ('success' as const);
-  const title = isSetupComplete ? 'Checkpoint ready' : 'Follow-through confirmed';
-  const statusLabel = isSetupComplete ? 'Saved' : 'Cleared';
-  const statusTone = isSetupComplete ? ('primary' as const) : ('success' as const);
-  const nextCardTitle = shouldPromptSecondCheckpoint
-    ? 'Add a second checkpoint'
-    : successState?.nextAlarm
-      ? `${formatAlarmTime(successState.nextAlarm.hour, successState.nextAlarm.minute)} · ${successState.nextAlarm.label}`
-      : 'Schedule the next checkpoint';
-  const primaryButtonLabel = shouldPromptSecondCheckpoint
-    ? 'Add second checkpoint'
-    : successState?.nextAlarm
-      ? 'Manage checkpoints'
-      : 'Create next checkpoint';
-
   useEffect(() => {
     if (isLoading || !successState || didCelebrateRef.current) {
       return;
     }
 
     didCelebrateRef.current = true;
+    confettiBurst.setValue(0);
     void triggerSuccessArrival();
 
     Animated.parallel([
-      Animated.spring(heroOpacity, {
+      Animated.timing(arrivalOpacity, {
         toValue: 1,
-        friction: 8,
-        tension: 70,
+        duration: 320,
+        easing: Easing.out(Easing.quad),
         useNativeDriver: true,
       }),
-      Animated.spring(heroTranslateY, {
+      Animated.timing(arrivalTranslateY, {
         toValue: 0,
-        friction: 8,
-        tension: 70,
+        duration: 320,
+        easing: Easing.out(Easing.quad),
         useNativeDriver: true,
       }),
-      Animated.spring(heroScale, {
+      Animated.spring(medalScale, {
         toValue: 1,
         friction: 7,
-        tension: 85,
+        tension: 90,
         useNativeDriver: true,
       }),
       Animated.sequence([
-        Animated.timing(glowPulse, {
+        Animated.delay(80),
+        Animated.timing(confettiBurst, {
           toValue: 1,
-          duration: 360,
-          easing: Easing.out(Easing.quad),
+          duration: 950,
+          easing: Easing.out(Easing.cubic),
           useNativeDriver: true,
         }),
-        Animated.timing(glowPulse, {
-          toValue: 0.25,
-          duration: 700,
-          easing: Easing.inOut(Easing.quad),
-          useNativeDriver: true,
-        }),
-      ]),
-      Animated.sequence([
-        Animated.delay(120),
-        Animated.parallel([
-          Animated.timing(detailOpacity, {
-            toValue: 1,
-            duration: 360,
-            easing: Easing.out(Easing.quad),
-            useNativeDriver: true,
-          }),
-          Animated.timing(detailTranslateY, {
-            toValue: 0,
-            duration: 360,
-            easing: Easing.out(Easing.quad),
-            useNativeDriver: true,
-          }),
-        ]),
       ]),
     ]).start();
-  }, [detailOpacity, detailTranslateY, glowPulse, heroOpacity, heroScale, heroTranslateY, isLoading, successState]);
+  }, [arrivalOpacity, arrivalTranslateY, confettiBurst, isLoading, medalScale, successState]);
 
-  const glowScale = glowPulse.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0.88, 1.08],
+  const progressWidth = useMemo(() => {
+    if (!successState) {
+      return '8%' as DimensionValue;
+    }
+
+    return `${Math.max(8, Math.round((successState.completedToday / successState.totalToday) * 100))}%` as DimensionValue;
+  }, [successState]);
+  const confettiOpacity = confettiBurst.interpolate({
+    inputRange: [0, 0.12, 0.72, 1],
+    outputRange: [0, 1, 1, 0.55],
   });
-  const glowOpacity = glowPulse.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0.1, 0.28],
+  const getConfettiMotion = (x: number, y: number, rotation: number) => ({
+    opacity: confettiOpacity,
+    transform: [
+      {
+        translateX: confettiBurst.interpolate({
+          inputRange: [0, 1],
+          outputRange: [0, x],
+        }),
+      },
+      {
+        translateY: confettiBurst.interpolate({
+          inputRange: [0, 0.45, 1],
+          outputRange: [8, y - 8, y],
+        }),
+      },
+      {
+        rotate: confettiBurst.interpolate({
+          inputRange: [0, 1],
+          outputRange: ['0deg', `${rotation}deg`],
+        }),
+      },
+      {
+        scale: confettiBurst.interpolate({
+          inputRange: [0, 0.16, 1],
+          outputRange: [0.35, 1.15, 1],
+        }),
+      },
+    ],
   });
 
-  return (
-    <AppScreen>
-      {isLoading ? (
+  if (isLoading || !successState) {
+    return (
+      <AppScreen backgroundColor="#FFFCF7">
         <LoadingBlock
           description={isSetupComplete ? 'Preparing your first real checkpoint.' : 'Saving this clear to your progress.'}
-          style={styles.loadingCard}
           title={isSetupComplete ? 'Finishing setup' : 'Saving the win'}
           tone={isSetupComplete ? 'primary' : 'success'}
         />
-      ) : null}
+      </AppScreen>
+    );
+  }
 
-      {!isLoading && successState ? (
-        <>
-          <Animated.View
-            style={[
-              styles.heroShell,
-              {
-                opacity: heroOpacity,
-                transform: [{ translateY: heroTranslateY }, { scale: heroScale }],
-              },
-            ]}>
-            <View pointerEvents="none" style={[styles.heroBackdropOrb, styles.heroBackdropTop, { backgroundColor: colors.success }]} />
-            <View pointerEvents="none" style={[styles.heroBackdropOrb, styles.heroBackdropBottom, { backgroundColor: colors.primary }]} />
-            <Animated.View
-              pointerEvents="none"
-              style={[
-                styles.heroGlow,
-                {
-                  backgroundColor: colors.success,
-                  opacity: glowOpacity,
-                  transform: [{ scale: glowScale }],
-                },
-              ]}
-            />
+  const title = isSetupComplete ? 'Ready!' : 'Cleared!';
+  const subtitle = isSetupComplete ? 'Proof saved' : 'Proof verified';
+  const completionLabel = isSetupComplete
+    ? successState.alarm?.scheduledFor
+      ? `Scheduled ${formatTimestampLabel(successState.alarm.scheduledFor)}`
+      : 'Saved just now'
+    : formatCompletedAt(successState.successEntry);
+  const streakValue = successState.currentStreak === 1 ? '1 day' : `${successState.currentStreak} days`;
+  const progressCopy = `${successState.completedToday} of ${successState.totalToday} checkpoints`;
+  const nextTitle = shouldPromptSecondCheckpoint ? 'Add another checkpoint' : successState.nextAlarm?.label ?? 'All clear';
+  const nextSubtitle = shouldPromptSecondCheckpoint ? 'Protect one more routine while setup is fresh.' : getNextDueLabel(successState.nextAlarm);
+  const continueTarget = shouldPromptSecondCheckpoint ? '/create' : '/';
 
-            <AppCard elevated style={[styles.heroCard, { backgroundColor: colors.card, borderColor: colors.line }]}>
-              <View style={styles.heroTopRow}>
-                <Text style={[TextPresets.eyebrow, { color: isSetupComplete ? colors.primary : colors.success }]}>{heroKicker}</Text>
-                <StatusPill label={statusLabel} tone={statusTone} />
-              </View>
-              <Text style={[styles.title, { color: colors.text }]}>{title}</Text>
-              <Text style={[styles.heroBody, { color: colors.textSoft }]}>{heroBody}</Text>
+  return (
+    <AppScreen backgroundColor="#FFFCF7" contentStyle={styles.content}>
+      <Animated.View
+        style={[
+          styles.shell,
+          {
+            opacity: arrivalOpacity,
+            transform: [{ translateY: arrivalTranslateY }],
+          },
+        ]}>
+        <View style={styles.celebrationWrap}>
+          <Animated.View style={[styles.confettiDot, styles.confettiAnchor, { backgroundColor: colors.primary }, getConfettiMotion(-82, -42, -22)]} />
+          <Animated.View style={[styles.confettiDot, styles.confettiAnchor, { backgroundColor: '#D9B46F' }, getConfettiMotion(74, -34, 18)]} />
+          <Animated.View style={[styles.confettiDot, styles.confettiAnchor, { backgroundColor: colors.success }, getConfettiMotion(-94, 24, 30)]} />
+          <Animated.View style={[styles.confettiDot, styles.confettiAnchor, { backgroundColor: '#D9B46F' }, getConfettiMotion(88, 18, -28)]} />
+          <Animated.View style={[styles.confettiDot, styles.confettiAnchor, { backgroundColor: '#45B890' }, getConfettiMotion(-58, 48, -42)]} />
+          <Animated.View style={[styles.confettiDot, styles.confettiAnchor, { backgroundColor: '#D88755' }, getConfettiMotion(54, 42, 36)]} />
+          <Animated.View style={[styles.confettiDash, styles.confettiAnchor, { backgroundColor: colors.primary }, getConfettiMotion(-108, -8, -48)]} />
+          <Animated.View style={[styles.confettiDash, styles.confettiAnchor, { backgroundColor: '#D9B46F' }, getConfettiMotion(104, -2, 44)]} />
+          <Animated.View style={[styles.confettiDash, styles.confettiAnchor, { backgroundColor: '#D88755' }, getConfettiMotion(86, -54, -18)]} />
+          <Animated.View style={[styles.confettiDash, styles.confettiAnchor, { backgroundColor: '#45B890' }, getConfettiMotion(-78, -58, 26)]} />
+          <Animated.View style={[styles.confettiDash, styles.confettiAnchor, { backgroundColor: '#C9A052' }, getConfettiMotion(28, -74, 66)]} />
+          <Animated.View style={[styles.confettiDot, styles.confettiAnchor, { backgroundColor: '#59BFA3' }, getConfettiMotion(-22, -82, -52)]} />
 
-              <View style={styles.heroHighlights}>
-                <StatTile label={primaryStatLabel} tone={primaryStatTone} value={primaryStatValue} />
-                <StatTile helper={reliabilityStat.helper} label="This week" tone="primary" value={reliabilityStat.value} />
-              </View>
-
-              {successState.shareStatus ? (
-                <View style={[styles.heroFooter, { borderTopColor: colors.line }]}>
-                  <StatusPill label={successState.shareStatus.title} tone={shareTone} />
-                  <Text style={[styles.shareCopy, { color: colors.textSoft }]}>{successState.shareStatus.copy}</Text>
-                </View>
-              ) : null}
-            </AppCard>
+          <Animated.View style={[styles.medalOuter, { transform: [{ scale: medalScale }] }]}>
+            <View style={styles.medalInner}>
+              <Ionicons color="#FFFFFF" name="checkmark" size={54} />
+            </View>
           </Animated.View>
+        </View>
 
-          <Animated.View
-            style={[
-              styles.detailStack,
-              {
-                opacity: detailOpacity,
-                transform: [{ translateY: detailTranslateY }],
-              },
-            ]}>
-            <AppCard elevated tone="canvas" style={styles.nextCard}>
-              <View style={styles.nextHeader}>
-                <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Next routine</Text>
-                <Text style={[styles.nextTitle, { color: colors.text }]}>{nextCardTitle}</Text>
-                <Text style={[styles.nextBody, { color: colors.textSoft }]}>{nextRoutineCopy}</Text>
-              </View>
-              <View style={styles.nextMetaRow}>
-                {!isSetupComplete ? (
-                  <StatusPill
-                    label={successState.currentStreak > 0 ? `Run ${successState.currentStreak}` : 'Fresh start'}
-                    tone={successState.currentStreak > 0 ? 'success' : 'default'}
-                  />
-                ) : null}
-                {successState.alarm ? (
-                  <StatusPill label={getUseCaseLabel(successState.alarm.useCaseType)} tone="primary" />
-                ) : null}
-                {isSetupComplete && successState.alarm ? (
-                  <StatusPill label={getRepeatScheduleLabel(successState.alarm.repeatSchedule)} tone="default" />
-                ) : null}
-              </View>
-              <View style={[styles.progressTrack, { backgroundColor: colors.border }]}>
-                <View style={[styles.progressFill, { backgroundColor: colors.primary, width: progressWidth }]} />
-              </View>
-              <Text style={[styles.progressCaption, { color: colors.textSoft }]}>{weeklyReliabilityCaption}</Text>
-              <View style={styles.reviewRow}>
-                <ReviewPanel body={reviewPanels.strongestBody} label="Holding strongest" title={reviewPanels.strongestTitle} />
-                <ReviewPanel body={reviewPanels.recoveryBody} label="Tighten next" title={reviewPanels.recoveryTitle} />
-              </View>
-              <View style={styles.buttonRow}>
-                <AppButton
-                  label={primaryButtonLabel}
-                  onPress={() => router.replace(shouldPromptSecondCheckpoint || !successState.nextAlarm ? '/create' : '/alarms')}
-                  style={styles.buttonFill}
-                />
-                <AppButton
-                  label="Back to today"
-                  onPress={() => router.replace('/')}
-                  style={styles.buttonFill}
-                  variant="secondary"
-                />
-              </View>
-            </AppCard>
-          </Animated.View>
-        </>
-      ) : null}
+        <View style={styles.titleBlock}>
+          <Text style={styles.title}>{title}</Text>
+          <Text style={styles.subtitle}>{subtitle}</Text>
+        </View>
+
+        <View style={styles.summaryCard}>
+          <SummaryRow icon="time-outline" label={isSetupComplete ? 'Scheduled' : 'Completed'} value={completionLabel} />
+          <View style={styles.summaryDivider} />
+          <SummaryRow
+            badgeLabel={isSetupComplete ? undefined : '+1'}
+            icon="calendar-outline"
+            label="Streak"
+            value={isSetupComplete ? 'Starts after first clear' : streakValue}
+          />
+        </View>
+
+        <View style={styles.progressCard}>
+          <View style={styles.progressHeader}>
+            <Text style={styles.progressTitle}>{"Today's progress"}</Text>
+            <Text style={styles.progressValue}>{progressCopy}</Text>
+          </View>
+          <View style={styles.progressTrack}>
+            <View style={[styles.progressFill, { width: progressWidth }]} />
+          </View>
+          {successState.failuresToday > 0 ? (
+            <Text style={styles.progressNote}>{successState.failuresToday} missed checkpoint still needs a reset.</Text>
+          ) : null}
+        </View>
+
+        <View style={styles.nextCard}>
+          <View style={styles.nextIcon}>
+            <Ionicons color="#D79C38" name="sunny" size={22} />
+          </View>
+          <View style={styles.nextCopy}>
+            <Text style={styles.nextEyebrow}>Up next</Text>
+            <Text style={styles.nextTitle}>{nextTitle}</Text>
+            <Text style={styles.nextSubtitle}>{nextSubtitle}</Text>
+          </View>
+        </View>
+
+        <View style={styles.actions}>
+          <AppButton
+            label="Continue"
+            onPress={() => {
+              router.replace(continueTarget);
+            }}
+            style={styles.continueButton}
+            textStyle={styles.primaryButtonText}
+          />
+          <AppButton
+            label="View today"
+            onPress={() => {
+              router.replace('/');
+            }}
+            style={styles.secondaryButton}
+            textStyle={styles.secondaryButtonText}
+            variant="secondary"
+          />
+        </View>
+      </Animated.View>
     </AppScreen>
   );
 }
 
-function ReviewPanel({
+function SummaryRow({
+  icon,
   label,
-  title,
-  body,
+  value,
+  badgeLabel,
 }: {
+  icon: keyof typeof Ionicons.glyphMap;
   label: string;
-  title: string;
-  body: string;
+  value: string;
+  badgeLabel?: string;
 }) {
-  const colors = getAppColors(useColorScheme());
-
   return (
-    <View style={[styles.reviewPanel, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
-      <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>{label}</Text>
-      <Text style={[styles.reviewTitle, { color: colors.text }]}>{title}</Text>
-      <Text style={[styles.reviewBody, { color: colors.textSoft }]}>{body}</Text>
+    <View style={styles.summaryRow}>
+      <View style={styles.summaryIcon}>
+        <Ionicons color="#313946" name={icon} size={20} />
+      </View>
+      <Text style={styles.summaryLabel}>{label}</Text>
+      <Text numberOfLines={1} style={styles.summaryValue}>
+        {value}
+      </Text>
+      {badgeLabel ? (
+        <View style={styles.summaryBadge}>
+          <Text style={styles.summaryBadgeText}>{badgeLabel}</Text>
+        </View>
+      ) : null}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  loadingCard: {
-    minHeight: 200,
+  content: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    paddingHorizontal: Spacing.xl,
   },
-  heroShell: {
-    overflow: 'hidden',
-    position: 'relative',
-  },
-  heroBackdropOrb: {
-    borderRadius: 180,
-    height: 180,
-    opacity: 0.1,
-    position: 'absolute',
-    width: 180,
-  },
-  heroBackdropTop: {
-    right: -36,
-    top: -12,
-  },
-  heroBackdropBottom: {
-    bottom: 18,
-    left: -48,
-  },
-  heroGlow: {
-    alignSelf: 'center',
-    borderRadius: 200,
-    height: 200,
-    position: 'absolute',
-    top: 36,
-    width: 200,
-  },
-  heroCard: {
-    gap: Spacing.md,
-  },
-  heroTopRow: {
-    alignItems: 'flex-start',
-    flexDirection: 'row',
-    gap: Spacing.md,
-    justifyContent: 'space-between',
-  },
-  title: {
-    fontFamily: Fonts.rounded,
-    fontSize: 34,
-    fontWeight: '800',
-    lineHeight: 38,
-  },
-  heroBody: {
-    ...TextPresets.body,
-  },
-  heroHighlights: {
-    flexDirection: 'row',
-    gap: Spacing.md,
-  },
-  heroFooter: {
-    alignItems: 'center',
-    borderTopWidth: 1,
-    flexDirection: 'row',
-    gap: Spacing.md,
-    paddingTop: Spacing.md,
-  },
-  shareCopy: {
-    ...TextPresets.body,
-    flex: 1,
-  },
-  detailStack: {
+  shell: {
     gap: Spacing.lg,
   },
-  nextCard: {
-    gap: Spacing.md,
+  celebrationWrap: {
+    alignItems: 'center',
+    height: 122,
+    justifyContent: 'center',
+    position: 'relative',
   },
-  nextHeader: {
-    gap: Spacing.xs,
+  medalOuter: {
+    alignItems: 'center',
+    backgroundColor: '#EAD4B3',
+    borderColor: '#F7E9D5',
+    borderRadius: Radius.pill,
+    borderWidth: 8,
+    height: 96,
+    justifyContent: 'center',
+    shadowColor: '#8A5A24',
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.18,
+    shadowRadius: 20,
+    width: 96,
   },
-  nextMetaRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.sm,
+  medalInner: {
+    alignItems: 'center',
+    backgroundColor: '#D1A05E',
+    borderColor: '#B98745',
+    borderRadius: Radius.pill,
+    borderWidth: 2,
+    height: 66,
+    justifyContent: 'center',
+    width: 66,
   },
-  nextTitle: {
+  confettiDot: {
+    borderRadius: Radius.pill,
+    height: 5,
+    position: 'absolute',
+    width: 5,
+  },
+  confettiAnchor: {
+    left: '50%',
+    top: 58,
+  },
+  confettiDotOne: {
+    left: '32%',
+    top: 18,
+  },
+  confettiDotTwo: {
+    right: '30%',
+    top: 28,
+  },
+  confettiDotThree: {
+    bottom: 24,
+    left: '26%',
+  },
+  confettiDotFour: {
+    right: '23%',
+    top: 70,
+  },
+  confettiDotFive: {
+    left: '20%',
+    top: 72,
+  },
+  confettiDotSix: {
+    bottom: 42,
+    right: '31%',
+  },
+  confettiDash: {
+    borderRadius: Radius.pill,
+    height: 4,
+    position: 'absolute',
+    width: 16,
+  },
+  confettiDashOne: {
+    right: '25%',
+    top: 58,
+    transform: [{ rotate: '-26deg' }],
+  },
+  confettiDashTwo: {
+    left: '24%',
+    top: 56,
+    transform: [{ rotate: '22deg' }],
+  },
+  confettiDashThree: {
+    right: '18%',
+    top: 42,
+    transform: [{ rotate: '-18deg' }],
+  },
+  confettiDashFour: {
+    bottom: 38,
+    left: '34%',
+    transform: [{ rotate: '32deg' }],
+  },
+  titleBlock: {
+    alignItems: 'center',
+    gap: 2,
+  },
+  title: {
+    color: '#101722',
+    fontFamily: Fonts.serif,
+    fontSize: 34,
+    fontWeight: '900',
+    letterSpacing: -0.6,
+    lineHeight: 40,
+    textAlign: 'center',
+  },
+  subtitle: {
+    color: '#A57944',
     fontFamily: Fonts.rounded,
-    fontSize: 22,
+    fontSize: 15,
     fontWeight: '800',
-    lineHeight: 28,
+    lineHeight: 20,
+    textAlign: 'center',
   },
-  nextBody: {
-    ...TextPresets.body,
+  summaryCard: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#EFE7DC',
+    borderRadius: 14,
+    borderWidth: 1,
+    overflow: 'hidden',
+  },
+  summaryRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    minHeight: 56,
+    paddingHorizontal: 14,
+  },
+  summaryIcon: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 24,
+  },
+  summaryLabel: {
+    color: '#242B37',
+    flex: 1,
+    fontFamily: Fonts.rounded,
+    fontSize: 14,
+    fontWeight: '800',
+    lineHeight: 18,
+  },
+  summaryValue: {
+    color: '#6D7280',
+    flexShrink: 1,
+    fontFamily: Fonts.sans,
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 18,
+    maxWidth: 140,
+    textAlign: 'right',
+  },
+  summaryBadge: {
+    backgroundColor: '#E9F7E8',
+    borderRadius: Radius.pill,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 4,
+  },
+  summaryBadgeText: {
+    color: '#2B9B63',
+    fontFamily: Fonts.rounded,
+    fontSize: 12,
+    fontWeight: '900',
+    lineHeight: 15,
+  },
+  summaryDivider: {
+    backgroundColor: '#F1E9DD',
+    height: 1,
+    marginHorizontal: Spacing.md,
+  },
+  progressCard: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#EFE7DC',
+    borderRadius: 14,
+    borderWidth: 1,
+    gap: Spacing.md,
+    padding: Spacing.md,
+  },
+  progressHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  progressTitle: {
+    color: '#101722',
+    fontFamily: Fonts.rounded,
+    fontSize: 14,
+    fontWeight: '900',
+    lineHeight: 18,
+  },
+  progressValue: {
+    color: '#6B7280',
+    fontFamily: Fonts.sans,
+    fontSize: 12,
+    fontWeight: '700',
+    lineHeight: 16,
   },
   progressTrack: {
+    backgroundColor: '#F1EADF',
     borderRadius: Radius.pill,
-    height: 10,
+    height: 9,
     overflow: 'hidden',
   },
   progressFill: {
+    backgroundColor: '#D3A04E',
     borderRadius: Radius.pill,
     height: '100%',
   },
-  progressCaption: {
-    ...TextPresets.body,
-    fontSize: 14,
-    lineHeight: 20,
+  progressNote: {
+    color: '#A26245',
+    fontFamily: Fonts.sans,
+    fontSize: 12,
+    fontWeight: '700',
+    lineHeight: 17,
   },
-  reviewRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.sm,
-  },
-  reviewPanel: {
-    borderRadius: Radius.md,
+  nextCard: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#EFE7DC',
+    borderRadius: 14,
     borderWidth: 1,
-    flex: 1,
-    gap: Spacing.xs,
-    minWidth: 150,
+    flexDirection: 'row',
+    gap: Spacing.md,
     padding: Spacing.md,
   },
-  reviewTitle: {
-    ...TextPresets.title,
-    fontSize: 18,
-    lineHeight: 24,
+  nextIcon: {
+    alignItems: 'center',
+    backgroundColor: '#FFF1D5',
+    borderRadius: Radius.pill,
+    height: 42,
+    justifyContent: 'center',
+    width: 42,
   },
-  reviewBody: {
-    ...TextPresets.body,
-    fontSize: 14,
+  nextCopy: {
+    flex: 1,
+    gap: 2,
+    minWidth: 0,
+  },
+  nextEyebrow: {
+    color: '#7D6A58',
+    fontFamily: Fonts.rounded,
+    fontSize: 12,
+    fontWeight: '800',
+    lineHeight: 16,
+  },
+  nextTitle: {
+    color: '#101722',
+    fontFamily: Fonts.rounded,
+    fontSize: 16,
+    fontWeight: '900',
     lineHeight: 20,
   },
-  buttonRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
+  nextSubtitle: {
+    color: '#6B7280',
+    fontFamily: Fonts.sans,
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
+  actions: {
     gap: Spacing.sm,
   },
-  buttonFill: {
-    flexBasis: 180,
-    flexGrow: 1,
+  continueButton: {
+    backgroundColor: '#101827',
+    borderColor: '#101827',
+    borderRadius: 9,
+  },
+  secondaryButton: {
+    backgroundColor: '#FFFCF7',
+    borderColor: '#E6DDD0',
+    borderRadius: 9,
+  },
+  secondaryButtonText: {
+    color: '#101827',
+    fontFamily: Fonts.rounded,
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  primaryButtonText: {
+    color: '#FFFFFF',
+    fontFamily: Fonts.rounded,
+    fontSize: 16,
+    fontWeight: '900',
   },
 });

@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 
+import { ActionRow, ActionRowGlyph } from '@/components/ui/action-row';
 import { AppButton } from '@/components/ui/app-button';
 import { AppCard } from '@/components/ui/app-card';
 import { AppInput } from '@/components/ui/app-input';
@@ -409,7 +410,7 @@ export default function CirclesScreen() {
       return;
     }
 
-    router.push('/create');
+    router.push({ pathname: '/create', params: { returnTo: '/circles' } });
   }, [accountabilityPlan.action, router, shareableCircle]);
 
   useEffect(() => {
@@ -472,6 +473,7 @@ export default function CirclesScreen() {
               return (
                 <Pressable
                   key={view}
+                  accessibilityLabel={`Show ${view === 'activity' ? 'activity' : 'manage'} circles view`}
                   accessibilityRole="button"
                   accessibilityState={{ selected: isActive }}
                   onPress={() => setActiveView(view)}
@@ -513,6 +515,50 @@ export default function CirclesScreen() {
             </View>
 
             <AppButton label={accountabilityPlan.actionLabel} onPress={handleAccountabilityPlanAction} />
+          </AppCard>
+
+          <AppCard elevated tone="canvas">
+            <SectionHeader
+              kicker="Share controls"
+              size="compact"
+              title="Private unless a checkpoint opts in"
+              description="Circles can only see accountability signals that a checkpoint is configured to share."
+            />
+
+            <View style={styles.shareControlGrid}>
+              <ActionRow
+                description="Each checkpoint chooses whether clears and misses are shared with a circle."
+                leading={<ActionRowGlyph label="C" />}
+                statusLabel="Per checkpoint"
+                statusTone="primary"
+                style={styles.shareControlRow}
+                title="Check-ins"
+              />
+              <ActionRow
+                description="Streak and weekly reliability context is attached only to shared check-ins."
+                leading={<ActionRowGlyph label="S" />}
+                statusLabel="Scoped"
+                statusTone="primary"
+                style={styles.shareControlRow}
+                title="Streaks"
+              />
+              <ActionRow
+                description="Checkpoint notes stay out of the circle feed and exports remain device/account owned."
+                leading={<ActionRowGlyph label="N" />}
+                statusLabel="Private"
+                statusTone="success"
+                style={styles.shareControlRow}
+                title="Notes"
+              />
+              <ActionRow
+                description="The app shares proof outcomes, not live location. Place/object labels stay in the checkpoint setup."
+                leading={<ActionRowGlyph label="L" />}
+                statusLabel="Private"
+                statusTone="success"
+                style={styles.shareControlRow}
+                title="Location"
+              />
+            </View>
           </AppCard>
 
           {loadError ? (
@@ -606,6 +652,7 @@ export default function CirclesScreen() {
 
                   <View style={styles.feedFilterRow}>
                     <Pressable
+                      accessibilityLabel="Show all circles in the feed"
                       accessibilityRole="button"
                       accessibilityState={{ selected: selectedFeedCircleId === ALL_CIRCLES_FILTER }}
                       onPress={() => setSelectedFeedCircleId(ALL_CIRCLES_FILTER)}
@@ -632,6 +679,7 @@ export default function CirclesScreen() {
                       return (
                         <Pressable
                           key={circle.id}
+                          accessibilityLabel={`Filter feed to ${circle.name}`}
                           accessibilityRole="button"
                           accessibilityState={{ selected: isSelected }}
                           onPress={() => setSelectedFeedCircleId(circle.id)}
@@ -921,6 +969,15 @@ const styles = StyleSheet.create({
     ...TextPresets.body,
     fontSize: 14,
     lineHeight: 20,
+  },
+  shareControlGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.sm,
+  },
+  shareControlRow: {
+    flexBasis: 240,
+    flexGrow: 1,
   },
   heroCard: {
     gap: Spacing.md,

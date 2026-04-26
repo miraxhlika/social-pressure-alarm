@@ -12,6 +12,7 @@ import { Alarm } from '@/types/alarm';
 type AlarmCardProps = {
   alarm: Alarm;
   onEdit: (alarm: Alarm) => void;
+  onDetails: (alarm: Alarm) => void;
   onOpen: (alarm: Alarm) => void;
   onReschedule: (alarm: Alarm) => void;
   onReuse: (alarm: Alarm) => void;
@@ -50,7 +51,7 @@ function getLastOutcomeCopy(alarm: Alarm) {
   return 'Awaiting first result';
 }
 
-export function AlarmCard({ alarm, onDelete, onEdit, onOpen, onReschedule, onReuse }: AlarmCardProps) {
+export function AlarmCard({ alarm, onDelete, onDetails, onEdit, onOpen, onReschedule, onReuse }: AlarmCardProps) {
   const colors = getAppColors(useColorScheme());
   const phase = getAlarmPhase(alarm);
   const sharesToCircle = Boolean(
@@ -76,6 +77,9 @@ export function AlarmCard({ alarm, onDelete, onEdit, onOpen, onReschedule, onReu
 
       <View style={styles.copy}>
         <Text style={[styles.label, { color: colors.text }]}>{alarm.label}</Text>
+        {alarm.placeObject ? (
+          <Text style={[styles.placeObject, { color: colors.primary }]}>Proof place: {alarm.placeObject}</Text>
+        ) : null}
         <Text style={[TextPresets.body, { color: colors.textSoft }]}>
           {getUseCaseShortLabel(alarm.useCaseType)} · {formatRepeatSchedule(alarm.repeatSchedule)}
         </Text>
@@ -101,6 +105,13 @@ export function AlarmCard({ alarm, onDelete, onEdit, onOpen, onReschedule, onReu
       </View>
 
       <View style={[styles.utilityRow, { borderTopColor: colors.line ?? colors.border }]}>
+        <UtilityAction
+          accessibilityHint={`Opens schedule, proof, and history details for ${alarm.label}.`}
+          accessibilityLabel={`View details for ${alarm.label}`}
+          color={colors.primary}
+          label="Details"
+          onPress={() => onDetails(alarm)}
+        />
         <UtilityAction
           accessibilityHint={`Deletes ${alarm.label}. This action cannot be undone.`}
           accessibilityLabel={`Delete ${alarm.label}`}
@@ -145,11 +156,13 @@ const styles = StyleSheet.create({
   header: {
     alignItems: 'center',
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: Spacing.md,
     justifyContent: 'space-between',
   },
   copy: {
     gap: Spacing.xs,
+    minWidth: 0,
   },
   time: {
     fontFamily: Fonts.rounded,
@@ -168,6 +181,11 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 18,
   },
+  placeObject: {
+    ...TextPresets.label,
+    fontSize: 14,
+    lineHeight: 20,
+  },
   metaRow: {
     alignItems: 'center',
     flexDirection: 'row',
@@ -185,17 +203,22 @@ const styles = StyleSheet.create({
   },
   actionRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: Spacing.sm,
   },
   primaryAction: {
+    flexBasis: 160,
     flex: 1.2,
   },
   secondaryAction: {
+    flexBasis: 132,
     flex: 1,
   },
   utilityRow: {
     borderTopWidth: 1,
     flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.lg,
     justifyContent: 'flex-end',
     paddingTop: Spacing.xs,
   },

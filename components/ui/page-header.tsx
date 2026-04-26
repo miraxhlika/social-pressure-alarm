@@ -52,12 +52,14 @@ const styles = StyleSheet.create({
   wrap: {
     alignItems: 'flex-start',
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: Spacing.md,
     justifyContent: 'space-between',
   },
   copy: {
     flex: 1,
     gap: Spacing.sm,
+    minWidth: 220,
   },
   metaRow: {
     alignItems: 'center',
@@ -67,12 +69,14 @@ const styles = StyleSheet.create({
   },
   title: {
     ...TextPresets.titleLg,
+    flexShrink: 1,
   },
   titleCompact: {
     ...TextPresets.title,
   },
   description: {
     ...TextPresets.body,
+    flexShrink: 1,
     maxWidth: 520,
   },
   descriptionCompact: {
@@ -81,6 +85,7 @@ const styles = StyleSheet.create({
   },
   action: {
     alignSelf: 'flex-start',
+    flexShrink: 1,
     paddingTop: Spacing.xs,
   },
 });
