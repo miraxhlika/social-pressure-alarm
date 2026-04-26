@@ -82,6 +82,7 @@ const styles = StyleSheet.create({
   },
   title: {
     ...TextPresets.title,
+    flexShrink: 1,
   },
   titleInline: {
     fontSize: 22,
@@ -89,6 +90,7 @@ const styles = StyleSheet.create({
   },
   description: {
     ...TextPresets.body,
+    flexShrink: 1,
     maxWidth: 520,
   },
   childrenWrap: {

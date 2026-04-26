@@ -85,6 +85,7 @@ function ActionCard({
 
   return (
     <Pressable
+      accessibilityLabel={`${kicker}: ${title}. ${description}. ${helper}.`}
       accessibilityRole="button"
       accessibilityState={{ disabled }}
       disabled={disabled}
@@ -249,7 +250,7 @@ export default function MissedScreen() {
   }, [handleRecoveryAction, router, state.alarm]);
 
   const handleEdit = useCallback(
-    (recoveryFocus: 'grace' | 'time') => {
+    (recoveryFocus: 'grace' | 'time' | 'code') => {
       void handleRecoveryAction('edit', async () => {
         if (!state.alarm) {
           return;
@@ -269,6 +270,7 @@ export default function MissedScreen() {
             alarmId: state.alarm.id,
             mode: 'edit',
             recoveryFocus,
+            returnTo: `/missed?alarmId=${state.alarm.id}`,
           },
         });
       });
@@ -341,6 +343,8 @@ export default function MissedScreen() {
           <StatTile
             helper={weeklyStats?.attempts ? `${weeklyStats.successes}/${weeklyStats.attempts} cleared` : 'No weekly baseline yet'}
             label="This week"
+            progress={weeklyStats?.attempts ? weeklyStats.completionRate / 100 : 0}
+            progressLabel="Weekly reliability progress"
             tone="primary"
             value={weeklyStats?.attempts ? `${weeklyStats.completionRate}%` : '—'}
           />
@@ -402,6 +406,14 @@ export default function MissedScreen() {
           kicker="Reach window"
           onPress={() => handleEdit('grace')}
           title="Adjust the grace period"
+        />
+        <ActionCard
+          disabled={processingAction !== null}
+          description="Make the physical proof easier to identify, or replace the saved QR/barcode if the current one is in the wrong spot."
+          helper="Open edit flow on place and proof"
+          kicker="Code location"
+          onPress={() => handleEdit('code')}
+          title="Add a better code location"
         />
       </View>
 

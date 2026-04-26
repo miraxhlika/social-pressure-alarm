@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import * as Clipboard from 'expo-clipboard';
+import { useCameraPermissions } from 'expo-camera';
 import type { User } from '@supabase/supabase-js';
-import { Pressable, Platform, StyleSheet, Switch, Text, View } from 'react-native';
+import { useFocusEffect, useRouter } from 'expo-router';
+import { Alert, Linking, Pressable, Platform, Share, StyleSheet, Switch, Text, View } from 'react-native';
 
+import { ActionRow, ActionRowGlyph } from '@/components/ui/action-row';
 import { AppButton } from '@/components/ui/app-button';
 import { AppCard } from '@/components/ui/app-card';
 import { AppInput } from '@/components/ui/app-input';
@@ -13,9 +17,11 @@ import { StateCard } from '@/components/ui/state-card';
 import { StatusPill } from '@/components/ui/status-pill';
 import { Fonts, Radius, Spacing, TextPresets, Type, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { clearUnusedCheckpointPresets, readAlarmStore, resetAlarmStore } from '@/lib/alarms';
 import {
   DEFAULT_NOTIFICATION_PREFERENCES,
   NotificationPermissionState,
+  cancelAlarmNotificationAsync,
   ensureNotificationPermissionsAsync,
   getNotificationPermissionState,
   readNotificationPreferences,
@@ -23,7 +29,11 @@ import {
   syncNotificationStrategyAsync,
   syncWeeklyReviewReminderAsync,
 } from '@/lib/notifications';
+import { DEFAULT_APP_PREFERENCES, AppPreferences, readAppPreferences, saveAppPreferences } from '@/lib/preferences';
+import { resetSocialSyncState } from '@/lib/social/queue';
+import { getActiveStorageScope, readScopedStorageValue, writeScopedStorageValue } from '@/lib/storage';
 import { useSocialSession } from '@/providers/social-session-provider';
+import { AlarmProofStrictness } from '@/types/alarm';
 
 type FormFeedbackTone = 'success' | 'danger' | 'warning';
 type ProfileFieldErrors = {
@@ -35,8 +45,24 @@ type FormFeedback = {
   tone: FormFeedbackTone;
   message: string;
 };
+type SyncChoice = 'undecided' | 'local-only';
+type ProofCodeStats = {
+  linkedCodeCount: number;
+  savedPresetCount: number;
+  unusedPresetCount: number;
+  strictCount: number;
+  standardCount: number;
+};
 
+const EMPTY_PROOF_CODE_STATS: ProofCodeStats = {
+  linkedCodeCount: 0,
+  savedPresetCount: 0,
+  unusedPresetCount: 0,
+  strictCount: 0,
+  standardCount: 0,
+};
 const DEFAULT_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
+const SYNC_CHOICE_STORAGE_KEY = 'social-pressure-alarm/sync-choice';
 const COMMON_TIMEZONES = [
   'UTC',
   DEFAULT_TIMEZONE,
@@ -217,6 +243,25 @@ function hasErrors(errors: Record<string, string | undefined>) {
   return Object.values(errors).some(Boolean);
 }
 
+function getProofCodeStatsDescription(stats: ProofCodeStats) {
+  if (stats.linkedCodeCount === 0) {
+    return 'No proof codes are linked yet. Create a checkpoint to save the first exact QR or barcode.';
+  }
+
+  return `${stats.linkedCodeCount} linked proof code${stats.linkedCodeCount === 1 ? '' : 's'} across saved checkpoints. ${
+    stats.savedPresetCount
+  } reusable preset${stats.savedPresetCount === 1 ? '' : 's'} kept for faster setup.`;
+}
+
+async function readSyncChoice(): Promise<SyncChoice> {
+  const storedChoice = await readScopedStorageValue(SYNC_CHOICE_STORAGE_KEY);
+  return storedChoice.value === 'local-only' ? 'local-only' : 'undecided';
+}
+
+async function saveSyncChoice(choice: SyncChoice) {
+  await writeScopedStorageValue(SYNC_CHOICE_STORAGE_KEY, choice);
+}
+
 function getFeedbackColors(tone: FormFeedbackTone, colors: ReturnType<typeof getAppColors>) {
   if (tone === 'danger') {
     return {
@@ -278,7 +323,44 @@ function getNotificationPermissionHelper(state: NotificationPermissionState) {
   }
 }
 
+function getCameraPermissionLabel(permission: ReturnType<typeof useCameraPermissions>[0]) {
+  if (permission?.granted) {
+    return 'Allowed';
+  }
+
+  if (permission?.canAskAgain === false) {
+    return 'Blocked';
+  }
+
+  return 'Not set';
+}
+
+function getCameraPermissionTone(permission: ReturnType<typeof useCameraPermissions>[0]) {
+  if (permission?.granted) {
+    return 'success' as const;
+  }
+
+  return 'warning' as const;
+}
+
+function getCameraPermissionHelper(permission: ReturnType<typeof useCameraPermissions>[0]) {
+  if (permission?.granted) {
+    return 'Camera access is ready for linking and clearing proof codes.';
+  }
+
+  if (permission?.canAskAgain === false) {
+    return 'Camera access is blocked in device settings. Manual entry stays available, but scanning needs camera access.';
+  }
+
+  return 'Allow camera access before your first live checkpoint so proof-code scans are ready.';
+}
+
+function getProofStrictnessLabel(strictness: AlarmProofStrictness) {
+  return strictness === 'strict' ? 'Strict' : 'Standard';
+}
+
 export default function AccountScreen() {
+  const router = useRouter();
   const colors = getAppColors(useColorScheme());
   const {
     authRedirectUrl,
@@ -295,6 +377,7 @@ export default function AccountScreen() {
     saveProfile,
     user,
   } = useSocialSession();
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const hydratedFormKeyRef = useRef<string | null>(null);
   const [authFeedback, setAuthFeedback] = useState<FormFeedback | null>(null);
   const [displayName, setDisplayName] = useState('');
@@ -312,6 +395,20 @@ export default function AccountScreen() {
   const [isReminderPreferencesLoading, setIsReminderPreferencesLoading] = useState(true);
   const [isReminderPreferencesSubmitting, setIsReminderPreferencesSubmitting] = useState(false);
   const [reminderFeedback, setReminderFeedback] = useState<FormFeedback | null>(null);
+  const [syncChoice, setSyncChoice] = useState<SyncChoice>('undecided');
+  const [isSyncChoiceLoading, setIsSyncChoiceLoading] = useState(true);
+  const [isSyncChoiceSubmitting, setIsSyncChoiceSubmitting] = useState(false);
+  const [dataFeedback, setDataFeedback] = useState<FormFeedback | null>(null);
+  const [isExportingData, setIsExportingData] = useState(false);
+  const [isDeletingData, setIsDeletingData] = useState(false);
+  const [proofCodeStats, setProofCodeStats] = useState<ProofCodeStats>(EMPTY_PROOF_CODE_STATS);
+  const [isProofCodeStatsLoading, setIsProofCodeStatsLoading] = useState(true);
+  const [codeFeedback, setCodeFeedback] = useState<FormFeedback | null>(null);
+  const [isClearingUnusedCodes, setIsClearingUnusedCodes] = useState(false);
+  const [appPreferences, setAppPreferences] = useState<AppPreferences>(DEFAULT_APP_PREFERENCES);
+  const [isAppPreferencesLoading, setIsAppPreferencesLoading] = useState(true);
+  const [isAppPreferencesSubmitting, setIsAppPreferencesSubmitting] = useState(false);
+  const [deviceFeedback, setDeviceFeedback] = useState<FormFeedback | null>(null);
   const suggestedDisplayName = createSuggestedDisplayName(user);
   const suggestedHandle = createSuggestedHandle(user);
   const signedInAccountLabel = getAccountLabel(user);
@@ -346,12 +443,19 @@ export default function AccountScreen() {
   const authFeedbackColors = authFeedback ? getFeedbackColors(authFeedback.tone, colors) : null;
   const profileFeedbackColors = profileFeedback ? getFeedbackColors(profileFeedback.tone, colors) : null;
   const reminderFeedbackColors = reminderFeedback ? getFeedbackColors(reminderFeedback.tone, colors) : null;
+  const dataFeedbackColors = dataFeedback ? getFeedbackColors(dataFeedback.tone, colors) : null;
+  const codeFeedbackColors = codeFeedback ? getFeedbackColors(codeFeedback.tone, colors) : null;
+  const deviceFeedbackColors = deviceFeedback ? getFeedbackColors(deviceFeedback.tone, colors) : null;
   const handleHelper =
     normalizedHandle.length >= 3
       ? `Circle members will see @${normalizedHandle}.`
       : 'Lowercase only, with letters, numbers, and underscores.';
   const notificationPermissionLabel = getNotificationPermissionLabel(notificationPermissionState);
   const notificationPermissionHelper = getNotificationPermissionHelper(notificationPermissionState);
+  const cameraPermissionLabel = getCameraPermissionLabel(cameraPermission);
+  const cameraPermissionHelper = getCameraPermissionHelper(cameraPermission);
+  const isLocalOnlySelected = !user && syncChoice === 'local-only';
+  const proofCodeStatsDescription = getProofCodeStatsDescription(proofCodeStats);
 
   const loadReminderSettings = useCallback(async () => {
     setIsReminderPreferencesLoading(true);
@@ -373,6 +477,64 @@ export default function AccountScreen() {
   useEffect(() => {
     void loadReminderSettings();
   }, [loadReminderSettings]);
+
+  const loadSyncChoice = useCallback(async () => {
+    setIsSyncChoiceLoading(true);
+
+    try {
+      setSyncChoice(await readSyncChoice());
+    } finally {
+      setIsSyncChoiceLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadSyncChoice();
+  }, [loadSyncChoice, user?.id]);
+
+  const loadAppPreferences = useCallback(async () => {
+    setIsAppPreferencesLoading(true);
+
+    try {
+      setAppPreferences(await readAppPreferences());
+      setDeviceFeedback(null);
+    } finally {
+      setIsAppPreferencesLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadAppPreferences();
+  }, [loadAppPreferences, user?.id]);
+
+  const loadProofCodeStats = useCallback(async () => {
+    setIsProofCodeStatsLoading(true);
+
+    try {
+      const store = await readAlarmStore();
+      const linkedPresetKeys = new Set(
+        store.alarms.map((alarm) => `${alarm.label.trim().toLowerCase()}::${alarm.expectedQrPayload}`)
+      );
+
+      setProofCodeStats({
+        linkedCodeCount: store.alarms.filter((alarm) => alarm.expectedQrPayload.trim().length > 0).length,
+        savedPresetCount: store.checkpointPresets.length,
+        unusedPresetCount: store.checkpointPresets.filter(
+          (preset) => !linkedPresetKeys.has(`${preset.label.trim().toLowerCase()}::${preset.expectedQrPayload}`)
+        ).length,
+        strictCount: store.alarms.filter((alarm) => alarm.proofStrictness === 'strict').length,
+        standardCount: store.alarms.filter((alarm) => alarm.proofStrictness === 'standard').length,
+      });
+    } finally {
+      setIsProofCodeStatsLoading(false);
+    }
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      void loadProofCodeStats();
+    }, [loadProofCodeStats])
+  );
 
   const handleContinueWithGoogle = async () => {
     setAuthFeedback(null);
@@ -454,6 +616,226 @@ export default function AccountScreen() {
     }
   };
 
+  const handleKeepLocalOnly = async () => {
+    setIsSyncChoiceSubmitting(true);
+    setAuthFeedback(null);
+
+    try {
+      await saveSyncChoice('local-only');
+      setSyncChoice('local-only');
+      setAuthFeedback({
+        tone: 'success',
+        message: 'Local-only mode saved. Sync and circles stay off until you turn them on here.',
+      });
+    } catch (error) {
+      setAuthFeedback({
+        tone: 'danger',
+        message: error instanceof Error ? error.message : 'Local-only mode could not be saved right now.',
+      });
+    } finally {
+      setIsSyncChoiceSubmitting(false);
+    }
+  };
+
+  const handleReviewCheckpoints = () => {
+    router.push('/alarms');
+  };
+
+  const handleRequestCameraAccess = async () => {
+    setDeviceFeedback(null);
+
+    if (cameraPermission?.canAskAgain === false) {
+      await Linking.openSettings();
+      return;
+    }
+
+    const nextPermission = await requestCameraPermission();
+
+    setDeviceFeedback({
+      tone: nextPermission.granted ? 'success' : 'warning',
+      message: nextPermission.granted
+        ? 'Camera access is ready for proof-code scanning.'
+        : 'Camera access is still unavailable. Manual entry remains available for setup and recovery.',
+    });
+  };
+
+  const handleSaveDefaultProofStrictness = async (defaultProofStrictness: AlarmProofStrictness) => {
+    setIsAppPreferencesSubmitting(true);
+    setDeviceFeedback(null);
+
+    try {
+      const nextPreferences = await saveAppPreferences({
+        ...appPreferences,
+        defaultProofStrictness,
+      });
+      setAppPreferences(nextPreferences);
+      setDeviceFeedback({
+        tone: 'success',
+        message: `${getProofStrictnessLabel(defaultProofStrictness)} is now the default for new checkpoints.`,
+      });
+    } catch (error) {
+      setDeviceFeedback({
+        tone: 'danger',
+        message: error instanceof Error ? error.message : 'Default checkpoint settings could not be saved right now.',
+      });
+    } finally {
+      setIsAppPreferencesSubmitting(false);
+    }
+  };
+
+  const clearUnusedCodes = async () => {
+    setIsClearingUnusedCodes(true);
+    setCodeFeedback(null);
+
+    try {
+      const result = await clearUnusedCheckpointPresets();
+      await loadProofCodeStats();
+      setCodeFeedback({
+        tone: 'success',
+        message:
+          result.removedCount === 0
+            ? 'No unused saved proof codes to clear.'
+            : `Cleared ${result.removedCount} unused saved proof code${result.removedCount === 1 ? '' : 's'}.`,
+      });
+    } catch (error) {
+      setCodeFeedback({
+        tone: 'danger',
+        message: error instanceof Error ? error.message : 'Unused proof codes could not be cleared right now.',
+      });
+    } finally {
+      setIsClearingUnusedCodes(false);
+    }
+  };
+
+  const handleClearUnusedCodes = () => {
+    if (proofCodeStats.unusedPresetCount === 0) {
+      setCodeFeedback({
+        tone: 'success',
+        message: 'No unused saved proof codes to clear.',
+      });
+      return;
+    }
+
+    Alert.alert(
+      'Clear unused saved codes?',
+      'This removes reusable proof-code presets that are not currently linked to any checkpoint. Linked checkpoint proof codes stay unchanged.',
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel',
+        },
+        {
+          text: 'Clear unused',
+          style: 'destructive',
+          onPress: () => {
+            void clearUnusedCodes();
+          },
+        },
+      ]
+    );
+  };
+
+  const handleExportData = async () => {
+    setIsExportingData(true);
+    setDataFeedback(null);
+
+    try {
+      const [store, notificationPreferences, preferences, storageScope] = await Promise.all([
+        readAlarmStore(),
+        readNotificationPreferences(),
+        readAppPreferences(),
+        getActiveStorageScope(),
+      ]);
+      const exportedData = {
+        schemaVersion: 1,
+        exportedAt: new Date().toISOString(),
+        storageScope,
+        sync: {
+          configured,
+          signedIn: Boolean(user),
+          account: user ? getAccountLabel(user) : null,
+          profile: profile
+            ? {
+                displayName: profile.displayName,
+                handle: profile.handle,
+                timezone: profile.timezone,
+                allowCircleNotifications: profile.allowCircleNotifications,
+                allowMissedAlarmAlerts: profile.allowMissedAlarmAlerts,
+              }
+            : null,
+        },
+        notificationPreferences,
+        appPreferences: preferences,
+        store,
+      };
+      const serializedData = JSON.stringify(exportedData, null, 2);
+
+      await Clipboard.setStringAsync(serializedData);
+      await Share.share({
+        title: 'QR Checkpoint Alarm export',
+        message: serializedData,
+      });
+      setDataFeedback({
+        tone: 'success',
+        message: 'Data export prepared and copied to the clipboard.',
+      });
+    } catch (error) {
+      setDataFeedback({
+        tone: 'danger',
+        message: error instanceof Error ? error.message : 'Data export could not be prepared right now.',
+      });
+    } finally {
+      setIsExportingData(false);
+    }
+  };
+
+  const deleteCheckpointData = async () => {
+    setIsDeletingData(true);
+    setDataFeedback(null);
+
+    try {
+      const store = await readAlarmStore();
+      await Promise.all(store.alarms.map((alarm) => cancelAlarmNotificationAsync(alarm.notificationIds)));
+      await Promise.all([resetAlarmStore(), resetSocialSyncState()]);
+      await Promise.all([loadReminderSettings(), loadProofCodeStats()]);
+      setDataFeedback({
+        tone: 'success',
+        message: user
+          ? 'Checkpoint data was deleted for this account and device.'
+          : 'Local checkpoint data was deleted from this device.',
+      });
+    } catch (error) {
+      setDataFeedback({
+        tone: 'danger',
+        message: error instanceof Error ? error.message : 'Data could not be deleted right now.',
+      });
+    } finally {
+      setIsDeletingData(false);
+    }
+  };
+
+  const handleDeleteData = () => {
+    Alert.alert(
+      'Delete checkpoint data?',
+      user
+        ? 'This clears saved checkpoints, proof history, queued social sync state, and scheduled notifications for the signed-in account on this device. Synced checkpoint backups are cleared when the backend is reachable.'
+        : 'This clears saved checkpoints, proof history, queued sync state, and scheduled notifications from this device.',
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel',
+        },
+        {
+          text: 'Delete data',
+          style: 'destructive',
+          onPress: () => {
+            void deleteCheckpointData();
+          },
+        },
+      ]
+    );
+  };
+
   const handleSaveReminderPreferences = async () => {
     const wantsOptionalReminder =
       reminderPreferences.urgencyRemindersEnabled ||
@@ -501,12 +883,202 @@ export default function AccountScreen() {
   return (
     <AppScreen keyboardAware>
         <PageHeader
-          eyebrow="Account"
-          title="Identity and alerts"
-          description="Sync, profile, and notification preferences."
-          badgeLabel={user ? 'Signed in' : 'Guest'}
+          eyebrow="Settings"
+          title="Settings & Privacy"
+          description="Choose local-only use, optional sync, reminders, data export, and circle privacy."
+          badgeLabel={user ? 'Sync on' : isLocalOnlySelected ? 'Local only' : 'Guest'}
           badgeTone={user ? 'success' : 'warning'}
         />
+
+        <AppCard elevated tone={user ? 'success' : isLocalOnlySelected ? 'canvas' : 'primary'}>
+          <SectionHeader
+            action={
+              <StatusPill
+                label={user ? 'Enabled' : isLocalOnlySelected ? 'Saved' : 'Optional'}
+                tone={user ? 'success' : isLocalOnlySelected ? 'default' : 'primary'}
+              />
+            }
+            kicker="Optional sync"
+            title={user ? 'Secure backup is on' : isLocalOnlySelected ? 'Local-only mode' : 'Enable sync only if you want it'}
+            description={
+              user
+                ? 'Your signed-in account can back up checkpoints, restore them on another device, and unlock circles.'
+                : isLocalOnlySelected
+                  ? 'Checkpoints, proof history, and preferences stay on this device. You can enable sync here later.'
+                  : 'The app works locally without an account. Sync adds secure backup, cross-device access, and private circles.'
+            }
+          />
+
+          <View style={styles.modeGrid}>
+            <ActionRow
+              description="Create and clear checkpoints on this device without sending proof history to an account."
+              leading={<ActionRowGlyph label="L" />}
+              statusLabel={user ? 'Off' : 'On'}
+              statusTone={user ? 'default' : 'success'}
+              style={styles.modeRow}
+              title="Local-only use"
+            />
+            <ActionRow
+              description="Sign in when you want checkpoint backup, restore, and circle invites."
+              leading={<ActionRowGlyph label="S" />}
+              statusLabel={user ? 'On' : 'Off'}
+              statusTone={user ? 'success' : 'default'}
+              style={styles.modeRow}
+              title="Account sync"
+            />
+            <ActionRow
+              description="Trusted people only see what each checkpoint is configured to share."
+              leading={<ActionRowGlyph label="C" />}
+              statusLabel={user ? 'Available' : 'Opt-in'}
+              statusTone={user ? 'primary' : 'default'}
+              style={styles.modeRow}
+              title="Private circles"
+            />
+          </View>
+
+          {!configured ? (
+            <StateCard
+              description="Add the Supabase URL and anon key before enabling sync or circles. Local checkpoints still work."
+              title="Sync is not configured"
+              variant="inline"
+            />
+          ) : isLoading || isSyncChoiceLoading ? (
+            <Text style={[styles.helperCaption, { color: colors.muted }]}>Checking sync state...</Text>
+          ) : !user ? (
+            <>
+              <View style={styles.buttonGroup}>
+                <AppButton
+                  disabled={Boolean(authProviderInFlight)}
+                  label={isGoogleSubmitting ? 'Connecting Google...' : 'Enable sync with Google'}
+                  onPress={handleContinueWithGoogle}
+                  variant="secondary"
+                />
+                {supportsAppleSignIn ? (
+                  <AppButton
+                    disabled={Boolean(authProviderInFlight)}
+                    label={isAppleSubmitting ? 'Connecting Apple...' : 'Enable sync with Apple'}
+                    onPress={handleContinueWithApple}
+                    variant="ghost"
+                  />
+                ) : null}
+                <AppButton
+                  disabled={isSyncChoiceSubmitting}
+                  label={isLocalOnlySelected ? 'Local-only saved' : 'Keep Local Only'}
+                  onPress={handleKeepLocalOnly}
+                  variant={isLocalOnlySelected ? 'ghost' : 'secondary'}
+                />
+              </View>
+
+              <Text style={[styles.helperCaption, { color: colors.muted }]}>
+                If sign-in returns to the browser, confirm {authRedirectUrl} is allowed in your Supabase redirect URLs.
+              </Text>
+              {!supportsAppleSignIn ? (
+                <Text style={[styles.helperCaption, { color: colors.muted }]}>
+                  Apple sign-in appears on iPhone and iPad builds.
+                </Text>
+              ) : null}
+
+              {authFeedback && authFeedbackColors ? (
+                <View
+                  style={[
+                    styles.feedbackCard,
+                    {
+                      backgroundColor: authFeedbackColors.backgroundColor,
+                      borderColor: authFeedbackColors.borderColor,
+                    },
+                  ]}>
+                  <Text style={[TextPresets.body, { color: authFeedbackColors.textColor }]}>
+                    {authFeedback.message}
+                  </Text>
+                </View>
+              ) : null}
+            </>
+          ) : (
+            <AppButton
+              disabled={isSigningOut}
+              label={isSigningOut ? 'Signing out...' : 'Sign out and keep this device local'}
+              onPress={handleSignOut}
+              variant="ghost"
+            />
+          )}
+        </AppCard>
+
+        <AppCard elevated tone="canvas">
+          <SectionHeader
+            action={
+              <StatusPill
+                label={cameraPermissionLabel}
+                tone={getCameraPermissionTone(cameraPermission)}
+              />
+            }
+            kicker="Device access"
+            title="Camera, defaults, and accessibility"
+            description="Set up the device pieces that make proof-code scanning and checkpoint creation reliable."
+          />
+
+          <View style={styles.modeGrid}>
+            <ActionRow
+              description={cameraPermissionHelper}
+              leading={<ActionRowGlyph label="C" />}
+              onPress={handleRequestCameraAccess}
+              statusLabel={cameraPermissionLabel}
+              statusTone={getCameraPermissionTone(cameraPermission)}
+              style={styles.modeRow}
+              title={cameraPermission?.canAskAgain === false ? 'Open camera settings' : 'Camera access'}
+            />
+            <ActionRow
+              description="Use the original exact-match behavior for every new checkpoint unless changed while creating it."
+              disabled={isAppPreferencesLoading || isAppPreferencesSubmitting}
+              leading={<ActionRowGlyph label="X" />}
+              onPress={() => {
+                void handleSaveDefaultProofStrictness('strict');
+              }}
+              statusLabel={appPreferences.defaultProofStrictness === 'strict' ? 'Default' : 'Available'}
+              statusTone={appPreferences.defaultProofStrictness === 'strict' ? 'success' : 'default'}
+              style={styles.modeRow}
+              title="Strict default"
+            />
+            <ActionRow
+              description="Keep exact-match proof, but make fallback copy a little more guided on newly created checkpoints."
+              disabled={isAppPreferencesLoading || isAppPreferencesSubmitting}
+              leading={<ActionRowGlyph label="S" />}
+              onPress={() => {
+                void handleSaveDefaultProofStrictness('standard');
+              }}
+              statusLabel={appPreferences.defaultProofStrictness === 'standard' ? 'Default' : 'Available'}
+              statusTone={appPreferences.defaultProofStrictness === 'standard' ? 'primary' : 'default'}
+              style={styles.modeRow}
+              title="Standard default"
+            />
+            <ActionRow
+              description="Text follows device scaling, screens scroll inside safe areas, and scan controls keep visible labels."
+              leading={<ActionRowGlyph label="A" />}
+              statusLabel="System"
+              statusTone="success"
+              style={styles.modeRow}
+              title="Accessibility behavior"
+            />
+          </View>
+
+          <Text style={[styles.helperCaption, { color: colors.muted }]}>
+            Existing checkpoints keep their saved strictness. The default only changes new checkpoint setup.
+          </Text>
+
+          {deviceFeedback && deviceFeedbackColors ? (
+            <View
+              style={[
+                styles.feedbackCard,
+                {
+                  backgroundColor: deviceFeedbackColors.backgroundColor,
+                  borderColor: deviceFeedbackColors.borderColor,
+                },
+              ]}>
+              <Text style={[TextPresets.body, { color: deviceFeedbackColors.textColor }]}>
+                {deviceFeedback.message}
+              </Text>
+            </View>
+          ) : null}
+        </AppCard>
 
         <AppCard elevated tone="canvas">
           <SectionHeader
@@ -618,70 +1190,91 @@ export default function AccountScreen() {
           )}
         </AppCard>
 
-        {!configured ? (
-          <StateCard
-            description="Add your Supabase URL and anon key to the app environment first, then reopen this module."
-            title="Supabase not configured"
-          />
-        ) : isLoading ? (
-          <LoadingBlock description="Checking your account session and profile." title="Loading account" />
-        ) : !user ? (
-          <>
-            <StateCard
-              description="Your checkpoints still run locally. Sign in only if you want sync and circles."
-              style={styles.authIntro}
-              title="Sync and circles"
-              tone="primary"
-            />
-            <AppCard elevated>
-              <SectionHeader
-                kicker="Authentication"
-                title="Continue securely"
-                description="Use Google or Apple to create your sync account and sign back in on any device."
+        <AppCard elevated tone="canvas">
+          <SectionHeader
+            action={
+              <StatusPill
+                label={isProofCodeStatsLoading ? 'Loading' : `${proofCodeStats.linkedCodeCount} linked`}
+                tone={proofCodeStats.linkedCodeCount > 0 ? 'success' : 'default'}
               />
+            }
+            kicker="Code management"
+            title="Proof codes live on checkpoints"
+            description={proofCodeStatsDescription}
+          />
 
-              <View style={styles.buttonGroup}>
-                <AppButton
-                  disabled={Boolean(authProviderInFlight)}
-                  label={isGoogleSubmitting ? 'Connecting Google...' : 'Continue with Google'}
-                  onPress={handleContinueWithGoogle}
-                  variant="secondary"
-                />
-                {supportsAppleSignIn ? (
-                  <AppButton
-                    disabled={Boolean(authProviderInFlight)}
-                    label={isAppleSubmitting ? 'Connecting Apple...' : 'Continue with Apple'}
-                    onPress={handleContinueWithApple}
-                    variant="ghost"
-                  />
-                ) : null}
-              </View>
+          <View style={styles.modeGrid}>
+            <ActionRow
+              description="Edit or relink proof codes from the checkpoint that uses them."
+              disabled={isProofCodeStatsLoading}
+              leading={<ActionRowGlyph label="P" />}
+              onPress={handleReviewCheckpoints}
+              statusLabel={`${proofCodeStats.linkedCodeCount}`}
+              statusTone={proofCodeStats.linkedCodeCount > 0 ? 'success' : 'default'}
+              style={styles.modeRow}
+              title="Linked proof codes"
+            />
+            <ActionRow
+              description="Generated, scanned, or reused codes kept only to speed up future checkpoint setup."
+              disabled={isProofCodeStatsLoading || isClearingUnusedCodes}
+              leading={<ActionRowGlyph label="R" />}
+              onPress={handleClearUnusedCodes}
+              statusLabel={
+                proofCodeStats.unusedPresetCount > 0 ? `${proofCodeStats.unusedPresetCount} unused` : 'Clean'
+              }
+              statusTone={proofCodeStats.unusedPresetCount > 0 ? 'warning' : 'success'}
+              style={styles.modeRow}
+              title="Saved presets"
+            />
+            <ActionRow
+              description="Review how saved checkpoints split between Strict and Standard exact-match behavior."
+              disabled={isProofCodeStatsLoading}
+              leading={<ActionRowGlyph label="X" />}
+              statusLabel={`${proofCodeStats.strictCount} strict`}
+              statusTone={proofCodeStats.strictCount > 0 ? 'primary' : 'default'}
+              style={styles.modeRow}
+              title="Strictness"
+            />
+          </View>
 
-              <Text style={[styles.helperCaption, { color: colors.muted }]}>
-                If sign-in returns to the browser, confirm {authRedirectUrl} is allowed in your Supabase redirect URLs.
-              </Text>
-              {!supportsAppleSignIn ? (
-                <Text style={[styles.helperCaption, { color: colors.muted }]}>
-                  Apple sign-in appears on iPhone and iPad builds.
-                </Text>
-              ) : null}
+          <View style={styles.buttonGroup}>
+            <AppButton
+              label="Review checkpoints"
+              onPress={handleReviewCheckpoints}
+              variant="secondary"
+            />
+            <AppButton
+              disabled={isProofCodeStatsLoading || isClearingUnusedCodes}
+              label={isClearingUnusedCodes ? 'Clearing...' : 'Clear unused saved codes'}
+              onPress={handleClearUnusedCodes}
+              variant="ghost"
+            />
+          </View>
 
-              {authFeedback && authFeedbackColors ? (
-                <View
-                  style={[
-                    styles.feedbackCard,
-                    {
-                      backgroundColor: authFeedbackColors.backgroundColor,
-                      borderColor: authFeedbackColors.borderColor,
-                    },
-                  ]}>
-                  <Text style={[TextPresets.body, { color: authFeedbackColors.textColor }]}>
-                    {authFeedback.message}
-                  </Text>
-                </View>
-              ) : null}
-            </AppCard>
-          </>
+          <Text style={[styles.helperCaption, { color: colors.muted }]}>
+            {proofCodeStats.standardCount > 0
+              ? `${proofCodeStats.standardCount} checkpoint${proofCodeStats.standardCount === 1 ? '' : 's'} use Standard exact-match copy.`
+              : 'All saved checkpoints use Strict exact-match proof unless changed per checkpoint.'}
+          </Text>
+
+          {codeFeedback && codeFeedbackColors ? (
+            <View
+              style={[
+                styles.feedbackCard,
+                {
+                  backgroundColor: codeFeedbackColors.backgroundColor,
+                  borderColor: codeFeedbackColors.borderColor,
+                },
+              ]}>
+              <Text style={[TextPresets.body, { color: codeFeedbackColors.textColor }]}>{codeFeedback.message}</Text>
+            </View>
+          ) : null}
+        </AppCard>
+
+        {configured && isLoading ? (
+          <LoadingBlock description="Checking your account session and profile." title="Loading account" />
+        ) : !configured || !user ? (
+          null
         ) : (
           <>
             <AppCard elevated tone="primary">
@@ -903,17 +1496,55 @@ export default function AccountScreen() {
                   </View>
                 </AppCard>
 
-                <AppButton
-                  disabled={isSigningOut}
-                  label={isSigningOut ? 'Signing out...' : 'Sign out'}
-                  onPress={handleSignOut}
-                  variant="ghost"
-                  style={{ marginTop: Spacing.xl }}
-                />
               </>
             )}
           </>
         )}
+
+        <AppCard elevated tone="canvas">
+          <SectionHeader
+            kicker="Data ownership"
+            title="Export or delete data"
+            description="Your checkpoint data is yours. Export a readable copy before deleting anything destructive."
+          />
+
+          <ActionRow
+            description="Copies a JSON export with checkpoints, proof history, notification preferences, and sync profile context."
+            disabled={isExportingData || isDeletingData}
+            leading={<ActionRowGlyph label="E" />}
+            onPress={handleExportData}
+            statusLabel={isExportingData ? 'Working' : 'JSON'}
+            statusTone="primary"
+            title="Export checkpoint data"
+          />
+
+          <ActionRow
+            description={
+              user
+                ? 'Clears checkpoint data for this signed-in account on the device and attempts to clear synced checkpoint backups.'
+                : 'Clears local checkpoints, proof history, queued sync state, and scheduled notifications from this device.'
+            }
+            disabled={isExportingData || isDeletingData}
+            leading={<ActionRowGlyph label="D" />}
+            onPress={handleDeleteData}
+            statusLabel={isDeletingData ? 'Working' : 'Destructive'}
+            statusTone="danger"
+            title="Delete checkpoint data"
+          />
+
+          {dataFeedback && dataFeedbackColors ? (
+            <View
+              style={[
+                styles.feedbackCard,
+                {
+                  backgroundColor: dataFeedbackColors.backgroundColor,
+                  borderColor: dataFeedbackColors.borderColor,
+                },
+              ]}>
+              <Text style={[TextPresets.body, { color: dataFeedbackColors.textColor }]}>{dataFeedback.message}</Text>
+            </View>
+          ) : null}
+        </AppCard>
     </AppScreen>
   );
 }
@@ -934,6 +1565,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: Spacing.sm,
+  },
+  modeRow: {
+    flexBasis: 220,
+    flexGrow: 1,
   },
   modeCard: {
     borderRadius: Radius.lg,

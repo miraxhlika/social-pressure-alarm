@@ -1,10 +1,10 @@
-export const FREE_ALARM_LIMIT = 3;
 export const MAX_FAILURE_HISTORY = 10;
 export const MAX_SUCCESS_HISTORY = 20;
 export const MAX_CHECKPOINT_PRESETS = 8;
 
 export type AlarmOutcome = 'confirmed' | 'missed';
 export type RepeatSchedule = 'once' | 'daily' | 'weekdays';
+export type AlarmProofStrictness = 'standard' | 'strict';
 export type UseCaseType =
   | 'wake_up'
   | 'medication'
@@ -78,6 +78,9 @@ export type AlarmDefinition = {
   minute: number;
   label: string;
   useCaseType: UseCaseType;
+  placeObject?: string;
+  notes?: string;
+  proofStrictness: AlarmProofStrictness;
   expectedQrPayload: string;
   repeatSchedule: RepeatSchedule;
   gracePeriodSeconds: number;

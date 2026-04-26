@@ -1,25 +1,27 @@
+import { Ionicons } from '@expo/vector-icons';
 import { useCallback, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
 
-import { AppButton } from '@/components/ui/app-button';
-import { AppCard } from '@/components/ui/app-card';
 import { AppScreen } from '@/components/ui/app-screen';
 import { EmptyState } from '@/components/ui/empty-state';
+import {
+  FlowFooterButton,
+  FlowIconBadge,
+  FlowListRow,
+  FlowMetricTile,
+  FlowPanel,
+  FlowSectionLabel,
+  FlowTopBar,
+} from '@/components/ui/flow-primitives';
 import { LoadingBlock } from '@/components/ui/loading-block';
-import { PageHeader } from '@/components/ui/page-header';
-import { StatTile } from '@/components/ui/stat-tile';
-import { StatusPill } from '@/components/ui/status-pill';
-import { Fonts, Radius, Spacing, TextPresets, Type, getAppColors } from '@/constants/theme';
+import { Fonts, Radius, Spacing, TextPresets, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { formatAlarmTime, hydrateAlarmRuntimeForCurrentUser, readAlarmStore } from '@/lib/alarms';
-import { formatGracePeriodLabel, getUseCaseLabel } from '@/lib/checkpoint-templates';
+import { formatAlarmTime, formatScheduledFor, hydrateAlarmRuntimeForCurrentUser, readAlarmStore } from '@/lib/alarms';
 import {
   formatSocialTimestamp,
   getAlarmPhaseLabel,
-  getAlarmPhaseTone,
   getPrimaryAlarm,
-  getPrimaryAlarmCopy,
   getSocialStatusLabel,
   getSocialStatusTone,
 } from '@/lib/dashboard';
@@ -37,9 +39,94 @@ type HomeState = {
   progressSummary: ProgressSummary | null;
   socialRuntime: SocialRuntimeSnapshot | null;
   circleCount: number;
+  successHistory: SuccessHistoryEntry[];
+  failureHistory: FailureHistoryEntry[];
   latestSuccess: SuccessHistoryEntry | null;
   latestFailure: FailureHistoryEntry | null;
 };
+
+type TimelineItem = {
+  id: string;
+  title: string;
+  detail: string;
+  statusLabel: string;
+  tone: 'success' | 'danger' | 'warning' | 'primary';
+  sortAt: number;
+  timeLabel: string;
+};
+
+type WeeklyDayStat = {
+  key: string;
+  label: string;
+  attempts: number;
+  successes: number;
+  failures: number;
+  completionRate: number;
+};
+
+function formatTodayTitleDate(day = new Date()) {
+  return day.toLocaleDateString([], {
+    weekday: 'long',
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
+function formatDueWindow(alarm: Alarm | null) {
+  if (!alarm) {
+    return 'Choose the place or object you will prove.';
+  }
+
+  const start = new Date();
+  start.setHours(alarm.hour, alarm.minute, 0, 0);
+
+  const end = new Date(start);
+  end.setSeconds(end.getSeconds() + alarm.gracePeriodSeconds);
+
+  const startLabel = start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const endLabel = end.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+  return `Due between ${startLabel} - ${endLabel}`;
+}
+
+function formatTimelineTime(timestamp: string | number | Date) {
+  return new Date(timestamp).toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+function formatDueDistance(timestamp: string | number | Date, now = new Date()) {
+  const distanceMs = new Date(timestamp).getTime() - now.getTime();
+
+  if (distanceMs <= 0) {
+    return 'Due now';
+  }
+
+  const totalMinutes = Math.max(1, Math.round(distanceMs / 60000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+
+  if (hours === 0) {
+    return `Due in ${minutes}m`;
+  }
+
+  if (minutes === 0) {
+    return `Due in ${hours}h`;
+  }
+
+  return `Due in ${hours}h ${minutes}m`;
+}
+
+function getScheduledDateForToday(alarm: Alarm, day = new Date()) {
+  if (alarm.scheduledFor) {
+    return new Date(alarm.scheduledFor);
+  }
+
+  const scheduledDate = new Date(day);
+  scheduledDate.setHours(alarm.hour, alarm.minute, 0, 0);
+  return scheduledDate;
+}
 
 function getLatestOutcome(
   success: SuccessHistoryEntry | null,
@@ -56,7 +143,7 @@ function getLatestOutcome(
     return {
       tone: 'success',
       title: success.label,
-      detail: `Cleared in ${success.timeToScanSeconds}s · ${formatSocialTimestamp(success.confirmedAt)}`,
+      detail: `Checked in · ${formatSocialTimestamp(success.confirmedAt)}`,
     };
   }
 
@@ -73,7 +160,7 @@ function getLatestOutcome(
 
 function getCircleSummary(circleCount: number, lastSuccessfulSyncAt?: string | null) {
   if (circleCount === 0) {
-    return 'Private until you add a circle for accountability.';
+    return 'Private until you add a circle.';
   }
 
   if (!lastSuccessfulSyncAt) {
@@ -83,27 +170,101 @@ function getCircleSummary(circleCount: number, lastSuccessfulSyncAt?: string | n
   return `${circleCount} circle${circleCount === 1 ? '' : 's'} · ${formatSocialTimestamp(lastSuccessfulSyncAt)}`;
 }
 
+function isSameLocalDay(timestamp: string, day = new Date()) {
+  const date = new Date(timestamp);
+
+  if (Number.isNaN(date.getTime())) {
+    return false;
+  }
+
+  return (
+    date.getFullYear() === day.getFullYear() &&
+    date.getMonth() === day.getMonth() &&
+    date.getDate() === day.getDate()
+  );
+}
+
+function getTodayClears(successHistory: SuccessHistoryEntry[]) {
+  return successHistory.filter((entry) => isSameLocalDay(entry.confirmedAt));
+}
+
+function getTodayMisses(failureHistory: FailureHistoryEntry[]) {
+  return failureHistory.filter((entry) => isSameLocalDay(entry.failedAt));
+}
+
+function getTodayTimeline(successHistory: SuccessHistoryEntry[], failureHistory: FailureHistoryEntry[], alarms: Alarm[]) {
+  const resolvedAlarmIds = new Set([
+    ...getTodayClears(successHistory).map((entry) => entry.alarmId),
+    ...getTodayMisses(failureHistory).map((entry) => entry.alarmId),
+  ]);
+  const clearedItems = getTodayClears(successHistory).map<TimelineItem>((entry) => ({
+    id: `success-${entry.alarmId}-${entry.confirmedAt}`,
+    title: entry.label,
+    detail: `Checked in · ${entry.timeToScanSeconds}s`,
+    statusLabel: 'Done',
+    tone: 'success',
+    sortAt: new Date(entry.scheduledFor ?? entry.confirmedAt).getTime(),
+    timeLabel: formatTimelineTime(entry.scheduledFor ?? entry.confirmedAt),
+  }));
+  const missedItems = getTodayMisses(failureHistory).map<TimelineItem>((entry) => ({
+    id: `miss-${entry.alarmId}-${entry.failedAt}`,
+    title: entry.label,
+    detail: 'Missed',
+    statusLabel: 'Missed',
+    tone: 'danger',
+    sortAt: new Date(entry.scheduledFor ?? entry.failedAt).getTime(),
+    timeLabel: formatTimelineTime(entry.scheduledFor ?? entry.failedAt),
+  }));
+
+  const scheduledItems = alarms
+    .filter((alarm) => alarm.isActive && !resolvedAlarmIds.has(alarm.id))
+    .map((alarm) => {
+      const scheduledDate = getScheduledDateForToday(alarm);
+      return { alarm, scheduledDate };
+    })
+    .filter(({ scheduledDate }) => isSameLocalDay(scheduledDate.toISOString()))
+    .map<TimelineItem>(({ alarm, scheduledDate }) => ({
+      id: `scheduled-${alarm.id}`,
+      title: alarm.label,
+      detail: formatDueDistance(scheduledDate),
+      statusLabel: 'Soon',
+      tone: new Date().getTime() >= scheduledDate.getTime() ? 'warning' : 'primary',
+      sortAt: scheduledDate.getTime(),
+      timeLabel: formatTimelineTime(scheduledDate),
+    }));
+
+  return [...clearedItems, ...missedItems, ...scheduledItems].sort((left, right) => left.sortAt - right.sortAt);
+}
+
+function getUpcomingAlarms(alarms: Alarm[], primaryAlarmId?: string) {
+  const now = Date.now();
+
+  return [...alarms]
+    .filter((alarm) => alarm.isActive && alarm.id !== primaryAlarmId)
+    .sort((left, right) => {
+      const leftTime = left.scheduledFor ? new Date(left.scheduledFor).getTime() : Number.MAX_SAFE_INTEGER;
+      const rightTime = right.scheduledFor ? new Date(right.scheduledFor).getTime() : Number.MAX_SAFE_INTEGER;
+      return leftTime - rightTime;
+    })
+    .filter((alarm) => !alarm.scheduledFor || new Date(alarm.scheduledFor).getTime() >= now)
+    .slice(0, 3);
+}
+
 function getWeeklyReliabilityCopy(progressSummary: ProgressSummary | null) {
   const weeklyStats = progressSummary?.weeklyStats;
-  const weeklyReview = progressSummary?.weeklyReview;
 
-  if (!weeklyStats || !weeklyReview || weeklyStats.attempts === 0) {
+  if (!weeklyStats || weeklyStats.attempts === 0) {
     return {
-      title: 'No reliability baseline yet',
-      body: 'Your first live clear or miss will turn this into a useful reliability view instead of a setup placeholder.',
-      value: '—',
-      helper: 'No attempts recorded',
+      value: '0%',
+      helper: 'No attempts yet',
+      progress: 0,
     };
   }
 
   return {
-    title: weeklyReview.title,
-    body: weeklyReview.body,
     value: `${weeklyStats.completionRate}%`,
-    helper:
-      weeklyStats.averageTimeToClearSeconds === null
-        ? `${weeklyStats.successes}/${weeklyStats.attempts} cleared`
-        : `Avg clear ${weeklyStats.averageTimeToClearSeconds}s`,
+    helper: `${weeklyStats.successes}/${weeklyStats.attempts} cleared`,
+    progress: weeklyStats.completionRate / 100,
   };
 }
 
@@ -111,57 +272,64 @@ function getCurrentRunCopy(progressSummary: ProgressSummary | null, currentStrea
   if (!progressSummary || currentStreak === 0) {
     return {
       value: '0',
-      helper: 'Next clear starts a new run',
-    };
-  }
-
-  if (!progressSummary.milestoneProgress.nextLabel) {
-    return {
-      value: `${currentStreak}`,
-      helper: 'Highest streak tier reached',
+      helper: 'No active clear streak',
+      progress: 0,
+      activeDots: 0,
     };
   }
 
   return {
     value: `${currentStreak}`,
-    helper: `${progressSummary.milestoneProgress.remainingWins} to ${progressSummary.milestoneProgress.nextLabel}`,
+    helper: `${currentStreak} consecutive clear${currentStreak === 1 ? '' : 's'}`,
+    progress: progressSummary.milestoneProgress.progressRatio,
+    activeDots: Math.min(5, currentStreak),
   };
 }
 
-function getWeeklyReviewCards(progressSummary: ProgressSummary | null) {
-  const weeklyReview = progressSummary?.weeklyReview;
+function getWeekStart(day = new Date()) {
+  const weekStart = new Date(day);
+  const dayOfWeek = weekStart.getDay();
+  const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+  weekStart.setDate(weekStart.getDate() + mondayOffset);
+  weekStart.setHours(0, 0, 0, 0);
+  return weekStart;
+}
 
-  if (!weeklyReview) {
+function getWeeklyDayStats(successHistory: SuccessHistoryEntry[], failureHistory: FailureHistoryEntry[], day = new Date()) {
+  const weekStart = getWeekStart(day);
+  const labels = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+
+  return labels.map<WeeklyDayStat>((label, index) => {
+    const start = new Date(weekStart);
+    start.setDate(weekStart.getDate() + index);
+    const end = new Date(start);
+    end.setDate(start.getDate() + 1);
+
+    const successes = successHistory.filter((entry) => {
+      const timestamp = new Date(entry.confirmedAt).getTime();
+      return timestamp >= start.getTime() && timestamp < end.getTime();
+    }).length;
+    const failures = failureHistory.filter((entry) => {
+      const timestamp = new Date(entry.failedAt).getTime();
+      return timestamp >= start.getTime() && timestamp < end.getTime();
+    }).length;
+    const attempts = successes + failures;
+
     return {
-      strongestTitle: 'No leading routine yet',
-      strongestBody: 'Once a routine repeats, this card will show which commitment is holding best.',
-      recoveryTitle: 'No weak spot yet',
-      recoveryBody: 'Misses and low-reliability routines will show up here when the setup needs work.',
-      speedLabel: 'No clear-time baseline yet',
-      speedBody: 'Clear-time context appears after the first successful run.',
+      key: start.toISOString(),
+      label,
+      attempts,
+      successes,
+      failures,
+      completionRate: attempts === 0 ? 0 : successes / attempts,
     };
-  }
-
-  return {
-    strongestTitle: weeklyReview.strongestUseCase ? weeklyReview.strongestUseCase.label : 'No leading routine yet',
-    strongestBody: weeklyReview.strongestUseCase
-      ? `${weeklyReview.strongestUseCase.completionRate}% reliable across ${weeklyReview.strongestUseCase.attempts} attempt${
-          weeklyReview.strongestUseCase.attempts === 1 ? '' : 's'
-        }.`
-      : 'Once one routine repeats enough, it will become the weekly anchor here.',
-    recoveryTitle: weeklyReview.recoveryUseCase ? weeklyReview.recoveryUseCase.label : 'No weak spot right now',
-    recoveryBody: weeklyReview.recoveryUseCase
-      ? `${weeklyReview.recoveryUseCase.failures} miss${weeklyReview.recoveryUseCase.failures === 1 ? '' : 'es'} this week. Tighten the timing or reach window next.`
-      : 'No routine is slipping hard enough to demand a reset.',
-    speedLabel: weeklyReview.speedLabel,
-    speedBody: weeklyReview.speedBody,
-  };
+  });
 }
 
 export default function TodayScreen() {
   const router = useRouter();
   const colors = getAppColors(useColorScheme());
-  const { configured, profile, user } = useSocialSession();
+  const { configured, user } = useSocialSession();
   const [isLoading, setIsLoading] = useState(true);
   const [state, setState] = useState<HomeState>({
     alarms: [],
@@ -170,6 +338,8 @@ export default function TodayScreen() {
     progressSummary: null,
     socialRuntime: null,
     circleCount: 0,
+    successHistory: [],
+    failureHistory: [],
     latestSuccess: null,
     latestFailure: null,
   });
@@ -194,6 +364,8 @@ export default function TodayScreen() {
         progressSummary: getProgressSummary(store),
         socialRuntime,
         circleCount: circles.length,
+        successHistory: store.successHistory,
+        failureHistory: store.failureHistory,
         latestSuccess: store.successHistory[0] ?? null,
         latestFailure: store.failureHistory[0] ?? null,
       });
@@ -214,18 +386,51 @@ export default function TodayScreen() {
   const latestOutcome = getLatestOutcome(state.latestSuccess, state.latestFailure);
   const weeklyReliability = getWeeklyReliabilityCopy(state.progressSummary);
   const currentRun = getCurrentRunCopy(state.progressSummary, state.currentStreak);
-  const weeklyReviewCards = getWeeklyReviewCards(state.progressSummary);
-  const primaryActionLabel =
-    primaryAlarm && getAlarmPhaseLabel(primaryAlarm) === 'Scan now' ? 'Open scanner' : 'Create checkpoint';
+  const todayClears = useMemo(() => getTodayClears(state.successHistory), [state.successHistory]);
+  const todayMisses = useMemo(() => getTodayMisses(state.failureHistory), [state.failureHistory]);
+  const todayTimeline = useMemo(
+    () => getTodayTimeline(state.successHistory, state.failureHistory, state.alarms),
+    [state.alarms, state.failureHistory, state.successHistory]
+  );
+  const weeklyDayStats = useMemo(
+    () => getWeeklyDayStats(state.successHistory, state.failureHistory),
+    [state.failureHistory, state.successHistory]
+  );
+  const upcomingAlarms = useMemo(() => getUpcomingAlarms(state.alarms, primaryAlarm?.id), [primaryAlarm?.id, state.alarms]);
+  const primaryPhaseLabel = getAlarmPhaseLabel(primaryAlarm);
+
+  const handlePrimaryPress = () => {
+    if (primaryAlarm && primaryPhaseLabel === 'Scan now') {
+      router.push(`/ringing?alarmId=${primaryAlarm.id}`);
+      return;
+    }
+
+    if (primaryAlarm) {
+      router.push(`/checkpoint/${primaryAlarm.id}`);
+      return;
+    }
+
+    router.push({ pathname: '/create', params: { returnTo: '/' } });
+  };
+  const handleCreateCheckpoint = () => router.push({ pathname: '/create', params: { returnTo: '/' } });
 
   return (
-    <AppScreen>
-      <PageHeader
-        badgeLabel={user ? `@${profile?.handle ?? 'account'}` : configured ? 'Local' : 'Offline'}
-        badgeTone={user ? 'success' : configured ? 'warning' : 'default'}
-        eyebrow="Today"
-        title="Follow through today."
-        description="See the next commitment, what happened last, and whether your system is holding up."
+    <AppScreen
+      backgroundColor={colors.elevated}
+      contentStyle={styles.screenContent}
+      footer={
+        isLoading ? null : (
+          <View style={styles.createCtaFooter}>
+            <FlowFooterButton label="Create Checkpoint" onPress={handleCreateCheckpoint} />
+          </View>
+        )
+      }>
+      <FlowTopBar
+        onRightPress={() => router.push('/account')}
+        rightAccessibilityLabel="Open settings"
+        rightIcon="notifications-outline"
+        subtitle={formatTodayTitleDate()}
+        title="Today"
       />
 
       {isLoading ? (
@@ -240,330 +445,371 @@ export default function TodayScreen() {
           actionLabel="Create your first checkpoint"
           description="Start with one checkpoint tied to something real: waking up, medication, study, training, or leaving on time."
           eyebrow="Today"
-          onAction={() => router.push('/create')}
+          onAction={() => router.push({ pathname: '/create', params: { returnTo: '/' } })}
           title="No commitment is protected yet"
           tone="primary"
         />
       ) : (
         <>
-          <AppCard elevated tone="primary" variant="hero" style={styles.heroCard}>
-            <View style={styles.heroTopRow}>
-              <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Next commitment</Text>
-              <StatusPill label={getAlarmPhaseLabel(primaryAlarm)} tone={getAlarmPhaseTone(primaryAlarm)} />
-            </View>
-
-            <View style={styles.heroCopy}>
-              <Text style={[styles.heroTime, { color: colors.text }]}>
-                {primaryAlarm ? formatAlarmTime(primaryAlarm.hour, primaryAlarm.minute) : 'No checkpoint'}
-              </Text>
-              <Text style={[styles.heroLabel, { color: colors.text }]}>
-                {primaryAlarm ? primaryAlarm.label : 'Create your first checkpoint'}
-              </Text>
-              <Text style={[TextPresets.bodyLg, { color: colors.textSoft }]}>{getPrimaryAlarmCopy(primaryAlarm)}</Text>
-            </View>
-
-            {primaryAlarm ? (
-              <View style={styles.heroMetaWrap}>
-                <View style={[styles.heroMetaBlock, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
-                  <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>Use case</Text>
-                  <Text style={[styles.heroMetaValue, { color: colors.text }]}>{getUseCaseLabel(primaryAlarm.useCaseType)}</Text>
-                </View>
-                <View style={[styles.heroMetaBlock, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
-                  <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>Reach window</Text>
-                  <Text style={[styles.heroMetaValue, { color: colors.text }]}>
-                    {formatGracePeriodLabel(primaryAlarm.gracePeriodSeconds)}
+          <FlowPanel style={styles.duePanel}>
+            <View style={styles.dueRow}>
+              <FlowIconBadge icon="bandage-outline" size="large" tone="muted" />
+              <View style={styles.dueCopy}>
+                <Text style={[styles.dueKicker, { color: colors.primary }]}>
+                  {primaryPhaseLabel === 'Scan now' ? 'DUE NOW' : 'NEXT UP'}
+                </Text>
+                <Text style={[styles.dueTitle, { color: colors.text }]}>
+                  {primaryAlarm ? primaryAlarm.label : 'Create checkpoint'}
+                </Text>
+                <Text style={[styles.dueBody, { color: colors.textSoft }]}>
+                  {formatDueWindow(primaryAlarm)}
+                </Text>
+                <Pressable
+                  accessibilityLabel={primaryPhaseLabel === 'Scan now' ? 'Check in now' : 'Open checkpoint'}
+                  accessibilityRole="button"
+                  onPress={handlePrimaryPress}
+                  style={({ pressed }) => [styles.checkInButton, { backgroundColor: colors.text }, pressed && styles.pressed]}>
+                  <Text style={[styles.checkInLabel, { color: colors.elevated }]}>
+                    {primaryPhaseLabel === 'Scan now' ? 'Check In Now' : 'Open Checkpoint'}
                   </Text>
-                </View>
+                  <Ionicons color={colors.elevated} name="chevron-forward" size={16} />
+                </Pressable>
               </View>
-            ) : null}
-
-            <View style={styles.heroFooter}>
-              <View style={styles.heroMeta}>
-                <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>Checkpoint library</Text>
-                <Text style={[styles.heroMetaValue, { color: colors.text }]}>
-                  {state.alarms.length} reusable checkpoint{state.alarms.length === 1 ? '' : 's'}
-                </Text>
-                <Text style={[styles.heroMetaBody, { color: colors.textSoft }]}>
-                  Keep only the setups you want to repeat. Adjust the rest.
-                </Text>
-              </View>
-              <AppButton
-                label={primaryActionLabel}
-                onPress={() => {
-                  if (getAlarmPhaseLabel(primaryAlarm) === 'Scan now' && primaryAlarm) {
-                    router.push(`/ringing?alarmId=${primaryAlarm.id}`);
-                  } else {
-                    router.push('/create');
-                  }
-                }}
-                style={styles.heroAction}
-              />
             </View>
-          </AppCard>
+          </FlowPanel>
 
-          <AppCard elevated tone="canvas" style={styles.secondaryCard}>
-            <View style={styles.secondaryHeader}>
-              <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Reliability</Text>
-              <Text style={[styles.secondaryTitle, { color: colors.text }]}>{weeklyReliability.title}</Text>
-              <Text style={[styles.secondaryBody, { color: colors.textSoft }]}>{weeklyReliability.body}</Text>
+          <FlowPanel>
+            <FlowSectionLabel>TODAY&apos;S TIMELINE</FlowSectionLabel>
+            <View style={styles.timelineList}>
+              {todayTimeline.length > 0 ? (
+                todayTimeline.map((item, index) => (
+                  <TimelineRow item={item} key={item.id} showLine={index < todayTimeline.length - 1} />
+                ))
+              ) : (
+                <Text style={[styles.emptyCopy, { color: colors.textSoft }]}>Proof events will appear here as the day unfolds.</Text>
+              )}
             </View>
+          </FlowPanel>
 
-            <View style={styles.statRow}>
-              <StatTile helper={weeklyReliability.helper} label="This week" tone="primary" value={weeklyReliability.value} variant="inline" />
-              <StatTile helper={currentRun.helper} label="Current run" tone="success" value={currentRun.value} variant="inline" />
-            </View>
+          <View style={styles.metricGrid}>
+            <FlowMetricTile helper={weeklyReliability.helper} label="WEEKLY RELIABILITY" value={weeklyReliability.value}>
+              <WeekBars days={weeklyDayStats} />
+            </FlowMetricTile>
+            <FlowMetricTile helper={currentRun.helper} label="CURRENT STREAK" tone="warning" value={`🔥 ${currentRun.value}`}>
+              <StreakDots activeDots={currentRun.activeDots} />
+            </FlowMetricTile>
+          </View>
 
-            <View style={styles.secondaryRows}>
-              <SupportRow
-                body={latestOutcome ? latestOutcome.detail : 'Your first clear or miss will show up here with enough detail to judge the setup.'}
-                label="Latest proof"
-                onPress={() => router.push('/alarms')}
-                pillLabel={latestOutcome ? (latestOutcome.tone === 'success' ? 'Cleared' : 'Missed') : 'Waiting'}
-                pillTone={latestOutcome ? latestOutcome.tone : 'default'}
-                title={latestOutcome ? latestOutcome.title : 'No completed run yet'}
-              />
-              <SupportRow
-                body={getCircleSummary(state.circleCount, state.socialRuntime?.queue.lastSuccessfulSyncAt)}
-                label="Accountability"
-                onPress={() => router.push('/circles')}
-                pillLabel={socialStatusLabel}
-                pillTone={socialStatusTone}
-                title={state.circleCount === 0 ? 'Private setup' : `${state.circleCount} circle${state.circleCount === 1 ? '' : 's'} connected`}
-              />
-            </View>
-          </AppCard>
-
-          <AppCard elevated tone="canvas" style={styles.reviewCard}>
-            <View style={styles.secondaryHeader}>
-              <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Weekly review</Text>
-              <Text style={[styles.secondaryTitle, { color: colors.text }]}>
-                {state.progressSummary?.weeklyReview.title ?? 'Your review builds here'}
-              </Text>
-              <Text style={[styles.secondaryBody, { color: colors.textSoft }]}>
-                {state.progressSummary?.weeklyReview.body ??
-                  'Repeat one real commitment and this space will start showing what is holding up and what needs tightening.'}
+          <FlowPanel>
+            <View style={styles.compactSectionHeader}>
+              <FlowSectionLabel>UPCOMING</FlowSectionLabel>
+              <Text style={[styles.sectionCount, { color: colors.textSoft }]}>
+                {upcomingAlarms.length} next
               </Text>
             </View>
+            {upcomingAlarms.length > 0 ? (
+              upcomingAlarms.slice(0, 2).map((alarm) => (
+                <FlowListRow
+                  description={alarm.scheduledFor ? formatScheduledFor(alarm.scheduledFor) : formatAlarmTime(alarm.hour, alarm.minute)}
+                  key={alarm.id}
+                  onPress={() => router.push(`/checkpoint/${alarm.id}`)}
+                  title={alarm.label}
+                  trailing={<Text style={[styles.trailingTime, { color: colors.textSoft }]}>{formatAlarmTime(alarm.hour, alarm.minute)}</Text>}
+                />
+              ))
+            ) : (
+              <Text style={[styles.emptyCopy, { color: colors.textSoft }]}>No other checkpoints queued.</Text>
+            )}
+          </FlowPanel>
 
-            <View style={styles.reviewGrid}>
-              <ReviewPanel
-                body={weeklyReviewCards.strongestBody}
-                kicker="Holding strongest"
-                title={weeklyReviewCards.strongestTitle}
-              />
-              <ReviewPanel
-                body={weeklyReviewCards.recoveryBody}
-                kicker="Tighten next"
-                title={weeklyReviewCards.recoveryTitle}
-              />
-            </View>
+          <FlowPanel>
+            <FlowListRow
+              description={`${todayClears.length} checkpoint${todayClears.length === 1 ? '' : 's'} cleared today`}
+              onPress={() => router.push('/history')}
+              statusLabel={`${todayMisses.length} missed`}
+              statusTone={todayMisses.length > 0 ? 'danger' : 'success'}
+              title="Cleared today"
+            />
+            <FlowListRow
+              description={getCircleSummary(state.circleCount, state.socialRuntime?.queue.lastSuccessfulSyncAt)}
+              onPress={() => router.push('/circles')}
+              statusLabel={socialStatusLabel}
+              statusTone={socialStatusTone}
+              title={state.circleCount === 0 ? 'Accountability' : `${state.circleCount} circle${state.circleCount === 1 ? '' : 's'}`}
+            />
+            <FlowListRow
+              description={latestOutcome ? latestOutcome.detail : 'No completed run yet'}
+              onPress={() => router.push('/history')}
+              statusLabel={latestOutcome ? (latestOutcome.tone === 'success' ? 'Saved' : 'Missed') : 'Waiting'}
+              statusTone={latestOutcome ? latestOutcome.tone : 'default'}
+              title={latestOutcome ? latestOutcome.title : 'Latest proof'}
+            />
+          </FlowPanel>
 
-            <View style={[styles.reviewFooter, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
-              <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>Speed to proof</Text>
-              <Text style={[styles.reviewFooterTitle, { color: colors.text }]}>{weeklyReviewCards.speedLabel}</Text>
-              <Text style={[styles.supportRowBody, { color: colors.textSoft }]}>{weeklyReviewCards.speedBody}</Text>
-            </View>
-          </AppCard>
         </>
       )}
     </AppScreen>
   );
 }
 
-function SupportRow({
-  label,
-  title,
-  body,
-  pillLabel,
-  pillTone,
-  onPress,
-}: {
-  label: string;
-  title: string;
-  body: string;
-  pillLabel: string;
-  pillTone: 'default' | 'primary' | 'success' | 'danger' | 'warning';
-  onPress: () => void;
-}) {
+function TimelineRow({ item, showLine }: { item: TimelineItem; showLine: boolean }) {
   const colors = getAppColors(useColorScheme());
+  const dotColor =
+    item.tone === 'success' ? colors.success : item.tone === 'danger' ? colors.danger : item.tone === 'warning' ? colors.warning : colors.primary;
+  const isSuccess = item.tone === 'success';
 
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.supportRow, { borderColor: colors.line }, pressed && styles.pressedRow]}>
-      <View style={styles.supportRowCopy}>
-        <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>{label}</Text>
-        <Text style={[styles.supportRowTitle, { color: colors.text }]}>{title}</Text>
-        <Text style={[styles.supportRowBody, { color: colors.textSoft }]}>{body}</Text>
+    <View style={styles.timelineRow}>
+      <View style={styles.timelineTimeColumn}>
+        <Text style={[styles.timelineTime, { color: colors.textSoft }]}>{item.timeLabel}</Text>
       </View>
-      <StatusPill label={pillLabel} tone={pillTone} />
-    </Pressable>
+      <View style={styles.timelineMarkerColumn}>
+        <View
+          style={[
+            styles.timelineDot,
+            {
+              backgroundColor: isSuccess ? dotColor : colors.elevated,
+              borderColor: dotColor,
+            },
+          ]}>
+          {isSuccess ? <Ionicons color={colors.successText} name="checkmark" size={9} /> : null}
+        </View>
+        {showLine ? <View style={[styles.timelineStem, { backgroundColor: colors.line }]} /> : null}
+      </View>
+      <View style={styles.timelineCopy}>
+        <Text style={[styles.timelineTitle, { color: colors.text }]}>{item.title}</Text>
+        <Text style={[styles.timelineDetail, { color: colors.textSoft }]}>{item.detail}</Text>
+      </View>
+    </View>
   );
 }
 
-function ReviewPanel({
-  kicker,
-  title,
-  body,
-}: {
-  kicker: string;
-  title: string;
-  body: string;
-}) {
+function WeekBars({ days }: { days: WeeklyDayStat[] }) {
   const colors = getAppColors(useColorScheme());
 
   return (
-    <View style={[styles.reviewPanel, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
-      <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>{kicker}</Text>
-      <Text style={[styles.reviewPanelTitle, { color: colors.text }]}>{title}</Text>
-      <Text style={[styles.supportRowBody, { color: colors.textSoft }]}>{body}</Text>
+    <View style={styles.weekBars}>
+      {days.map((day) => {
+        const hasAttempts = day.attempts > 0;
+        const barColor = !hasAttempts
+          ? colors.line
+          : day.failures > 0 && day.successes === 0
+            ? colors.danger
+            : day.failures > 0
+              ? colors.warning
+              : colors.success;
+        const barHeight = hasAttempts ? 12 + Math.round(day.completionRate * 18) : 8;
+
+        return (
+        <View key={day.key} style={styles.weekBarWrap}>
+          <View
+            style={[
+              styles.weekBar,
+              {
+                backgroundColor: barColor,
+                height: barHeight,
+                opacity: hasAttempts ? 1 : 0.65,
+              },
+            ]}
+          />
+          <Text style={[styles.weekLabel, { color: colors.muted }]}>{day.label}</Text>
+        </View>
+        );
+      })}
+    </View>
+  );
+}
+
+function StreakDots({ activeDots }: { activeDots: number }) {
+  const colors = getAppColors(useColorScheme());
+
+  return (
+    <View style={styles.streakDots}>
+      {Array.from({ length: 5 }).map((_, index) => (
+        <View
+          key={index}
+          style={[
+            styles.streakDot,
+            {
+              backgroundColor: index < activeDots ? colors.success : colors.line,
+            },
+          ]}>
+          {index < activeDots ? <Ionicons color={colors.successText} name="checkmark" size={10} /> : null}
+        </View>
+      ))}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  screenContent: {
+    gap: 10,
+    paddingBottom: 150,
+    paddingHorizontal: Spacing.lg,
+    paddingTop: 2,
+  },
+  createCtaFooter: {
+    marginBottom: 56,
+  },
   loadingHero: {
     minHeight: 188,
   },
-  heroCard: {
-    gap: Spacing.xl,
+  duePanel: {
+    padding: 12,
   },
-  heroTopRow: {
-    alignItems: 'flex-start',
+  dueRow: {
+    alignItems: 'center',
     flexDirection: 'row',
     gap: Spacing.md,
-    justifyContent: 'space-between',
   },
-  heroCopy: {
-    gap: Spacing.sm,
-  },
-  heroTime: {
-    fontFamily: Fonts.rounded,
-    fontSize: Type.hero,
-    fontWeight: '800',
-    letterSpacing: -1.4,
-    lineHeight: 56,
-  },
-  heroLabel: {
-    fontFamily: Fonts.rounded,
-    fontSize: 24,
-    fontWeight: '700',
-    lineHeight: 30,
-  },
-  heroFooter: {
-    alignItems: 'flex-end',
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.md,
-    justifyContent: 'space-between',
-  },
-  heroMeta: {
+  dueCopy: {
     flex: 1,
     gap: Spacing.xs,
+    minWidth: 0,
   },
-  heroMetaWrap: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.sm,
+  dueKicker: {
+    ...TextPresets.eyebrow,
+    fontSize: 10,
+    lineHeight: 13,
   },
-  heroMetaBlock: {
-    borderRadius: Radius.md,
-    borderWidth: 1,
-    flex: 1,
-    gap: Spacing.xs,
-    minWidth: 140,
-    padding: Spacing.md,
-  },
-  heroMetaValue: {
+  dueTitle: {
     ...TextPresets.title,
-    fontSize: 20,
-    lineHeight: 26,
-  },
-  heroMetaBody: {
-    ...TextPresets.body,
-    fontSize: 14,
+    fontSize: 16,
     lineHeight: 20,
   },
-  heroAction: {
-    flexGrow: 1,
-    minWidth: 160,
-  },
-  secondaryCard: {
-    gap: Spacing.md,
-  },
-  secondaryHeader: {
-    gap: Spacing.xs,
-  },
-  secondaryTitle: {
-    ...TextPresets.title,
-    fontSize: 22,
-    lineHeight: 28,
-  },
-  secondaryBody: {
+  dueBody: {
     ...TextPresets.body,
+    fontSize: 12,
+    lineHeight: 16,
   },
-  statRow: {
+  checkInButton: {
+    alignItems: 'center',
+    borderRadius: 7,
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.sm,
-  },
-  secondaryRows: {
-    gap: Spacing.sm,
-  },
-  reviewCard: {
-    gap: Spacing.md,
-  },
-  reviewGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.sm,
-  },
-  reviewPanel: {
-    borderRadius: Radius.lg,
-    borderWidth: 1,
-    flex: 1,
     gap: Spacing.xs,
-    minWidth: 150,
-    padding: Spacing.md,
+    justifyContent: 'center',
+    marginTop: Spacing.xs,
+    minHeight: 34,
+    paddingHorizontal: Spacing.md,
   },
-  reviewPanelTitle: {
-    ...TextPresets.title,
-    fontSize: 20,
-    lineHeight: 26,
+  checkInLabel: {
+    ...TextPresets.label,
+    fontSize: 13,
+    lineHeight: 17,
   },
-  reviewFooter: {
-    borderRadius: Radius.lg,
-    borderWidth: 1,
-    gap: Spacing.xs,
-    padding: Spacing.md,
+  pressed: {
+    opacity: 0.85,
+    transform: [{ scale: 0.99 }],
   },
-  reviewFooterTitle: {
-    ...TextPresets.title,
-    fontSize: 20,
-    lineHeight: 26,
+  timelineList: {
+    gap: Spacing.sm,
   },
-  supportRow: {
+  timelineRow: {
     alignItems: 'flex-start',
-    borderRadius: Radius.lg,
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    minHeight: 44,
+  },
+  timelineTimeColumn: {
+    alignItems: 'flex-end',
+    minWidth: 48,
+  },
+  timelineTime: {
+    ...TextPresets.body,
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  timelineMarkerColumn: {
+    alignItems: 'center',
+    alignSelf: 'stretch',
+    paddingTop: 1,
+    width: 14,
+  },
+  timelineStem: {
+    borderRadius: Radius.pill,
+    flex: 1,
+    marginTop: 3,
+    minHeight: 18,
+    width: 1,
+  },
+  timelineDot: {
+    alignItems: 'center',
+    borderRadius: Radius.pill,
     borderWidth: 1,
+    height: 14,
+    justifyContent: 'center',
+    marginTop: 1,
+    width: 14,
+  },
+  timelineCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  timelineTitle: {
+    ...TextPresets.label,
+    fontSize: 13,
+    lineHeight: 17,
+  },
+  timelineDetail: {
+    ...TextPresets.body,
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  metricGrid: {
     flexDirection: 'row',
     gap: Spacing.md,
+  },
+  weekBars: {
+    alignItems: 'flex-end',
+    flexDirection: 'row',
+    gap: 6,
+    minHeight: 44,
+    paddingTop: Spacing.xs,
+  },
+  weekBarWrap: {
+    alignItems: 'center',
+    gap: 3,
+  },
+  weekBar: {
+    borderRadius: Radius.pill,
+    width: 6,
+  },
+  weekLabel: {
+    fontFamily: Fonts.rounded,
+    fontSize: 8,
+    fontWeight: '700',
+    lineHeight: 10,
+  },
+  streakDots: {
+    flexDirection: 'row',
+    gap: 5,
+    paddingTop: Spacing.xs,
+  },
+  streakDot: {
+    alignItems: 'center',
+    borderRadius: Radius.pill,
+    height: 18,
+    justifyContent: 'center',
+    width: 18,
+  },
+  compactSectionHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
     justifyContent: 'space-between',
-    padding: Spacing.md,
   },
-  pressedRow: {
-    opacity: 0.88,
-  },
-  supportRowCopy: {
-    flex: 1,
-    gap: Spacing.xs,
-  },
-  supportRowTitle: {
-    ...TextPresets.title,
-    fontSize: 20,
-    lineHeight: 26,
-  },
-  supportRowBody: {
+  sectionCount: {
     ...TextPresets.body,
-    fontSize: 15,
-    lineHeight: 22,
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  trailingTime: {
+    ...TextPresets.body,
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  emptyCopy: {
+    ...TextPresets.body,
+    fontSize: 13,
+    lineHeight: 19,
   },
 });

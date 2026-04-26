@@ -100,8 +100,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     borderRadius: Radius.lg,
     borderWidth: 1,
+    flexShrink: 1,
     justifyContent: 'center',
     minHeight: 52,
+    minWidth: 0,
     paddingHorizontal: Spacing.xl,
     paddingVertical: 14,
   },
@@ -113,6 +115,7 @@ const styles = StyleSheet.create({
   },
   label: {
     ...TextPresets.label,
+    flexShrink: 1,
     fontFamily: Fonts.rounded,
     fontSize: 14,
     fontWeight: '700',

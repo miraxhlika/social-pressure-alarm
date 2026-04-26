@@ -6,6 +6,7 @@ const MAX_ANALYTICS_EVENTS = 250;
 
 export type AnalyticsEventName =
   | 'onboarding_started'
+  | 'onboarding_completed'
   | 'use_case_selected'
   | 'demo_checkpoint_created'
   | 'demo_checkpoint_cleared'
@@ -16,8 +17,7 @@ export type AnalyticsEventName =
   | 'miss_recovery_action'
   | 'second_checkpoint_created'
   | 'invite_sent'
-  | 'invite_accepted'
-  | 'checkpoint_limit_reached';
+  | 'invite_accepted';
 
 type BaseCheckpointPayload = {
   checkpointId?: string;
@@ -29,6 +29,11 @@ type BaseCheckpointPayload = {
 export type AnalyticsPayloadMap = {
   onboarding_started: {
     source: 'app_launch' | 'manual';
+  };
+  onboarding_completed: {
+    mode: 'local' | 'optional_sign_in';
+    cameraPermission: 'granted' | 'denied' | 'undetermined';
+    notificationPermission: 'granted' | 'provisional' | 'denied' | 'undetermined';
   };
   use_case_selected: {
     source: 'create' | 'onboarding';
@@ -64,11 +69,6 @@ export type AnalyticsPayloadMap = {
   invite_accepted: {
     circleId?: string;
   };
-  checkpoint_limit_reached: {
-    limit: number;
-    creationCount: number;
-    source: 'create' | 'checkpoints_tab';
-  };
 };
 
 export type AnalyticsEvent<TName extends AnalyticsEventName = AnalyticsEventName> = {
@@ -88,6 +88,10 @@ export const ANALYTICS_EVENT_CATALOG: Record<
   onboarding_started: {
     description: 'User entered first-run onboarding.',
     payload: ['source'],
+  },
+  onboarding_completed: {
+    description: 'User completed first-run onboarding.',
+    payload: ['mode', 'cameraPermission', 'notificationPermission'],
   },
   use_case_selected: {
     description: 'User selected a checkpoint use case.',
@@ -132,10 +136,6 @@ export const ANALYTICS_EVENT_CATALOG: Record<
   invite_accepted: {
     description: 'User accepted a circle invite.',
     payload: ['circleId'],
-  },
-  checkpoint_limit_reached: {
-    description: 'User hit the preview build creation cap.',
-    payload: ['limit', 'creationCount', 'source'],
   },
 };
 
