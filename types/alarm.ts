@@ -5,6 +5,7 @@ export const MAX_CHECKPOINT_PRESETS = 8;
 export type AlarmOutcome = 'confirmed' | 'missed';
 export type RepeatSchedule = 'once' | 'daily' | 'weekdays';
 export type AlarmProofStrictness = 'standard' | 'strict';
+export type AlarmProofCodeType = 'qr' | 'barcode';
 export type UseCaseType =
   | 'wake_up'
   | 'medication'
@@ -82,6 +83,7 @@ export type AlarmDefinition = {
   notes?: string;
   proofStrictness: AlarmProofStrictness;
   expectedQrPayload: string;
+  proofCodeType?: AlarmProofCodeType;
   repeatSchedule: RepeatSchedule;
   gracePeriodSeconds: number;
   isActive: boolean;

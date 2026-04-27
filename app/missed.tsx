@@ -1,30 +1,31 @@
+import { Ionicons } from '@expo/vector-icons';
 import { useCallback, useMemo, useState } from 'react';
 import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 
-import { AppButton } from '@/components/ui/app-button';
-import { AppCard } from '@/components/ui/app-card';
 import { AppScreen } from '@/components/ui/app-screen';
+import { EmptyState } from '@/components/ui/empty-state';
+import {
+  FlowIconBadge,
+  FlowListRow,
+  FlowPanel,
+  FlowSectionLabel,
+  FlowTopBar,
+} from '@/components/ui/flow-primitives';
 import { LoadingBlock } from '@/components/ui/loading-block';
-import { PageHeader } from '@/components/ui/page-header';
-import { StatTile } from '@/components/ui/stat-tile';
-import { StatusPill } from '@/components/ui/status-pill';
-import { Fonts, Radius, Spacing, TextPresets, getAppColors } from '@/constants/theme';
+import { Fonts, Radius, Spacing, TextPresets, getAppColors, withAlpha } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { trackAnalyticsEvent } from '@/lib/analytics';
 import {
   formatScheduledFor,
-  formatAlarmTime,
   getAlarmById,
   hydrateAlarmRuntimeForCurrentUser,
   readAlarmStore,
   rescheduleAlarm,
 } from '@/lib/alarms';
-import { formatGracePeriodLabel, getCheckpointRoutineCopy, getUseCaseLabel } from '@/lib/checkpoint-templates';
+import { getCheckpointRoutineCopy } from '@/lib/checkpoint-templates';
 import { getProgressSummary, ProgressSummary } from '@/lib/progress';
 import { Alarm, FailureHistoryEntry } from '@/types/alarm';
-
-const QUICK_RETRY_MINUTES = 15;
 
 type MissedScreenState = {
   alarm: Alarm | null;
@@ -32,78 +33,27 @@ type MissedScreenState = {
   progressSummary: ProgressSummary | null;
 };
 
-type RecoveryAction = 'retry' | 'reschedule' | 'edit';
+type RecoveryAction = 'restart' | 'reschedule' | 'schedule' | 'code' | 'tomorrow';
 
-function getShareStatus(alarm: Alarm | null) {
-  if (!alarm?.socialSettings?.circleId) {
-    return {
-      title: 'Private',
-      detail: 'This miss stays on your device only.',
-      tone: 'default' as const,
-    };
-  }
+const ANALYTICS_ACTION_BY_RECOVERY_ACTION: Record<RecoveryAction, 'retry' | 'reschedule' | 'edit'> = {
+  code: 'edit',
+  reschedule: 'reschedule',
+  restart: 'retry',
+  schedule: 'edit',
+  tomorrow: 'reschedule',
+};
 
-  if (alarm.socialSettings.shareMisses) {
-    return {
-      title: 'Miss sharing on',
-      detail: 'Your circle can see this miss. Recovery actions still stay in your control.',
-      tone: 'primary' as const,
-    };
-  }
-
-  if (alarm.socialSettings.shareSuccesses) {
-    return {
-      title: 'Successes only',
-      detail: 'Clears can be shared, but misses stay private unless you change the rule.',
-      tone: 'warning' as const,
-    };
-  }
-
-  return {
-    title: 'Circle linked',
-    detail: 'A circle is attached, but sharing is currently off.',
-    tone: 'default' as const,
-  };
+function getTomorrowRetryDate(alarm: Alarm) {
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  tomorrow.setHours(alarm.hour, alarm.minute, 0, 0);
+  return tomorrow;
 }
 
-function ActionCard({
-  kicker,
-  title,
-  description,
-  helper,
-  onPress,
-  disabled,
-}: {
-  kicker: string;
-  title: string;
-  description: string;
-  helper: string;
-  onPress: () => void;
-  disabled: boolean;
-}) {
-  const colors = getAppColors(useColorScheme());
-
-  return (
-    <Pressable
-      accessibilityLabel={`${kicker}: ${title}. ${description}. ${helper}.`}
-      accessibilityRole="button"
-      accessibilityState={{ disabled }}
-      disabled={disabled}
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.actionCard,
-        {
-          backgroundColor: colors.elevated,
-          borderColor: colors.line,
-          opacity: disabled ? 0.45 : pressed ? 0.92 : 1,
-        },
-      ]}>
-      <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>{kicker}</Text>
-      <Text style={[styles.actionTitle, { color: colors.text }]}>{title}</Text>
-      <Text style={[TextPresets.body, { color: colors.textSoft }]}>{description}</Text>
-      <Text style={[styles.actionHelper, { color: colors.muted }]}>{helper}</Text>
-    </Pressable>
-  );
+function getRestartDate() {
+  const restartAt = new Date(Date.now() + 60 * 1000);
+  restartAt.setSeconds(0, 0);
+  return restartAt;
 }
 
 export default function MissedScreen() {
@@ -120,11 +70,7 @@ export default function MissedScreen() {
 
   const loadScreen = useCallback(async () => {
     if (!params.alarmId) {
-      setState({
-        alarm: null,
-        latestFailure: null,
-        progressSummary: null,
-      });
+      setState({ alarm: null, latestFailure: null, progressSummary: null });
       setIsLoading(false);
       return;
     }
@@ -152,16 +98,6 @@ export default function MissedScreen() {
     }, [loadScreen])
   );
 
-  const retryAt = useMemo(() => {
-    const nextRetryAt = new Date(Date.now() + QUICK_RETRY_MINUTES * 60 * 1000);
-    nextRetryAt.setSeconds(0, 0);
-    return nextRetryAt;
-  }, []);
-
-  const shareStatus = useMemo(() => getShareStatus(state.alarm), [state.alarm]);
-  const weeklyStats = state.progressSummary?.weeklyStats;
-  const nextRunLabel =
-    state.alarm?.isActive && state.alarm.scheduledFor ? formatScheduledFor(state.alarm.scheduledFor) : 'Not scheduled';
   const missedAtLabel = state.latestFailure
     ? state.latestFailure.scheduledFor
       ? formatScheduledFor(state.latestFailure.scheduledFor)
@@ -172,10 +108,7 @@ export default function MissedScreen() {
           minute: '2-digit',
         })
     : 'recently';
-  const recoveryRoutine = getCheckpointRoutineCopy(state.alarm?.useCaseType);
-  const retryLabel = `Retry at ${retryAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
-  const rescheduleLabel =
-    state.alarm?.repeatSchedule === 'once' ? 'Reschedule the next run' : 'Refresh the next scheduled run';
+  const routineCopy = useMemo(() => getCheckpointRoutineCopy(state.alarm?.useCaseType), [state.alarm?.useCaseType]);
 
   const handleRecoveryAction = useCallback(
     async (action: RecoveryAction, runAction: () => Promise<void>) => {
@@ -190,7 +123,6 @@ export default function MissedScreen() {
       } catch (error) {
         const message =
           error instanceof Error ? error.message : 'The recovery action could not be completed right now.';
-
         Alert.alert('Unable to update checkpoint', message);
       } finally {
         setProcessingAction(null);
@@ -199,18 +131,10 @@ export default function MissedScreen() {
     [processingAction, state.alarm]
   );
 
-  const handleRetryLater = useCallback(() => {
-    void handleRecoveryAction('retry', async () => {
+  const trackRecovery = useCallback(
+    async (action: RecoveryAction) => {
       if (!state.alarm) {
         return;
-      }
-
-      const nextAlarm = await rescheduleAlarm(state.alarm, {
-        scheduledFor: retryAt.toISOString(),
-      });
-
-      if (!nextAlarm) {
-        throw new Error('Checkpoint not found.');
       }
 
       await trackAnalyticsEvent('miss_recovery_action', {
@@ -218,71 +142,98 @@ export default function MissedScreen() {
         useCaseType: state.alarm.useCaseType,
         repeatSchedule: state.alarm.repeatSchedule,
         gracePeriodSeconds: state.alarm.gracePeriodSeconds,
-        action: 'retry',
+        action: ANALYTICS_ACTION_BY_RECOVERY_ACTION[action],
       });
+    },
+    [state.alarm]
+  );
 
-      router.replace('/');
+  const handleRestartNow = useCallback(() => {
+    void handleRecoveryAction('restart', async () => {
+      if (!state.alarm) {
+        return;
+      }
+
+      await rescheduleAlarm(state.alarm, { scheduledFor: getRestartDate().toISOString() });
+      await trackRecovery('restart');
+      router.replace(`/ringing?alarmId=${state.alarm.id}`);
     });
-  }, [handleRecoveryAction, retryAt, router, state.alarm]);
+  }, [handleRecoveryAction, router, state.alarm, trackRecovery]);
 
-  const handleReschedule = useCallback(() => {
+  const handleRescheduleToday = useCallback(() => {
     void handleRecoveryAction('reschedule', async () => {
       if (!state.alarm) {
         return;
       }
 
-      const nextAlarm = await rescheduleAlarm(state.alarm);
+      router.push({
+        pathname: '/create',
+        params: {
+          alarmId: state.alarm.id,
+          mode: 'edit',
+          recoveryFocus: 'time',
+          returnTo: `/missed?alarmId=${state.alarm.id}`,
+        },
+      });
+      await trackRecovery('reschedule');
+    });
+  }, [handleRecoveryAction, router, state.alarm, trackRecovery]);
 
-      if (!nextAlarm) {
-        throw new Error('Checkpoint not found.');
+  const handleAdjustSchedule = useCallback(() => {
+    void handleRecoveryAction('schedule', async () => {
+      if (!state.alarm) {
+        return;
       }
 
-      await trackAnalyticsEvent('miss_recovery_action', {
-        checkpointId: state.alarm.id,
-        useCaseType: state.alarm.useCaseType,
-        repeatSchedule: state.alarm.repeatSchedule,
-        gracePeriodSeconds: state.alarm.gracePeriodSeconds,
-        action: 'reschedule',
+      router.push({
+        pathname: '/create',
+        params: {
+          alarmId: state.alarm.id,
+          mode: 'edit',
+          recoveryFocus: 'time',
+          returnTo: `/missed?alarmId=${state.alarm.id}`,
+        },
       });
+      await trackRecovery('schedule');
+    });
+  }, [handleRecoveryAction, router, state.alarm, trackRecovery]);
 
+  const handleCodeLocation = useCallback(() => {
+    void handleRecoveryAction('code', async () => {
+      if (!state.alarm) {
+        return;
+      }
+
+      router.push({
+        pathname: '/create',
+        params: {
+          alarmId: state.alarm.id,
+          mode: 'edit',
+          recoveryFocus: 'code',
+          returnTo: `/missed?alarmId=${state.alarm.id}`,
+        },
+      });
+      await trackRecovery('code');
+    });
+  }, [handleRecoveryAction, router, state.alarm, trackRecovery]);
+
+  const handleTryTomorrow = useCallback(() => {
+    void handleRecoveryAction('tomorrow', async () => {
+      if (!state.alarm) {
+        return;
+      }
+
+      await rescheduleAlarm(state.alarm, { scheduledFor: getTomorrowRetryDate(state.alarm).toISOString() });
+      await trackRecovery('tomorrow');
       router.replace('/');
     });
-  }, [handleRecoveryAction, router, state.alarm]);
-
-  const handleEdit = useCallback(
-    (recoveryFocus: 'grace' | 'time' | 'code') => {
-      void handleRecoveryAction('edit', async () => {
-        if (!state.alarm) {
-          return;
-        }
-
-        await trackAnalyticsEvent('miss_recovery_action', {
-          checkpointId: state.alarm.id,
-          useCaseType: state.alarm.useCaseType,
-          repeatSchedule: state.alarm.repeatSchedule,
-          gracePeriodSeconds: state.alarm.gracePeriodSeconds,
-          action: 'edit',
-        });
-
-        router.push({
-          pathname: '/create',
-          params: {
-            alarmId: state.alarm.id,
-            mode: 'edit',
-            recoveryFocus,
-            returnTo: `/missed?alarmId=${state.alarm.id}`,
-          },
-        });
-      });
-    },
-    [handleRecoveryAction, router, state.alarm]
-  );
+  }, [handleRecoveryAction, router, state.alarm, trackRecovery]);
 
   if (isLoading) {
     return (
-      <AppScreen>
+      <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
         <LoadingBlock
-          description="Loading the missed checkpoint and the next recovery options."
+          description="Loading the missed checkpoint and recovery options."
           style={styles.loadingBlock}
           title="Preparing recovery"
           tone="canvas"
@@ -293,216 +244,356 @@ export default function MissedScreen() {
 
   if (!state.alarm) {
     return (
-      <AppScreen>
-        <PageHeader
-          eyebrow="Recovery"
-          badgeLabel="Unavailable"
-          badgeTone="warning"
-          title="Checkpoint not found"
-          description="The missed run was recorded, but the checkpoint itself is no longer available."
+      <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
+        <FlowTopBar
+          leftAccessibilityLabel="Go back"
+          leftIcon="chevron-back"
+          onLeftPress={() => router.back()}
+          title="Missed Checkpoint"
         />
-        <AppCard elevated tone="canvas">
-          <Text style={[TextPresets.body, { color: colors.textSoft }]}>
-            Return to Today or the checkpoint library to set up the next commitment.
-          </Text>
-          <AppButton label="Back to today" onPress={() => router.replace('/')} />
-        </AppCard>
+        <EmptyState
+          actionLabel="Back to today"
+          description="The missed run was recorded, but the checkpoint itself is no longer available."
+          onAction={() => router.replace('/')}
+          title="Checkpoint not found"
+          tone="danger"
+        />
       </AppScreen>
     );
   }
 
   return (
-    <AppScreen>
-      <PageHeader
-        eyebrow="Recovery"
-        badgeLabel="Miss recorded"
-        badgeTone="danger"
-        title="Recover the setup, not your mood."
-        description="The miss is already logged. Pick the smallest change that gives this checkpoint a better chance next time."
+    <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
+      <FlowTopBar
+        leftAccessibilityLabel="Back to today"
+        leftIcon="chevron-back"
+        onLeftPress={() => router.replace('/')}
+        rightAccessibilityLabel="Open checkpoint details"
+        rightIcon="ellipsis-vertical"
+        onRightPress={() => router.push(`/checkpoint/${state.alarm?.id}`)}
+        title="Missed Checkpoint"
       />
 
-      <AppCard elevated tone="danger" variant="hero" style={styles.heroCard}>
-        <View style={styles.heroHeader}>
-          <View style={styles.heroCopy}>
-            <Text style={[TextPresets.eyebrow, { color: colors.danger }]}>Missed checkpoint</Text>
-            <Text style={[styles.heroTitle, { color: colors.text }]}>{state.alarm.label}</Text>
-            <Text style={[TextPresets.bodyLg, { color: colors.textSoft }]}>
-              Missed around {missedAtLabel}. The goal now is protecting your next {recoveryRoutine}, not pretending this one did not happen.
-            </Text>
-          </View>
-          <StatusPill label={getUseCaseLabel(state.alarm.useCaseType)} tone="danger" />
-        </View>
-
-        <View style={styles.metricRow}>
-          <StatTile
-            helper={formatGracePeriodLabel(state.alarm.gracePeriodSeconds)}
-            label="Reach window"
-            tone="danger"
-            value={formatAlarmTime(state.alarm.hour, state.alarm.minute)}
-          />
-          <StatTile
-            helper={weeklyStats?.attempts ? `${weeklyStats.successes}/${weeklyStats.attempts} cleared` : 'No weekly baseline yet'}
-            label="This week"
-            progress={weeklyStats?.attempts ? weeklyStats.completionRate / 100 : 0}
-            progressLabel="Weekly reliability progress"
-            tone="primary"
-            value={weeklyStats?.attempts ? `${weeklyStats.completionRate}%` : '—'}
-          />
-        </View>
-      </AppCard>
-
-      <AppCard elevated tone="canvas" style={styles.statusCard}>
-        <View style={styles.statusRow}>
-          <View style={styles.statusBlock}>
-            <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Next run</Text>
-            <Text style={[styles.statusValue, { color: colors.text }]}>{nextRunLabel}</Text>
-            <Text style={[TextPresets.body, { color: colors.textSoft }]}>
-              {state.alarm.isActive
-                ? 'A future run is already on the calendar. You can keep it, move it, or retry sooner.'
-                : 'No future run is active yet. Choose whether to retry soon or reschedule the checkpoint.'}
-            </Text>
-          </View>
-
-          <View style={[styles.accountabilityCard, { backgroundColor: colors.panelMuted, borderColor: colors.line }]}>
-            <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Accountability</Text>
-            <View style={styles.accountabilityHeader}>
-              <Text style={[styles.accountabilityTitle, { color: colors.text }]}>{shareStatus.title}</Text>
-              <StatusPill label={shareStatus.title} tone={shareStatus.tone} />
-            </View>
-            <Text style={[TextPresets.body, { color: colors.textSoft }]}>{shareStatus.detail}</Text>
-          </View>
-        </View>
-      </AppCard>
-
-      <View style={styles.actionsGrid}>
-        <ActionCard
-          disabled={processingAction !== null}
-          description="Keep the same code and try again soon while the routine is still top of mind."
-          helper={processingAction === 'retry' ? 'Scheduling...' : retryLabel}
-          kicker="Fast recovery"
-          onPress={handleRetryLater}
-          title={`Retry in ${QUICK_RETRY_MINUTES} minutes`}
-        />
-        <ActionCard
-          disabled={processingAction !== null}
-          description="Put the checkpoint back on the calendar and protect the next full attempt."
-          helper={processingAction === 'reschedule' ? 'Updating schedule...' : nextRunLabel}
-          kicker="Reschedule"
-          onPress={handleReschedule}
-          title={rescheduleLabel}
-        />
-        <ActionCard
-          disabled={processingAction !== null}
-          description="Move the trigger to a more realistic moment without changing the proof itself."
-          helper="Open edit flow on timing"
-          kicker="Timing"
-          onPress={() => handleEdit('time')}
-          title="Adjust the trigger time"
-        />
-        <ActionCard
-          disabled={processingAction !== null}
-          description="Give yourself a slightly wider reach window if the setup is too tight in practice."
-          helper="Open edit flow on reach time"
-          kicker="Reach window"
-          onPress={() => handleEdit('grace')}
-          title="Adjust the grace period"
-        />
-        <ActionCard
-          disabled={processingAction !== null}
-          description="Make the physical proof easier to identify, or replace the saved QR/barcode if the current one is in the wrong spot."
-          helper="Open edit flow on place and proof"
-          kicker="Code location"
-          onPress={() => handleEdit('code')}
-          title="Add a better code location"
-        />
+      <View style={styles.heroCopy}>
+        <Text style={[styles.title, { color: colors.text }]}>Missed Checkpoint</Text>
+        <Text style={[styles.subtitle, { color: colors.textSoft }]}>
+          It happens. You&apos;re doing great by getting back on track.
+        </Text>
       </View>
 
-      <AppButton
-        label="Back to today"
-        onPress={() => router.replace('/')}
-        variant="ghost"
-      />
+      <MissedLandscape />
+
+      <FlowPanel style={styles.actionSheet}>
+        <FlowSectionLabel>WHAT WOULD YOU LIKE TO DO?</FlowSectionLabel>
+        <RecoveryRow
+          description={processingAction === 'restart' ? 'Starting scanner...' : 'Mark it clear and continue'}
+          icon="refresh"
+          isPrimary
+          onPress={handleRestartNow}
+          title="Restart now"
+        />
+        <RecoveryRow
+          description={processingAction === 'reschedule' ? 'Opening schedule...' : 'Pick a new time today'}
+          icon="calendar-outline"
+          onPress={handleRescheduleToday}
+          title="Reschedule"
+        />
+        <RecoveryRow
+          description="Change days or time"
+          icon="time-outline"
+          onPress={handleAdjustSchedule}
+          title="Adjust schedule"
+        />
+        <RecoveryRow
+          description="Move it somewhere easier"
+          icon="location-outline"
+          onPress={handleCodeLocation}
+          title="Add a better code location"
+        />
+        <RecoveryRow
+          description={processingAction === 'tomorrow' ? 'Scheduling tomorrow...' : "We'll remind you then"}
+          icon="partly-sunny-outline"
+          onPress={handleTryTomorrow}
+          title="Try again tomorrow"
+        />
+      </FlowPanel>
+
+      <View style={styles.recoveryFootnote}>
+        <Ionicons color={colors.muted} name="heart-outline" size={15} />
+        <Text style={[styles.footnoteText, { color: colors.textSoft }]}>
+          Small resets lead to big consistency.
+        </Text>
+      </View>
+
+      <Text style={[styles.contextCopy, { color: colors.muted }]}>
+        {state.alarm.label} missed {missedAtLabel}. Protect the next {routineCopy}.
+      </Text>
     </AppScreen>
   );
 }
 
+function RecoveryRow({
+  description,
+  icon,
+  isPrimary,
+  onPress,
+  title,
+}: {
+  description: string;
+  icon: keyof typeof Ionicons.glyphMap;
+  isPrimary?: boolean;
+  onPress: () => void;
+  title: string;
+}) {
+  const colors = getAppColors(useColorScheme());
+
+  if (!isPrimary) {
+    return (
+      <FlowListRow
+        description={description}
+        leading={<FlowIconBadge icon={icon} size="small" tone="muted" />}
+        onPress={onPress}
+        title={title}
+      />
+    );
+  }
+
+  return (
+    <Pressable
+      accessibilityLabel={`${title}. ${description}.`}
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.primaryRecoveryRow,
+        { backgroundColor: colors.text, borderColor: colors.text },
+        pressed && styles.pressed,
+      ]}>
+      <View style={[styles.primaryIcon, { backgroundColor: withAlpha(colors.elevated, '18') }]}>
+        <Ionicons color={colors.elevated} name={icon} size={18} />
+      </View>
+      <View style={styles.primaryRecoveryCopy}>
+        <Text style={[styles.primaryRecoveryTitle, { color: colors.elevated }]}>{title}</Text>
+        <Text style={[styles.primaryRecoveryDescription, { color: withAlpha(colors.elevated, 'B8') }]}>
+          {description}
+        </Text>
+      </View>
+      <Ionicons color={colors.elevated} name="chevron-forward" size={17} />
+    </Pressable>
+  );
+}
+
+function MissedLandscape() {
+  const colors = getAppColors(useColorScheme());
+
+  return (
+    <View style={[styles.landscape, { backgroundColor: colors.panelMuted }]}>
+      <View style={[styles.sunGlow, { backgroundColor: withAlpha(colors.warning, '22') }]} />
+      <View style={[styles.mountainBack, { backgroundColor: withAlpha(colors.borderStrong, '38') }]} />
+      <View style={[styles.mountainFront, { backgroundColor: withAlpha(colors.borderStrong, '24') }]} />
+      <View style={[styles.path, { backgroundColor: withAlpha(colors.elevated, 'B8') }]} />
+      <View style={[styles.pathShadow, { backgroundColor: withAlpha(colors.primary, '16') }]} />
+      <View style={[styles.markerShadow, { backgroundColor: withAlpha(colors.primaryStrong, '20') }]} />
+      <View style={[styles.markerPin, { backgroundColor: colors.warningSurface, borderColor: withAlpha(colors.warning, '45') }]}>
+        <Text style={[styles.markerText, { color: colors.warning }]}>!</Text>
+      </View>
+      <View style={[styles.plantLeft, { backgroundColor: withAlpha(colors.success, '28') }]} />
+      <View style={[styles.plantLeftTwo, { backgroundColor: withAlpha(colors.success, '22') }]} />
+      <View style={[styles.plantRight, { backgroundColor: withAlpha(colors.success, '24') }]} />
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
+  screenContent: {
+    gap: 10,
+    paddingBottom: 32,
+    paddingHorizontal: Spacing.lg,
+    paddingTop: 2,
+  },
   loadingBlock: {
     minHeight: 220,
   },
-  heroCard: {
-    gap: Spacing.lg,
-  },
-  heroHeader: {
-    gap: Spacing.md,
-  },
   heroCopy: {
-    gap: Spacing.sm,
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: Spacing.xl,
+    paddingTop: Spacing.sm,
   },
-  heroTitle: {
-    ...TextPresets.titleLg,
-  },
-  metricRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.md,
-  },
-  statusCard: {
-    gap: Spacing.md,
-  },
-  statusRow: {
-    gap: Spacing.md,
-  },
-  statusBlock: {
-    gap: Spacing.sm,
-  },
-  statusValue: {
-    fontFamily: Fonts.rounded,
-    fontSize: 26,
+  title: {
+    fontFamily: Fonts.serif,
+    fontSize: 24,
     fontWeight: '800',
-    letterSpacing: -0.5,
-    lineHeight: 32,
+    letterSpacing: -0.4,
+    lineHeight: 29,
+    textAlign: 'center',
   },
-  accountabilityCard: {
-    borderRadius: Radius.lg,
+  subtitle: {
+    ...TextPresets.body,
+    fontSize: 12,
+    lineHeight: 17,
+    textAlign: 'center',
+  },
+  landscape: {
+    borderRadius: 22,
+    height: 154,
+    marginTop: 8,
+    overflow: 'hidden',
+  },
+  sunGlow: {
+    borderRadius: Radius.pill,
+    height: 74,
+    left: 120,
+    position: 'absolute',
+    top: 30,
+    width: 74,
+  },
+  mountainBack: {
+    borderRadius: 120,
+    height: 115,
+    left: -26,
+    position: 'absolute',
+    top: 44,
+    transform: [{ rotate: '12deg' }],
+    width: 185,
+  },
+  mountainFront: {
+    borderRadius: 120,
+    height: 122,
+    position: 'absolute',
+    right: -38,
+    top: 54,
+    transform: [{ rotate: '-13deg' }],
+    width: 210,
+  },
+  path: {
+    borderRadius: 65,
+    bottom: -12,
+    height: 150,
+    left: 104,
+    position: 'absolute',
+    transform: [{ rotate: '12deg' }],
+    width: 76,
+  },
+  pathShadow: {
+    borderRadius: 65,
+    bottom: -16,
+    height: 154,
+    left: 94,
+    position: 'absolute',
+    transform: [{ rotate: '11deg' }],
+    width: 96,
+  },
+  markerShadow: {
+    borderRadius: Radius.pill,
+    height: 34,
+    left: 128,
+    position: 'absolute',
+    top: 91,
+    width: 54,
+  },
+  markerPin: {
+    alignItems: 'center',
+    borderRadius: 24,
+    borderWidth: 2,
+    height: 50,
+    justifyContent: 'center',
+    left: 128,
+    position: 'absolute',
+    top: 34,
+    transform: [{ rotate: '45deg' }],
+    width: 50,
+  },
+  markerText: {
+    fontFamily: Fonts.rounded,
+    fontSize: 31,
+    fontWeight: '800',
+    lineHeight: 34,
+    transform: [{ rotate: '-45deg' }],
+  },
+  plantLeft: {
+    borderRadius: 14,
+    bottom: -10,
+    height: 72,
+    left: 14,
+    position: 'absolute',
+    transform: [{ rotate: '-20deg' }],
+    width: 18,
+  },
+  plantLeftTwo: {
+    borderRadius: 14,
+    bottom: -12,
+    height: 58,
+    left: 33,
+    position: 'absolute',
+    transform: [{ rotate: '18deg' }],
+    width: 15,
+  },
+  plantRight: {
+    borderRadius: 16,
+    bottom: -12,
+    height: 68,
+    position: 'absolute',
+    right: 22,
+    transform: [{ rotate: '17deg' }],
+    width: 18,
+  },
+  actionSheet: {
+    gap: 7,
+    marginTop: -2,
+    padding: 10,
+  },
+  primaryRecoveryRow: {
+    alignItems: 'center',
+    borderRadius: 12,
     borderWidth: 1,
-    gap: Spacing.sm,
-    padding: Spacing.lg,
+    flexDirection: 'row',
+    gap: 10,
+    minHeight: 62,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
   },
-  accountabilityHeader: {
+  primaryIcon: {
+    alignItems: 'center',
+    borderRadius: Radius.pill,
+    height: 34,
+    justifyContent: 'center',
+    width: 34,
+  },
+  primaryRecoveryCopy: {
+    flex: 1,
+    gap: 1,
+    minWidth: 0,
+  },
+  primaryRecoveryTitle: {
+    ...TextPresets.label,
+    fontSize: 13,
+    lineHeight: 17,
+  },
+  primaryRecoveryDescription: {
+    ...TextPresets.body,
+    fontSize: 10,
+    lineHeight: 14,
+  },
+  pressed: {
+    opacity: 0.86,
+    transform: [{ scale: 0.99 }],
+  },
+  recoveryFootnote: {
     alignItems: 'center',
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.sm,
-    justifyContent: 'space-between',
+    gap: 6,
+    justifyContent: 'center',
+    paddingTop: 6,
   },
-  accountabilityTitle: {
-    ...TextPresets.label,
-    flex: 1,
-  },
-  actionsGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.md,
-  },
-  actionCard: {
-    borderRadius: Radius.lg,
-    borderWidth: 1,
-    flexBasis: 220,
-    flexGrow: 1,
-    gap: Spacing.sm,
-    minHeight: 168,
-    padding: Spacing.lg,
-  },
-  actionTitle: {
-    ...TextPresets.title,
-    fontSize: 22,
-    lineHeight: 28,
-  },
-  actionHelper: {
+  footnoteText: {
     ...TextPresets.body,
-    fontSize: 14,
-    lineHeight: 20,
-    marginTop: 'auto',
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  contextCopy: {
+    ...TextPresets.body,
+    fontSize: 10,
+    lineHeight: 14,
+    textAlign: 'center',
   },
 });

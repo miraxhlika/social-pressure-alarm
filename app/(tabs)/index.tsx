@@ -492,9 +492,15 @@ export default function TodayScreen() {
           </FlowPanel>
 
           <View style={styles.metricGrid}>
-            <FlowMetricTile helper={weeklyReliability.helper} label="WEEKLY RELIABILITY" value={weeklyReliability.value}>
-              <WeekBars days={weeklyDayStats} />
-            </FlowMetricTile>
+            <Pressable
+              accessibilityLabel="Open history and analytics"
+              accessibilityRole="button"
+              onPress={() => router.push('/history')}
+              style={({ pressed }) => [styles.metricAction, pressed && styles.pressed]}>
+              <FlowMetricTile helper={weeklyReliability.helper} label="WEEKLY RELIABILITY" value={weeklyReliability.value}>
+                <WeekBars days={weeklyDayStats} />
+              </FlowMetricTile>
+            </Pressable>
             <FlowMetricTile helper={currentRun.helper} label="CURRENT STREAK" tone="warning" value={`🔥 ${currentRun.value}`}>
               <StreakDots activeDots={currentRun.activeDots} />
             </FlowMetricTile>
@@ -525,7 +531,7 @@ export default function TodayScreen() {
           <FlowPanel>
             <FlowListRow
               description={`${todayClears.length} checkpoint${todayClears.length === 1 ? '' : 's'} cleared today`}
-              onPress={() => router.push('/history')}
+              onPress={() => router.push('/today-activity')}
               statusLabel={`${todayMisses.length} missed`}
               statusTone={todayMisses.length > 0 ? 'danger' : 'success'}
               title="Cleared today"
@@ -539,7 +545,7 @@ export default function TodayScreen() {
             />
             <FlowListRow
               description={latestOutcome ? latestOutcome.detail : 'No completed run yet'}
-              onPress={() => router.push('/history')}
+              onPress={() => router.push('/today-activity')}
               statusLabel={latestOutcome ? (latestOutcome.tone === 'success' ? 'Saved' : 'Missed') : 'Waiting'}
               statusTone={latestOutcome ? latestOutcome.tone : 'default'}
               title={latestOutcome ? latestOutcome.title : 'Latest proof'}
@@ -758,6 +764,10 @@ const styles = StyleSheet.create({
   metricGrid: {
     flexDirection: 'row',
     gap: Spacing.md,
+  },
+  metricAction: {
+    flex: 1,
+    minWidth: 0,
   },
   weekBars: {
     alignItems: 'flex-end',

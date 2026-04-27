@@ -35,6 +35,7 @@ import { markOnboardingCompleted } from '@/lib/onboarding';
 import { readAppPreferences } from '@/lib/preferences';
 import {
   Alarm,
+  AlarmProofCodeType,
   AlarmProofStrictness,
   RepeatSchedule,
   UseCaseType,
@@ -141,6 +142,14 @@ function getLinkModeLabel(linkMode: LinkMode) {
     default:
       return 'Scanned QR';
   }
+}
+
+function getProofCodeTypeFromLinkMode(linkMode: LinkMode): AlarmProofCodeType {
+  return linkMode === 'scanBarcode' ? 'barcode' : 'qr';
+}
+
+function getLinkModeFromProofCodeType(proofCodeType?: AlarmProofCodeType): LinkMode {
+  return proofCodeType === 'barcode' ? 'scanBarcode' : 'scanQr';
 }
 
 function createGeneratedProofPayload(label: string) {
@@ -313,7 +322,7 @@ export default function CreateAlarmScreen() {
       setNotes(alarm.notes ?? '');
       setProofStrictness(alarm.proofStrictness);
       setExpectedQrPayload(alarm.expectedQrPayload);
-      setLinkMode('manual');
+      setLinkMode(getLinkModeFromProofCodeType(alarm.proofCodeType));
       setProofCodeCapturedAt(alarm.createdAt);
       setProofCodeVerifiedAt(null);
       setRepeatSchedule(alarm.repeatSchedule);
@@ -627,6 +636,7 @@ export default function CreateAlarmScreen() {
         notes: trimmedNotes || undefined,
         proofStrictness,
         expectedQrPayload: trimmedExpectedQrPayload,
+        proofCodeType: getProofCodeTypeFromLinkMode(linkMode),
         repeatSchedule,
         gracePeriodSeconds: gracePeriod,
         isActive: true,
@@ -697,6 +707,7 @@ export default function CreateAlarmScreen() {
     isOnboardingConversion,
     isReuseMode,
     label,
+    linkMode,
     notes,
     placeObject,
     proofStrictness,
@@ -733,7 +744,7 @@ export default function CreateAlarmScreen() {
         leftIcon="chevron-back"
         onLeftPress={activeStep === 1 ? handleCancel : handleReturnToDetailsStep}
         subtitle={activeStep === 1 ? 'Define what to prove, when, and where.' : 'Link the exact code that proves it.'}
-        title={activeStep === 1 ? 'Create Checkpoint' : 'Link QR / Barcode'}
+        title={activeStep === 1 ? (isEditMode ? 'Edit Checkpoint' : 'Create Checkpoint') : 'Link QR / Barcode'}
       />
 
       {activeStep === 1 ? (
