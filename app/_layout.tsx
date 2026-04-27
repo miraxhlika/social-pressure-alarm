@@ -127,6 +127,12 @@ export default function RootLayout() {
             }}
           />
           <Stack.Screen
+            name="today-activity"
+            options={{
+              animation: 'slide_from_right',
+            }}
+          />
+          <Stack.Screen
             name="onboarding"
             options={{
               animation: 'slide_from_right',
