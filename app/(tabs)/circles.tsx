@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import {
   ActivityIndicator,
@@ -20,7 +21,6 @@ import { AppInput } from '@/components/ui/app-input';
 import { AppScreen } from '@/components/ui/app-screen';
 import { EmptyState } from '@/components/ui/empty-state';
 import { LoadingBlock } from '@/components/ui/loading-block';
-import { PageHeader } from '@/components/ui/page-header';
 import { SectionHeader } from '@/components/ui/section-header';
 import { StateCard } from '@/components/ui/state-card';
 import { StatusPill } from '@/components/ui/status-pill';
@@ -432,15 +432,6 @@ export default function CirclesScreen() {
             }
           : undefined
       }>
-      <PageHeader
-        badgeLabel={user ? `@${profile?.handle ?? 'profile'}` : 'Guest'}
-        badgeTone={user ? 'success' : 'warning'}
-        eyebrow="Circles"
-        description="Small-group accountability built on real proof."
-        size="compact"
-        title="Circles"
-      />
-
       {!configured ? (
         <StateCard
           actionLabel="Open account"
@@ -466,32 +457,93 @@ export default function CirclesScreen() {
         />
       ) : (
         <>
-          <View style={[styles.segmentedControl, { backgroundColor: colors.panel, borderColor: colors.line }]}>
-            {(['activity', 'manage'] as const).map((view) => {
-              const isActive = activeView === view;
+          <AppCard elevated tone="canvas" style={styles.flowCirclesCard}>
+            <View style={styles.flowHeader}>
+              <Text style={[styles.flowTitle, { color: colors.text }]}>Circles</Text>
+              <Text style={[styles.flowSubtitle, { color: colors.textSoft }]}>Private. Optional. Yours.</Text>
+              <View style={[styles.flowRule, { backgroundColor: colors.primary }]} />
+              <Text style={[styles.flowBody, { color: colors.textSoft }]}>
+                Invite trusted people to support you. You control what gets shared.
+              </Text>
+            </View>
 
-              return (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Open your circle management"
+              onPress={() => setActiveView('manage')}
+              style={({ pressed }) => [
+                styles.yourCircleRow,
+                { backgroundColor: colors.elevated, borderColor: colors.line },
+                pressed ? styles.pressedRow : null,
+              ]}>
+              <View style={[styles.flowIcon, { backgroundColor: colors.primarySurface }]}>
+                <Ionicons color={colors.text} name="people" size={22} />
+              </View>
+              <View style={styles.flowRowCopy}>
+                <Text style={[TextPresets.label, { color: colors.text }]}>Your Circle</Text>
+                <Text style={[styles.flowMeta, { color: colors.textSoft }]}>
+                  {circles.length === 0 ? 'No circles yet' : `${totalMembers} member${totalMembers === 1 ? '' : 's'}`}
+                </Text>
+              </View>
+              <Ionicons color={colors.muted} name="chevron-forward" size={20} />
+            </Pressable>
+
+            <View style={[styles.shareControlPanel, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
+              <Text style={[styles.panelTitle, { color: colors.text }]}>Share Controls</Text>
+              {[
+                { icon: 'shield-checkmark-outline', title: 'Check-ins', subtitle: 'Share completion status', status: 'Shared' },
+                { icon: 'flame-outline', title: 'Streaks', subtitle: 'Share streak milestones', status: 'Shared' },
+                { icon: 'document-text-outline', title: 'Notes', subtitle: 'Keep private', status: 'Not shared' },
+                { icon: 'location-outline', title: 'Location', subtitle: 'Keep private', status: 'Not shared' },
+              ].map((item) => (
                 <Pressable
-                  key={view}
-                  accessibilityLabel={`Show ${view === 'activity' ? 'activity' : 'manage'} circles view`}
                   accessibilityRole="button"
-                  accessibilityState={{ selected: isActive }}
-                  onPress={() => setActiveView(view)}
-                  style={[
-                    styles.segment,
-                    {
-                      backgroundColor: isActive ? colors.elevated : 'transparent',
-                      borderColor: isActive ? colors.line : 'transparent',
-                    },
-                  ]}>
-                  <Text style={[TextPresets.label, { color: isActive ? colors.primary : colors.text }]}>
-                    {view === 'activity' ? 'Activity' : 'Manage'}
-                  </Text>
+                  accessibilityLabel={`${item.title}. ${item.subtitle}. ${item.status}`}
+                  key={item.title}
+                  onPress={() => {
+                    if (item.status === 'Shared') {
+                      router.push({ pathname: '/create', params: { returnTo: '/circles' } });
+                    } else {
+                      Alert.alert(item.title, `${item.title} stays private unless a future checkpoint explicitly changes it.`);
+                    }
+                  }}
+                  style={({ pressed }) => [styles.shareFlowRow, pressed ? styles.pressedRow : null]}>
+                  <View style={[styles.shareFlowIcon, { backgroundColor: colors.panelMuted }]}>
+                    <Ionicons color={colors.text} name={item.icon as keyof typeof Ionicons.glyphMap} size={18} />
+                  </View>
+                  <View style={styles.flowRowCopy}>
+                    <Text style={[styles.shareFlowTitle, { color: colors.text }]}>{item.title}</Text>
+                    <Text style={[styles.shareFlowMeta, { color: colors.textSoft }]}>{item.subtitle}</Text>
+                  </View>
+                  <StatusPill label={item.status} tone={item.status === 'Shared' ? 'success' : 'default'} />
                 </Pressable>
-              );
-            })}
-          </View>
+              ))}
+            </View>
 
+            <ActionRow
+              description={shareableCircle ? 'Send an invite link' : 'Create a circle first'}
+              leading={<Ionicons color={colors.primaryText} name="add" size={24} />}
+              onPress={() => {
+                if (shareableCircle) {
+                  void handleShareCircle(shareableCircle);
+                } else {
+                  setActiveView('manage');
+                }
+              }}
+              statusLabel={shareableCircle ? 'Ready' : 'Set up'}
+              statusTone={shareableCircle ? 'success' : 'primary'}
+              title="Invite a Trusted Person"
+            />
+
+            <View style={[styles.flowPrivacyNote, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
+              <Ionicons color={colors.textSoft} name="lock-closed-outline" size={20} />
+              <Text style={[styles.flowMeta, { color: colors.textSoft }]}>
+                Your circle is private and encrypted. You can leave or remove anyone at any time.
+              </Text>
+            </View>
+          </AppCard>
+
+          {activeView === 'activity' ? null : (
           <AppCard elevated tone="primary" style={styles.accountabilityCard}>
             <SectionHeader
               kicker="Accountability"
@@ -516,7 +568,9 @@ export default function CirclesScreen() {
 
             <AppButton label={accountabilityPlan.actionLabel} onPress={handleAccountabilityPlanAction} />
           </AppCard>
+          )}
 
+          {activeView === 'activity' ? null : (
           <AppCard elevated tone="canvas">
             <SectionHeader
               kicker="Share controls"
@@ -560,6 +614,7 @@ export default function CirclesScreen() {
               />
             </View>
           </AppCard>
+          )}
 
           {loadError ? (
             <StateCard
@@ -571,7 +626,7 @@ export default function CirclesScreen() {
               title="Could not refresh circles"
               tone="danger"
             />
-          ) : activeView === 'activity' ? (
+          ) : activeView === 'activity' ? null : Boolean(false) ? (
             <>
               <AppCard elevated tone="canvas" style={styles.heroCard}>
                 <View style={styles.heroHeader}>
@@ -937,6 +992,110 @@ function MetricTile({
 const styles = StyleSheet.create({
   screenContent: {
     gap: Spacing.lg,
+  },
+  flowCirclesCard: {
+    gap: Spacing.md,
+  },
+  flowHeader: {
+    alignItems: 'center',
+    gap: Spacing.xs,
+  },
+  flowTitle: {
+    fontFamily: Fonts.serif,
+    fontSize: 29,
+    fontWeight: '800',
+    lineHeight: 35,
+    textAlign: 'center',
+  },
+  flowSubtitle: {
+    ...TextPresets.body,
+    fontSize: 15,
+    lineHeight: 20,
+    textAlign: 'center',
+  },
+  flowRule: {
+    borderRadius: Radius.pill,
+    height: 2,
+    marginVertical: Spacing.xs,
+    width: 42,
+  },
+  flowBody: {
+    ...TextPresets.body,
+    fontSize: 14,
+    lineHeight: 20,
+    maxWidth: 300,
+    textAlign: 'center',
+  },
+  yourCircleRow: {
+    alignItems: 'center',
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: Spacing.md,
+    minHeight: 74,
+    padding: Spacing.md,
+  },
+  pressedRow: {
+    opacity: 0.88,
+  },
+  flowIcon: {
+    alignItems: 'center',
+    borderRadius: Radius.md,
+    height: 48,
+    justifyContent: 'center',
+    width: 48,
+  },
+  flowRowCopy: {
+    flex: 1,
+    gap: 2,
+    minWidth: 0,
+  },
+  flowMeta: {
+    ...TextPresets.body,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  shareControlPanel: {
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    gap: Spacing.xs,
+    padding: Spacing.md,
+  },
+  panelTitle: {
+    ...TextPresets.label,
+    marginBottom: Spacing.xs,
+  },
+  shareFlowRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    minHeight: 48,
+  },
+  shareFlowIcon: {
+    alignItems: 'center',
+    borderRadius: Radius.sm,
+    height: 34,
+    justifyContent: 'center',
+    width: 34,
+  },
+  shareFlowTitle: {
+    ...TextPresets.label,
+    fontSize: 14,
+    lineHeight: 18,
+  },
+  shareFlowMeta: {
+    ...TextPresets.body,
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  flowPrivacyNote: {
+    alignItems: 'center',
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: Spacing.md,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
   },
   segmentedControl: {
     borderRadius: Radius.pill,

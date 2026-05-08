@@ -137,7 +137,7 @@ export default function OnboardingScreen() {
       mode: 'optional_sign_in',
       notificationPermission: notificationState,
     });
-    router.replace('/account');
+    router.replace('/sync');
   };
 
   const handleRequestNotifications = async () => {
