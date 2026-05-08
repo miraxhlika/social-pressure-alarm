@@ -138,6 +138,12 @@ export default function RootLayout() {
               animation: 'slide_from_right',
             }}
           />
+          <Stack.Screen
+            name="sync"
+            options={{
+              animation: 'slide_from_right',
+            }}
+          />
           <Stack.Screen name="paywall" />
         </Stack>
         <StatusBar style={colorScheme === 'dark' ? 'light' : 'dark'} />
