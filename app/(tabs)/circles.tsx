@@ -1,11 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import {
   ActivityIndicator,
   Alert,
-  NativeScrollEvent,
-  NativeSyntheticEvent,
+  Animated,
+  Easing,
+  Keyboard,
+  Modal,
+  Platform,
   Pressable,
   Share,
   StyleSheet,
@@ -14,34 +17,31 @@ import {
 } from 'react-native';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 
-import { ActionRow, ActionRowGlyph } from '@/components/ui/action-row';
 import { AppButton } from '@/components/ui/app-button';
-import { AppCard } from '@/components/ui/app-card';
 import { AppInput } from '@/components/ui/app-input';
 import { AppScreen } from '@/components/ui/app-screen';
 import { EmptyState } from '@/components/ui/empty-state';
+import {
+  FlowFooterButton,
+  FlowIconBadge,
+  FlowListRow,
+  FlowPanel,
+  FlowSectionLabel,
+  FlowTopBar,
+} from '@/components/ui/flow-primitives';
 import { LoadingBlock } from '@/components/ui/loading-block';
-import { SectionHeader } from '@/components/ui/section-header';
 import { StateCard } from '@/components/ui/state-card';
 import { StatusPill } from '@/components/ui/status-pill';
-import { Fonts, Radius, Spacing, TextPresets, Type, getAppColors, withAlpha } from '@/constants/theme';
+import { Radius, Spacing, TextPresets, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { trackAnalyticsEvent } from '@/lib/analytics';
-import { formatFeedInsight, formatSocialTimestamp } from '@/lib/dashboard';
 import {
   buildCircleInviteUrl,
   createSocialCircle,
   joinSocialCircleWithInviteCode,
   listMySocialCircles,
 } from '@/lib/social/circles';
-import { listVisibleSocialFeed } from '@/lib/social/feed';
-import { getSocialDashboardInsights } from '@/lib/social/insights';
-import {
-  SocialChallengeSummary,
-  SocialCircleSummary,
-  SocialFeedItem,
-  SocialLeaderboardEntry,
-} from '@/lib/social/types';
+import { SocialCircleSummary } from '@/lib/social/types';
 import { useSocialSession } from '@/providers/social-session-provider';
 
 function getErrorMessage(error: unknown, fallback: string) {
@@ -52,136 +52,33 @@ function formatMemberCount(count: number) {
   return `${count} member${count === 1 ? '' : 's'}`;
 }
 
-function formatActivityTitle(item: SocialFeedItem) {
-  const verb = item.outcome === 'confirmed' ? 'cleared' : 'missed';
-  return `${item.isOwnEvent ? 'You' : item.actorDisplayName} ${verb} ${item.alarmLabel}`;
-}
-
-function formatActivityMeta(item: SocialFeedItem) {
-  return `${item.circleName} · ${formatFeedInsight(item)} · ${formatSocialTimestamp(item.resolvedAt)}`;
-}
-
-function matchesFeedSearch(item: SocialFeedItem, query: string) {
-  if (!query) {
-    return true;
-  }
-
-  const searchableText = [
-    item.actorDisplayName,
-    item.actorHandle,
-    item.circleName,
-    item.alarmLabel,
-    item.outcome === 'confirmed' ? 'cleared' : 'missed',
-    formatFeedInsight(item),
-  ]
-    .join(' ')
-    .toLowerCase();
-
-  return searchableText.includes(query);
-}
-
-type AccountabilityPlan = {
-  title: string;
-  body: string;
-  actionLabel: string;
-  action: 'manage' | 'share' | 'create';
-};
-
-function getCircleCommitmentHint(circle: SocialCircleSummary, circleFeed: SocialFeedItem[]) {
-  if (circle.memberCount <= 1) {
-    return 'Invite one person who will actually notice a miss. One partner is enough.';
-  }
-
-  if (circleFeed.length === 0) {
-    return 'Attach one checkpoint and share clears first so this group has a real signal.';
-  }
-
-  if (circleFeed.some((item) => item.outcome === 'missed')) {
-    return 'A miss already surfaced here. Review it quickly, adjust the checkpoint, and keep the circle focused.';
-  }
-
-  return 'Clears are flowing. Decide together whether misses stay private or become opt-in for firmer pressure.';
-}
-
-function getAccountabilityPlan(circles: SocialCircleSummary[], feed: SocialFeedItem[]): AccountabilityPlan {
-  if (circles.length === 0) {
-    return {
-      title: 'Start with one person',
-      body: 'A useful circle can be one reliable person who would notice a miss. Build small, then attach one checkpoint.',
-      actionLabel: 'Set up a circle',
-      action: 'manage',
-    };
-  }
-
-  if (circles.every((circle) => circle.memberCount <= 1)) {
-    return {
-      title: 'Invite your first accountability partner',
-      body: 'You have the structure, but nobody else is in yet. Share one invite with someone who will actually notice when you slip.',
-      actionLabel: 'Share an invite',
-      action: 'share',
-    };
-  }
-
-  if (feed.length === 0) {
-    return {
-      title: 'Set the first shared checkpoint',
-      body: 'Your circle has members, but it still needs one real commitment. Start by sharing clears, then decide if misses should stay opt-in.',
-      actionLabel: 'Attach a checkpoint',
-      action: 'create',
-    };
-  }
-
-  if (feed.some((item) => item.outcome === 'missed')) {
-    return {
-      title: 'Keep misses useful, not noisy',
-      body: 'Use misses as fast recovery prompts. Adjust the checkpoint, keep the group small, and avoid turning accountability into chatter.',
-      actionLabel: 'Adjust a checkpoint',
-      action: 'create',
-    };
-  }
-
-  return {
-    title: 'Protect one routine this week',
-    body: 'Small circles work when everyone knows which checkpoint matters. Keep the group tight and the proof concrete.',
-    actionLabel: 'Create another checkpoint',
-    action: 'create',
-  };
-}
-
-const FEED_PAGE_SIZE = 12;
-const LOAD_MORE_THRESHOLD = 240;
-const ALL_CIRCLES_FILTER = 'all';
+const COPY_FEEDBACK_MS = 2200;
+const SHEET_OPEN_DURATION_MS = 300;
+const SHEET_CLOSE_DURATION_MS = 220;
 
 export default function CirclesScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ inviteCode?: string }>();
   const colors = getAppColors(useColorScheme());
-  const { configured, isLoading, isProfileComplete, profile, user } = useSocialSession();
+  const { configured, isLoading, isProfileComplete, user } = useSocialSession();
   const [circles, setCircles] = useState<SocialCircleSummary[]>([]);
   const [circleName, setCircleName] = useState('');
   const [circleDescription, setCircleDescription] = useState('');
   const [inviteCode, setInviteCode] = useState('');
-  const [screenMessage, setScreenMessage] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [loadError, setLoadError] = useState('');
-  const [feed, setFeed] = useState<SocialFeedItem[]>([]);
-  const [feedSearchQuery, setFeedSearchQuery] = useState('');
-  const [selectedFeedCircleId, setSelectedFeedCircleId] = useState<string>(ALL_CIRCLES_FILTER);
-  const [hasMoreFeed, setHasMoreFeed] = useState(false);
-  const [isLoadingMoreFeed, setIsLoadingMoreFeed] = useState(false);
-  const [challenges, setChallenges] = useState<SocialChallengeSummary[]>([]);
-  const [leaderboard, setLeaderboard] = useState<SocialLeaderboardEntry[]>([]);
-  const [activeView, setActiveView] = useState<'activity' | 'manage'>('activity');
+  const [isCircleSheetMounted, setIsCircleSheetMounted] = useState(false);
+  const [isCircleSheetVisible, setIsCircleSheetVisible] = useState(false);
+  const [circleSheetMode, setCircleSheetMode] = useState<'create' | 'join'>('create');
+  const [copiedCircleId, setCopiedCircleId] = useState<string | null>(null);
+  const circleSheetAnimation = useRef(new Animated.Value(0)).current;
+  const circleSheetKeyboardOffset = useRef(new Animated.Value(0)).current;
+  const copyFeedbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadCircles = useCallback(async () => {
     if (!configured || !user || !isProfileComplete) {
       setCircles([]);
-      setFeed([]);
-      setHasMoreFeed(false);
-      setIsLoadingMoreFeed(false);
-      setChallenges([]);
-      setLeaderboard([]);
       setIsRefreshing(false);
       setLoadError('');
       return;
@@ -191,34 +88,79 @@ export default function CirclesScreen() {
     setLoadError('');
 
     try {
-      const [nextCircles, nextFeed, insights] = await Promise.all([
-        listMySocialCircles(),
-        listVisibleSocialFeed({ limitCount: FEED_PAGE_SIZE }).catch(() => []),
-        getSocialDashboardInsights().catch(() => ({
-          challenges: [] as SocialChallengeSummary[],
-          leaderboard: [] as SocialLeaderboardEntry[],
-        })),
-      ]);
-
+      const nextCircles = await listMySocialCircles();
       setCircles(nextCircles);
-      setFeed(nextFeed);
-      setHasMoreFeed(nextFeed.length === FEED_PAGE_SIZE);
-      setChallenges(insights.challenges);
-      setLeaderboard(insights.leaderboard.slice(0, 4));
     } catch (error) {
       setLoadError(getErrorMessage(error, 'The latest circles could not be loaded.'));
     } finally {
       setIsRefreshing(false);
-      setIsLoadingMoreFeed(false);
     }
   }, [configured, isProfileComplete, user]);
 
   useEffect(() => {
     if (typeof params.inviteCode === 'string' && params.inviteCode.trim()) {
       setInviteCode(params.inviteCode.trim());
-      setScreenMessage('Invite code detected from the app link. Join when you are ready, then attach one checkpoint to make the circle real.');
+      setCircleSheetMode('join');
+      setIsCircleSheetVisible(true);
     }
   }, [params.inviteCode]);
+
+  useEffect(() => {
+    if (isCircleSheetVisible) {
+      setIsCircleSheetMounted(true);
+    }
+  }, [isCircleSheetVisible]);
+
+  useEffect(() => {
+    if (!isCircleSheetMounted) {
+      return;
+    }
+
+    Animated.timing(circleSheetAnimation, {
+      duration: isCircleSheetVisible ? SHEET_OPEN_DURATION_MS : SHEET_CLOSE_DURATION_MS,
+      easing: isCircleSheetVisible ? Easing.out(Easing.cubic) : Easing.in(Easing.cubic),
+      toValue: isCircleSheetVisible ? 1 : 0,
+      useNativeDriver: true,
+    }).start(({ finished }) => {
+      if (finished && !isCircleSheetVisible) {
+        setIsCircleSheetMounted(false);
+      }
+    });
+  }, [circleSheetAnimation, isCircleSheetMounted, isCircleSheetVisible]);
+
+  useEffect(() => {
+    const keyboardShowEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const keyboardHideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const showSubscription = Keyboard.addListener(keyboardShowEvent, (event) => {
+      Animated.timing(circleSheetKeyboardOffset, {
+        duration: event.duration ?? 260,
+        easing: Easing.out(Easing.cubic),
+        toValue: event.endCoordinates.height,
+        useNativeDriver: false,
+      }).start();
+    });
+    const hideSubscription = Keyboard.addListener(keyboardHideEvent, (event) => {
+      Animated.timing(circleSheetKeyboardOffset, {
+        duration: event.duration ?? 220,
+        easing: Easing.inOut(Easing.cubic),
+        toValue: 0,
+        useNativeDriver: false,
+      }).start();
+    });
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, [circleSheetKeyboardOffset]);
+
+  useEffect(() => {
+    return () => {
+      if (copyFeedbackTimeoutRef.current) {
+        clearTimeout(copyFeedbackTimeoutRef.current);
+      }
+    };
+  }, []);
 
   useFocusEffect(
     useCallback(() => {
@@ -226,15 +168,10 @@ export default function CirclesScreen() {
     }, [loadCircles])
   );
 
-  useEffect(() => {
-    if (selectedFeedCircleId === ALL_CIRCLES_FILTER) {
-      return;
-    }
-
-    if (!circles.some((circle) => circle.id === selectedFeedCircleId)) {
-      setSelectedFeedCircleId(ALL_CIRCLES_FILTER);
-    }
-  }, [circles, selectedFeedCircleId]);
+  const closeCircleSheet = useCallback(() => {
+    Keyboard.dismiss();
+    setIsCircleSheetVisible(false);
+  }, []);
 
   const handleCreateCircle = async () => {
     if (!circleName.trim()) {
@@ -243,7 +180,6 @@ export default function CirclesScreen() {
     }
 
     setIsSubmitting(true);
-    setScreenMessage('');
 
     try {
       const createdCircle = await createSocialCircle({
@@ -254,7 +190,7 @@ export default function CirclesScreen() {
       setCircleName('');
       setCircleDescription('');
       setCircles((currentCircles) => [...currentCircles, createdCircle]);
-      setScreenMessage(`Created ${createdCircle.name}. The next move is sharing one invite with someone who will notice a miss.`);
+      closeCircleSheet();
     } catch (error) {
       Alert.alert('Unable to create circle', getErrorMessage(error, 'The circle could not be created right now.'));
     } finally {
@@ -269,7 +205,6 @@ export default function CirclesScreen() {
     }
 
     setIsSubmitting(true);
-    setScreenMessage('');
 
     try {
       const joinedCircle = await joinSocialCircleWithInviteCode(inviteCode);
@@ -281,9 +216,7 @@ export default function CirclesScreen() {
         const withoutJoinedCircle = currentCircles.filter((circle) => circle.id !== joinedCircle.id);
         return [...withoutJoinedCircle, joinedCircle].sort((left, right) => left.name.localeCompare(right.name));
       });
-      setScreenMessage(
-        `Joined ${joinedCircle.name}. Next: attach one checkpoint and decide whether this circle sees clears only or clears plus misses.`
-      );
+      closeCircleSheet();
     } catch (error) {
       Alert.alert('Unable to join circle', getErrorMessage(error, 'The invite code could not be used right now.'));
     } finally {
@@ -306,131 +239,48 @@ export default function CirclesScreen() {
   };
 
   const handleCopyInviteLink = async (circle: SocialCircleSummary) => {
-    await handleCopyValue(buildCircleInviteUrl(circle.inviteCode), 'Invite link');
-  };
-
-  const handleCopyValue = async (value: string, label: string) => {
     try {
-      await Clipboard.setStringAsync(value);
-      setScreenMessage(`${label} copied.`);
-    } catch (error) {
-      Alert.alert('Unable to copy', getErrorMessage(error, `The ${label.toLowerCase()} could not be copied.`));
-    }
-  };
+      await Clipboard.setStringAsync(buildCircleInviteUrl(circle.inviteCode));
+      setCopiedCircleId(circle.id);
 
-  const loadMoreFeed = useCallback(async () => {
-    if (!configured || !user || !isProfileComplete || isRefreshing || isLoadingMoreFeed || !hasMoreFeed) {
-      return;
-    }
-
-    setIsLoadingMoreFeed(true);
-
-    try {
-      const nextPage = await listVisibleSocialFeed({
-        limitCount: FEED_PAGE_SIZE,
-        offsetCount: feed.length,
-      });
-      const existingIds = new Set(feed.map((item) => item.id));
-      const uniqueNextPage = nextPage.filter((item) => !existingIds.has(item.id));
-
-      setFeed((currentFeed) => (uniqueNextPage.length > 0 ? [...currentFeed, ...uniqueNextPage] : currentFeed));
-      setHasMoreFeed(nextPage.length === FEED_PAGE_SIZE && uniqueNextPage.length > 0);
-    } catch (error) {
-      Alert.alert('Unable to load more activity', getErrorMessage(error, 'More clears and misses could not be loaded.'));
-    } finally {
-      setIsLoadingMoreFeed(false);
-    }
-  }, [configured, feed, hasMoreFeed, isLoadingMoreFeed, isProfileComplete, isRefreshing, user]);
-
-  const handleActivityScroll = useCallback(
-    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-      const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-
-      if (contentSize.height <= layoutMeasurement.height) {
-        return;
+      if (copyFeedbackTimeoutRef.current) {
+        clearTimeout(copyFeedbackTimeoutRef.current);
       }
 
-      const distanceFromBottom = contentSize.height - (contentOffset.y + layoutMeasurement.height);
+      copyFeedbackTimeoutRef.current = setTimeout(() => {
+        setCopiedCircleId(null);
+      }, COPY_FEEDBACK_MS);
+    } catch (error) {
+      Alert.alert('Unable to copy', getErrorMessage(error, 'The invite link could not be copied.'));
+    }
+  };
 
-      if (distanceFromBottom <= LOAD_MORE_THRESHOLD) {
-        void loadMoreFeed();
-      }
-    },
-    [loadMoreFeed]
-  );
-
-  const latestFeedItem = feed[0] ?? null;
-  const topChallenge = challenges[0] ?? null;
   const totalMembers = circles.reduce((count, circle) => count + circle.memberCount, 0);
-  const shareableCircle = circles.find((circle) => circle.myRole === 'owner') ?? circles[0] ?? null;
-  const feedByCircleId = useMemo(
-    () =>
-      feed.reduce<Record<string, SocialFeedItem[]>>((result, item) => {
-        const currentItems = result[item.circleId] ?? [];
-        result[item.circleId] = [...currentItems, item];
-        return result;
-      }, {}),
-    [feed]
-  );
-  const accountabilityPlan = useMemo(() => getAccountabilityPlan(circles, feed), [circles, feed]);
-  const normalizedFeedSearchQuery = feedSearchQuery.trim().toLowerCase();
-  const isFilteringFeed = selectedFeedCircleId !== ALL_CIRCLES_FILTER || normalizedFeedSearchQuery.length > 0;
-  const filteredFeed = useMemo(
-    () =>
-      feed.filter(
-        (item) =>
-          (selectedFeedCircleId === ALL_CIRCLES_FILTER || item.circleId === selectedFeedCircleId) &&
-          matchesFeedSearch(item, normalizedFeedSearchQuery)
-      ),
-    [feed, normalizedFeedSearchQuery, selectedFeedCircleId]
-  );
-  const feedSummary =
-    filteredFeed.length === feed.length && !isFilteringFeed
-      ? `${feed.length} activit${feed.length === 1 ? 'y' : 'ies'} loaded`
-      : `Showing ${filteredFeed.length} of ${feed.length} loaded`;
-  const activitySummary =
-    circles.length === 0
-      ? 'Create one small circle and attach one checkpoint when you are ready for outside accountability.'
-      : latestFeedItem
-        ? 'The latest accountability signal, the people involved, and the routine that currently matters most.'
-        : 'Your circles are ready. The first shared clear or miss will turn this into a real accountability board.';
-
-  const handleAccountabilityPlanAction = useCallback(() => {
-    if (accountabilityPlan.action === 'manage') {
-      setActiveView('manage');
-      return;
-    }
-
-    if (accountabilityPlan.action === 'share') {
-      if (shareableCircle) {
-        void handleShareCircle(shareableCircle);
-      } else {
-        setActiveView('manage');
-      }
-      return;
-    }
-
-    router.push({ pathname: '/create', params: { returnTo: '/circles' } });
-  }, [accountabilityPlan.action, router, shareableCircle]);
-
-  useEffect(() => {
-    if (activeView !== 'activity' || !isFilteringFeed || filteredFeed.length > 0 || !hasMoreFeed || isLoadingMoreFeed) {
-      return;
-    }
-
-    void loadMoreFeed();
-  }, [activeView, filteredFeed.length, hasMoreFeed, isFilteringFeed, isLoadingMoreFeed, loadMoreFeed]);
+  const circleSheetTranslateY = circleSheetAnimation.interpolate({
+    inputRange: [0, 1],
+    outputRange: [96, 0],
+  });
+  const circleSheetScale = circleSheetAnimation.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.98, 1],
+  });
 
   return (
     <AppScreen
+      backgroundColor={colors.elevated}
       contentStyle={styles.screenContent}
-      scrollProps={
-        activeView === 'activity'
-          ? {
-              onScroll: handleActivityScroll,
-              scrollEventThrottle: 16,
-            }
-          : undefined
+      footer={
+        !configured || isLoading || !user || !isProfileComplete ? null : (
+          <View style={styles.createCtaFooter}>
+            <FlowFooterButton
+              label="Create or Join Circle"
+              onPress={() => {
+                setCircleSheetMode(circles.length === 0 ? 'create' : 'join');
+                setIsCircleSheetVisible(true);
+              }}
+            />
+          </View>
+        )
       }>
       {!configured ? (
         <StateCard
@@ -457,164 +307,28 @@ export default function CirclesScreen() {
         />
       ) : (
         <>
-          <AppCard elevated tone="canvas" style={styles.flowCirclesCard}>
-            <View style={styles.flowHeader}>
-              <Text style={[styles.flowTitle, { color: colors.text }]}>Circles</Text>
-              <Text style={[styles.flowSubtitle, { color: colors.textSoft }]}>Private. Optional. Yours.</Text>
-              <View style={[styles.flowRule, { backgroundColor: colors.primary }]} />
-              <Text style={[styles.flowBody, { color: colors.textSoft }]}>
-                Invite trusted people to support you. You control what gets shared.
-              </Text>
-            </View>
+          <FlowTopBar
+            subtitle="Private. Optional. Yours."
+            title="Circles"
+          />
 
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Open your circle management"
-              onPress={() => setActiveView('manage')}
-              style={({ pressed }) => [
-                styles.yourCircleRow,
-                { backgroundColor: colors.elevated, borderColor: colors.line },
-                pressed ? styles.pressedRow : null,
-              ]}>
-              <View style={[styles.flowIcon, { backgroundColor: colors.primarySurface }]}>
-                <Ionicons color={colors.text} name="people" size={22} />
+          <FlowPanel style={styles.flowHeroPanel}>
+            <View style={styles.flowHeroRow}>
+              <FlowIconBadge icon="people" size="large" tone="primary" />
+              <View style={styles.flowHeroCopy}>
+                <Text style={[styles.flowKicker, { color: colors.primary }]}>TRUSTED SUPPORT</Text>
+                <Text style={[styles.flowHeroTitle, { color: colors.text }]}>Support, on your terms</Text>
               </View>
-              <View style={styles.flowRowCopy}>
-                <Text style={[TextPresets.label, { color: colors.text }]}>Your Circle</Text>
-                <Text style={[styles.flowMeta, { color: colors.textSoft }]}>
-                  {circles.length === 0 ? 'No circles yet' : `${totalMembers} member${totalMembers === 1 ? '' : 's'}`}
-                </Text>
-              </View>
-              <Ionicons color={colors.muted} name="chevron-forward" size={20} />
-            </Pressable>
-
-            <View style={[styles.shareControlPanel, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
-              <Text style={[styles.panelTitle, { color: colors.text }]}>Share Controls</Text>
-              {[
-                { icon: 'shield-checkmark-outline', title: 'Check-ins', subtitle: 'Share completion status', status: 'Shared' },
-                { icon: 'flame-outline', title: 'Streaks', subtitle: 'Share streak milestones', status: 'Shared' },
-                { icon: 'document-text-outline', title: 'Notes', subtitle: 'Keep private', status: 'Not shared' },
-                { icon: 'location-outline', title: 'Location', subtitle: 'Keep private', status: 'Not shared' },
-              ].map((item) => (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={`${item.title}. ${item.subtitle}. ${item.status}`}
-                  key={item.title}
-                  onPress={() => {
-                    if (item.status === 'Shared') {
-                      router.push({ pathname: '/create', params: { returnTo: '/circles' } });
-                    } else {
-                      Alert.alert(item.title, `${item.title} stays private unless a future checkpoint explicitly changes it.`);
-                    }
-                  }}
-                  style={({ pressed }) => [styles.shareFlowRow, pressed ? styles.pressedRow : null]}>
-                  <View style={[styles.shareFlowIcon, { backgroundColor: colors.panelMuted }]}>
-                    <Ionicons color={colors.text} name={item.icon as keyof typeof Ionicons.glyphMap} size={18} />
-                  </View>
-                  <View style={styles.flowRowCopy}>
-                    <Text style={[styles.shareFlowTitle, { color: colors.text }]}>{item.title}</Text>
-                    <Text style={[styles.shareFlowMeta, { color: colors.textSoft }]}>{item.subtitle}</Text>
-                  </View>
-                  <StatusPill label={item.status} tone={item.status === 'Shared' ? 'success' : 'default'} />
-                </Pressable>
-              ))}
             </View>
 
-            <ActionRow
-              description={shareableCircle ? 'Send an invite link' : 'Create a circle first'}
-              leading={<Ionicons color={colors.primaryText} name="add" size={24} />}
-              onPress={() => {
-                if (shareableCircle) {
-                  void handleShareCircle(shareableCircle);
-                } else {
-                  setActiveView('manage');
-                }
-              }}
-              statusLabel={shareableCircle ? 'Ready' : 'Set up'}
-              statusTone={shareableCircle ? 'success' : 'primary'}
-              title="Invite a Trusted Person"
+            <FlowListRow
+              description={circles.length === 0 ? 'No circles yet' : `${totalMembers} member${totalMembers === 1 ? '' : 's'} across your groups`}
+              leading={<FlowIconBadge icon="people-outline" size="small" tone="muted" />}
+              statusLabel={`${circles.length}`}
+              statusTone={circles.length > 0 ? 'success' : 'default'}
+              title="Your circles"
             />
-
-            <View style={[styles.flowPrivacyNote, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
-              <Ionicons color={colors.textSoft} name="lock-closed-outline" size={20} />
-              <Text style={[styles.flowMeta, { color: colors.textSoft }]}>
-                Your circle is private and encrypted. You can leave or remove anyone at any time.
-              </Text>
-            </View>
-          </AppCard>
-
-          {activeView === 'activity' ? null : (
-          <AppCard elevated tone="primary" style={styles.accountabilityCard}>
-            <SectionHeader
-              kicker="Accountability"
-              size="compact"
-              title={accountabilityPlan.title}
-              description={accountabilityPlan.body}
-            />
-
-            <View style={styles.commitmentChecklist}>
-              {[
-                'Keep circles small: one to three people is enough.',
-                'Start with one checkpoint the whole group understands.',
-                'Keep miss sharing opt-in so pressure stays useful.',
-              ].map((step) => (
-                <View
-                  key={step}
-                  style={[styles.commitmentStep, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
-                  <Text style={[styles.commitmentStepText, { color: colors.textSoft }]}>{step}</Text>
-                </View>
-              ))}
-            </View>
-
-            <AppButton label={accountabilityPlan.actionLabel} onPress={handleAccountabilityPlanAction} />
-          </AppCard>
-          )}
-
-          {activeView === 'activity' ? null : (
-          <AppCard elevated tone="canvas">
-            <SectionHeader
-              kicker="Share controls"
-              size="compact"
-              title="Private unless a checkpoint opts in"
-              description="Circles can only see accountability signals that a checkpoint is configured to share."
-            />
-
-            <View style={styles.shareControlGrid}>
-              <ActionRow
-                description="Each checkpoint chooses whether clears and misses are shared with a circle."
-                leading={<ActionRowGlyph label="C" />}
-                statusLabel="Per checkpoint"
-                statusTone="primary"
-                style={styles.shareControlRow}
-                title="Check-ins"
-              />
-              <ActionRow
-                description="Streak and weekly reliability context is attached only to shared check-ins."
-                leading={<ActionRowGlyph label="S" />}
-                statusLabel="Scoped"
-                statusTone="primary"
-                style={styles.shareControlRow}
-                title="Streaks"
-              />
-              <ActionRow
-                description="Checkpoint notes stay out of the circle feed and exports remain device/account owned."
-                leading={<ActionRowGlyph label="N" />}
-                statusLabel="Private"
-                statusTone="success"
-                style={styles.shareControlRow}
-                title="Notes"
-              />
-              <ActionRow
-                description="The app shares proof outcomes, not live location. Place/object labels stay in the checkpoint setup."
-                leading={<ActionRowGlyph label="L" />}
-                statusLabel="Private"
-                statusTone="success"
-                style={styles.shareControlRow}
-                title="Location"
-              />
-            </View>
-          </AppCard>
-          )}
+          </FlowPanel>
 
           {loadError ? (
             <StateCard
@@ -626,319 +340,44 @@ export default function CirclesScreen() {
               title="Could not refresh circles"
               tone="danger"
             />
-          ) : activeView === 'activity' ? null : Boolean(false) ? (
-            <>
-              <AppCard elevated tone="canvas" style={styles.heroCard}>
-                <View style={styles.heroHeader}>
-                  <View style={styles.heroCopy}>
-                    <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Overview</Text>
-                    <Text style={[styles.heroTitle, { color: colors.text }]}>Accountability pulse</Text>
-                    <Text style={[styles.heroBody, { color: colors.textSoft }]}>{activitySummary}</Text>
-                  </View>
-                  {isRefreshing ? (
-                    <ActivityIndicator color={colors.primary} />
-                  ) : (
-                    <StatusPill
-                      label={latestFeedItem ? 'Live' : 'Quiet'}
-                      tone={latestFeedItem ? 'success' : 'default'}
-                    />
-                  )}
+          ) : null}
+
+          {!loadError ? (
+            <FlowPanel>
+              <View style={styles.compactSectionHeader}>
+                <FlowSectionLabel>YOUR CIRCLES</FlowSectionLabel>
+                <View style={styles.sectionHeaderActions}>
+                  {isRefreshing ? <ActivityIndicator color={colors.primary} /> : <Text style={[styles.sectionCount, { color: colors.textSoft }]}>{circles.length} total</Text>}
                 </View>
+              </View>
 
-                <View style={styles.metricGrid}>
-                  <MetricTile colors={colors} helper="Active groups" label="Circles" value={`${circles.length}`} />
-                  <MetricTile colors={colors} helper="People across groups" label="Members" value={`${totalMembers}`} />
-                  <MetricTile
-                    colors={colors}
-                    helper="Best current streak"
-                    label="Top streak"
-                    value={`${leaderboard[0]?.bestStreak ?? 0}`}
-                  />
-                </View>
-
-                {latestFeedItem ? (
-                  <View style={[styles.activityStrip, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
-                    <View style={styles.activityStripCopy}>
-                      <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>Latest proof</Text>
-                      <Text numberOfLines={2} style={[styles.activityStripTitle, { color: colors.text }]}>
-                        {formatActivityTitle(latestFeedItem)}
-                      </Text>
-                      <Text numberOfLines={2} style={[styles.activityStripMeta, { color: colors.textSoft }]}>
-                        {formatActivityMeta(latestFeedItem)}
-                      </Text>
-                    </View>
-                  </View>
-                ) : null}
-
-                {topChallenge ? (
-                  <View style={[styles.challengeStrip, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
-                    <View style={styles.challengeCopy}>
-                      <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>Commitment</Text>
-                      <Text style={[TextPresets.label, { color: colors.text }]}>{topChallenge.title}</Text>
-                      <Text style={[styles.challengeMeta, { color: colors.textSoft }]}>{topChallenge.progressLabel}</Text>
-                    </View>
-                    <StatusPill
-                      label={topChallenge.isCompleted ? 'Completed' : 'In progress'}
-                      tone={topChallenge.isCompleted ? 'success' : 'primary'}
-                    />
-                  </View>
-                ) : null}
-              </AppCard>
-
-              <AppCard elevated tone="canvas">
-                <SectionHeader
-                  kicker="Feed"
-                  size="compact"
-                  title="Follow-through feed"
-                  description="The clears and misses that matter inside your circles."
+              {circles.length === 0 ? (
+                <EmptyState
+                  description="Use the button below to create or join one."
+                  title="No circles yet"
+                  variant="inline"
                 />
+              ) : (
+                <View style={styles.circleList}>
+                  {circles.map((circle, index) => {
+                    const isCopied = copiedCircleId === circle.id;
 
-                <View style={styles.feedTools}>
-                  <AppInput
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    containerStyle={styles.feedSearchWrap}
-                    inputStyle={styles.feedSearchInput}
-                    onChangeText={setFeedSearchQuery}
-                    placeholder="Search checkpoints, members, or circles"
-                    returnKeyType="search"
-                    value={feedSearchQuery}
-                  />
-
-                  <View style={styles.feedFilterRow}>
-                    <Pressable
-                      accessibilityLabel="Show all circles in the feed"
-                      accessibilityRole="button"
-                      accessibilityState={{ selected: selectedFeedCircleId === ALL_CIRCLES_FILTER }}
-                      onPress={() => setSelectedFeedCircleId(ALL_CIRCLES_FILTER)}
-                      style={[
-                        styles.feedFilterChip,
-                        {
-                          backgroundColor:
-                            selectedFeedCircleId === ALL_CIRCLES_FILTER ? colors.primarySurface : colors.elevated,
-                          borderColor: selectedFeedCircleId === ALL_CIRCLES_FILTER ? colors.primary : colors.line,
-                        },
-                      ]}>
-                      <Text
-                        style={[
-                          styles.feedFilterText,
-                          { color: selectedFeedCircleId === ALL_CIRCLES_FILTER ? colors.primary : colors.textSoft },
-                        ]}>
-                        All circles
-                      </Text>
-                    </Pressable>
-
-                    {circles.map((circle) => {
-                      const isSelected = selectedFeedCircleId === circle.id;
-
-                      return (
-                        <Pressable
-                          key={circle.id}
-                          accessibilityLabel={`Filter feed to ${circle.name}`}
-                          accessibilityRole="button"
-                          accessibilityState={{ selected: isSelected }}
-                          onPress={() => setSelectedFeedCircleId(circle.id)}
-                          style={[
-                            styles.feedFilterChip,
-                            {
-                              backgroundColor: isSelected ? colors.primarySurface : colors.elevated,
-                              borderColor: isSelected ? colors.primary : colors.line,
-                            },
-                          ]}>
-                          <Text style={[styles.feedFilterText, { color: isSelected ? colors.primary : colors.textSoft }]}>
-                            {circle.name}
-                          </Text>
-                        </Pressable>
-                      );
-                    })}
-                  </View>
-
-                  <Text style={[styles.feedSummary, { color: colors.muted }]}>{feedSummary}</Text>
-                </View>
-
-                {filteredFeed.length === 0 ? (
-                  <EmptyState
-                    description={
-                      isFilteringFeed
-                        ? 'Try a different circle filter or search term.'
-                        : 'Shared clears and misses appear here once someone in your circles protects or misses a checkpoint.'
-                    }
-                    title={isFilteringFeed ? 'No matching activity' : 'No accountability signals yet'}
-                    variant="inline"
-                  />
-                ) : (
-                  <View style={styles.feedList}>
-                    {filteredFeed.map((item) => (
-                      <View
-                        key={item.id}
-                        style={[
-                          styles.feedRow,
-                          {
-                            backgroundColor: colors.elevated,
-                            borderColor:
-                              item.outcome === 'confirmed'
-                                ? withAlpha(colors.success, '30')
-                                : withAlpha(colors.danger, '30'),
-                          },
-                        ]}>
-                        <View style={styles.feedHeader}>
-                          <View style={styles.feedCopy}>
-                            <Text style={[TextPresets.label, { color: colors.text }]}>
-                              {item.isOwnEvent ? 'You' : item.actorDisplayName}
-                            </Text>
-                            <Text numberOfLines={1} style={[styles.feedContext, { color: colors.muted }]}>
-                              @{item.actorHandle} in {item.circleName}
-                            </Text>
-                          </View>
-                          <StatusPill
-                            label={item.outcome === 'confirmed' ? 'Cleared' : 'Missed'}
-                            tone={item.outcome === 'confirmed' ? 'success' : 'danger'}
-                          />
-                        </View>
-                        <Text numberOfLines={1} style={[styles.feedTitle, { color: colors.text }]}>
-                          {item.alarmLabel}
-                        </Text>
-                        <Text numberOfLines={2} style={[styles.feedMeta, { color: colors.textSoft }]}>
-                          {formatFeedInsight(item)} · {formatSocialTimestamp(item.resolvedAt)}
-                        </Text>
-                      </View>
-                    ))}
-                  </View>
-                )}
-
-                {isLoadingMoreFeed ? (
-                  <View style={styles.feedFooter}>
-                    <ActivityIndicator color={colors.primary} />
-                  </View>
-                ) : hasMoreFeed ? (
-                  <View style={styles.feedFooter}>
-                    <Text style={[styles.feedFooterText, { color: colors.muted }]}>Scroll to load more activity</Text>
-                  </View>
-                ) : feed.length > 0 ? (
-                  <View style={styles.feedFooter}>
-                    <Text style={[styles.feedFooterText, { color: colors.muted }]}>You are caught up</Text>
-                  </View>
-                ) : null}
-              </AppCard>
-            </>
-          ) : (
-            <>
-              <AppCard elevated tone="canvas">
-                <SectionHeader
-                  kicker="Manage"
-                  size="compact"
-                  title="Start or join a small group"
-                  description="One or two reliable people is enough."
-                />
-
-                <View style={styles.quickActions}>
-                  <View style={[styles.actionPanel, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
-                    <View style={styles.panelCopy}>
-                      <Text style={[TextPresets.label, { color: colors.text }]}>Create a circle</Text>
-                      <Text style={[styles.panelDescription, { color: colors.textSoft }]}>
-                        Start small. One or two people who would notice a miss is enough.
-                      </Text>
-                    </View>
-                    <AppInput
-                      autoCapitalize="words"
-                      label="Circle name"
-                      onChangeText={setCircleName}
-                      placeholder="Morning crew"
-                      value={circleName}
-                    />
-                    <AppInput
-                      inputStyle={styles.multilineInput}
-                      label="Description"
-                      multiline
-                      onChangeText={setCircleDescription}
-                      placeholder="People who will notice missed weekday checkpoints."
-                      value={circleDescription}
-                    />
-                    <AppButton
-                      disabled={isSubmitting}
-                      label={isSubmitting ? 'Working...' : 'Create circle'}
-                      onPress={handleCreateCircle}
-                    />
-                  </View>
-
-                  <View style={[styles.actionPanel, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
-                    <View style={styles.panelCopy}>
-                      <Text style={[TextPresets.label, { color: colors.text }]}>Join with an invite code</Text>
-                      <Text style={[styles.panelDescription, { color: colors.textSoft }]}>
-                        {profile?.handle
-                          ? `You will join as @${profile.handle}, then you can attach one checkpoint to this circle.`
-                          : 'Join another accountability circle from a shared code.'}
-                      </Text>
-                    </View>
-                    <AppInput
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                      label="Invite code"
-                      onChangeText={setInviteCode}
-                      placeholder="paste invite code"
-                      value={inviteCode}
-                    />
-                    <AppButton
-                      disabled={isSubmitting}
-                      label="Join circle"
-                      onPress={handleJoinCircle}
-                      variant="secondary"
-                    />
-                  </View>
-                </View>
-
-                {screenMessage ? (
-                  <View style={[styles.messageBanner, { backgroundColor: colors.successSurface, borderColor: withAlpha(colors.success, '2E') }]}>
-                    <Text style={[styles.messageText, { color: colors.success }]}>{screenMessage}</Text>
-                  </View>
-                ) : null}
-              </AppCard>
-
-              <AppCard elevated>
-                <SectionHeader
-                  action={isRefreshing ? <ActivityIndicator color={colors.primary} /> : undefined}
-                  kicker="Your circles"
-                  size="compact"
-                  title="Groups, invites, and next moves"
-                  description="Everything a small accountability group needs to stay useful."
-                />
-
-                {circles.length === 0 ? (
-                  <EmptyState
-                    description="Create your first circle or join one. Small groups work best when they stay focused on one real commitment."
-                    title="No circles yet"
-                  />
-                ) : (
-                  <View style={styles.circleList}>
-                    {circles.map((circle) => (
-                      <View
-                        key={circle.id}
-                        style={[styles.circleRow, { backgroundColor: colors.canvas, borderColor: colors.line }]}>
+                    return (
+                      <View key={circle.id} style={styles.circleFlowItem}>
                         <View style={styles.circleHeader}>
+                          <FlowIconBadge icon="people-outline" size="small" tone="muted" />
                           <View style={styles.circleCopy}>
                             <Text style={[TextPresets.label, { color: colors.text }]}>{circle.name}</Text>
-                            <Text numberOfLines={2} style={[styles.circleDescription, { color: colors.textSoft }]}>
-                              {circle.description || 'Shared accountability circle.'}
+                            <Text numberOfLines={1} style={[styles.circleDescription, { color: colors.textSoft }]}>
+                              {formatMemberCount(circle.memberCount)} · Code {circle.inviteCode}
                             </Text>
                           </View>
                           <StatusPill label={circle.myRole === 'owner' ? 'Owner' : 'Member'} tone="primary" />
                         </View>
 
-                        <View style={styles.circleMeta}>
-                          <Text style={[styles.circleMetaText, { color: colors.textSoft }]}>{formatMemberCount(circle.memberCount)}</Text>
-                          <Text style={[styles.circleMetaText, { color: colors.muted }]}>Code {circle.inviteCode}</Text>
-                        </View>
-
-                        <View style={[styles.commitmentHint, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
-                          <Text style={[TextPresets.eyebrow, { color: colors.primary }]}>Next move</Text>
-                          <Text style={[styles.commitmentHintText, { color: colors.textSoft }]}>
-                            {getCircleCommitmentHint(circle, feedByCircleId[circle.id] ?? [])}
-                          </Text>
-                        </View>
-
                         <View style={styles.circleActions}>
                           <AppButton
-                            label="Share invite"
+                            label="Share"
                             onPress={() => {
                               void handleShareCircle(circle);
                             }}
@@ -947,372 +386,213 @@ export default function CirclesScreen() {
                             variant="secondary"
                           />
                           <AppButton
-                            label="Copy link"
+                            label={isCopied ? 'Copied' : 'Copy link'}
                             onPress={() => {
                               void handleCopyInviteLink(circle);
                             }}
                             size="compact"
-                            style={styles.actionFill}
-                            variant="ghost"
+                            style={[styles.actionFill, isCopied ? styles.copiedButton : null]}
+                            variant={isCopied ? 'secondary' : 'ghost'}
                           />
                         </View>
+                        {index < circles.length - 1 ? <View style={[styles.circleDivider, { backgroundColor: colors.line }]} /> : null}
                       </View>
-                    ))}
-                  </View>
-                )}
-              </AppCard>
-            </>
-          )}
+                    );
+                  })}
+                </View>
+              )}
+            </FlowPanel>
+          ) : null}
         </>
       )}
-    </AppScreen>
-  );
-}
+      <Modal
+        animationType="none"
+        onRequestClose={closeCircleSheet}
+        transparent
+        visible={isCircleSheetMounted}>
+        <View style={styles.sheetOverlay}>
+          <Animated.View style={[styles.sheetBackdrop, { opacity: circleSheetAnimation }]}>
+            <Pressable
+              accessibilityLabel="Close circle form"
+              accessibilityRole="button"
+              onPress={closeCircleSheet}
+              style={StyleSheet.absoluteFill}
+            />
+          </Animated.View>
+          <Animated.View
+            style={[
+              styles.sheetStack,
+              {
+                opacity: circleSheetAnimation,
+                transform: [{ translateY: circleSheetTranslateY }],
+              },
+            ]}>
+            <Animated.View
+              style={[
+                styles.sheet,
+                {
+                  backgroundColor: colors.elevated,
+                  borderColor: colors.line,
+                  transform: [{ scale: circleSheetScale }],
+                },
+              ]}>
+              <View style={styles.sheetHandle} />
+              <View style={styles.sheetHeader}>
+                <View style={styles.sheetTitleWrap}>
+                  <Text style={[styles.sheetTitle, { color: colors.text }]}>Circle</Text>
+                </View>
+                <Pressable
+                  accessibilityLabel="Close circle form"
+                  accessibilityRole="button"
+                  onPress={closeCircleSheet}
+                  style={({ pressed }) => [styles.sheetCloseButton, pressed ? styles.pressed : null]}>
+                  <Ionicons color={colors.textSoft} name="close" size={18} />
+                </Pressable>
+              </View>
 
-function MetricTile({
-  label,
-  value,
-  helper,
-  colors,
-}: {
-  label: string;
-  value: string;
-  helper: string;
-  colors: ReturnType<typeof getAppColors>;
-}) {
-  return (
-    <View style={[styles.metricTile, { backgroundColor: colors.elevated, borderColor: colors.border }]}>
-      <Text style={[TextPresets.eyebrow, { color: colors.muted }]}>{label}</Text>
-      <Text style={[styles.metricValue, { color: colors.text }]}>{value}</Text>
-      <Text style={[styles.metricHelper, { color: colors.muted }]}>{helper}</Text>
-    </View>
+              <View style={[styles.sheetModePicker, { backgroundColor: colors.panelMuted }]}>
+                {(['create', 'join'] as const).map((mode) => {
+                  const isSelected = circleSheetMode === mode;
+
+                  return (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityState={{ selected: isSelected }}
+                      key={mode}
+                      onPress={() => setCircleSheetMode(mode)}
+                      style={[
+                        styles.sheetModeButton,
+                        { backgroundColor: isSelected ? colors.elevated : 'transparent' },
+                      ]}>
+                      <Text style={[styles.sheetModeLabel, { color: isSelected ? colors.text : colors.textSoft }]}>
+                        {mode === 'create' ? 'Create' : 'Join'}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              {circleSheetMode === 'create' ? (
+                <View style={styles.sheetForm}>
+                  <AppInput
+                    autoCapitalize="words"
+                    inputStyle={styles.sheetInput}
+                    label="Circle name"
+                    onChangeText={setCircleName}
+                    placeholder="Morning crew"
+                    value={circleName}
+                  />
+                  <AppInput
+                    inputStyle={[styles.sheetInput, styles.sheetMultilineInput]}
+                    label="Description"
+                    multiline
+                    onChangeText={setCircleDescription}
+                    placeholder="Optional"
+                    value={circleDescription}
+                  />
+                  <AppButton
+                    disabled={isSubmitting}
+                    label={isSubmitting ? 'Working...' : 'Create circle'}
+                    onPress={handleCreateCircle}
+                    style={styles.sheetButton}
+                  />
+                </View>
+              ) : (
+                <View style={styles.sheetForm}>
+                  <AppInput
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    inputStyle={styles.sheetInput}
+                    label="Invite code"
+                    onChangeText={setInviteCode}
+                    placeholder="paste invite code"
+                    value={inviteCode}
+                  />
+                  <AppButton
+                    disabled={isSubmitting}
+                    label={isSubmitting ? 'Working...' : 'Join circle'}
+                    onPress={handleJoinCircle}
+                    style={styles.sheetButton}
+                  />
+                </View>
+              )}
+            </Animated.View>
+            <Animated.View
+              pointerEvents="none"
+              style={[
+                styles.sheetKeyboardFill,
+                {
+                  backgroundColor: colors.elevated,
+                  height: circleSheetKeyboardOffset,
+                },
+              ]}
+            />
+          </Animated.View>
+        </View>
+      </Modal>
+    </AppScreen>
   );
 }
 
 const styles = StyleSheet.create({
   screenContent: {
-    gap: Spacing.lg,
+    gap: 10,
+    paddingBottom: 150,
+    paddingHorizontal: Spacing.lg,
+    paddingTop: 2,
   },
-  flowCirclesCard: {
-    gap: Spacing.md,
+  createCtaFooter: {
+    marginBottom: 56,
   },
-  flowHeader: {
+  pressed: {
+    opacity: 0.78,
+    transform: [{ scale: 0.99 }],
+  },
+  flowHeroPanel: {
+    padding: 12,
+  },
+  flowHeroRow: {
     alignItems: 'center',
-    gap: Spacing.xs,
-  },
-  flowTitle: {
-    fontFamily: Fonts.serif,
-    fontSize: 29,
-    fontWeight: '800',
-    lineHeight: 35,
-    textAlign: 'center',
-  },
-  flowSubtitle: {
-    ...TextPresets.body,
-    fontSize: 15,
-    lineHeight: 20,
-    textAlign: 'center',
-  },
-  flowRule: {
-    borderRadius: Radius.pill,
-    height: 2,
-    marginVertical: Spacing.xs,
-    width: 42,
-  },
-  flowBody: {
-    ...TextPresets.body,
-    fontSize: 14,
-    lineHeight: 20,
-    maxWidth: 300,
-    textAlign: 'center',
-  },
-  yourCircleRow: {
-    alignItems: 'center',
-    borderRadius: Radius.md,
-    borderWidth: 1,
     flexDirection: 'row',
     gap: Spacing.md,
-    minHeight: 74,
-    padding: Spacing.md,
   },
-  pressedRow: {
-    opacity: 0.88,
-  },
-  flowIcon: {
-    alignItems: 'center',
-    borderRadius: Radius.md,
-    height: 48,
-    justifyContent: 'center',
-    width: 48,
-  },
-  flowRowCopy: {
+  flowHeroCopy: {
     flex: 1,
-    gap: 2,
+    gap: Spacing.xs,
     minWidth: 0,
   },
-  flowMeta: {
-    ...TextPresets.body,
-    fontSize: 13,
-    lineHeight: 18,
+  flowKicker: {
+    ...TextPresets.eyebrow,
+    fontSize: 10,
+    lineHeight: 13,
   },
-  shareControlPanel: {
-    borderRadius: Radius.md,
-    borderWidth: 1,
-    gap: Spacing.xs,
-    padding: Spacing.md,
+  flowHeroTitle: {
+    ...TextPresets.title,
+    fontSize: 18,
+    lineHeight: 22,
   },
-  panelTitle: {
-    ...TextPresets.label,
-    marginBottom: Spacing.xs,
-  },
-  shareFlowRow: {
+  compactSectionHeader: {
     alignItems: 'center',
     flexDirection: 'row',
-    gap: Spacing.sm,
-    minHeight: 48,
+    justifyContent: 'space-between',
   },
-  shareFlowIcon: {
+  sectionHeaderActions: {
     alignItems: 'center',
-    borderRadius: Radius.sm,
-    height: 34,
-    justifyContent: 'center',
-    width: 34,
+    flexDirection: 'row',
+    gap: Spacing.xs,
   },
-  shareFlowTitle: {
-    ...TextPresets.label,
-    fontSize: 14,
-    lineHeight: 18,
-  },
-  shareFlowMeta: {
+  sectionCount: {
     ...TextPresets.body,
     fontSize: 12,
     lineHeight: 16,
   },
-  flowPrivacyNote: {
-    alignItems: 'center',
-    borderRadius: Radius.md,
-    borderWidth: 1,
-    flexDirection: 'row',
-    gap: Spacing.md,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
-  },
-  segmentedControl: {
-    borderRadius: Radius.pill,
-    borderWidth: 1,
-    flexDirection: 'row',
-    gap: 6,
-    padding: 4,
-  },
-  segment: {
-    alignItems: 'center',
-    borderRadius: Radius.pill,
-    borderWidth: 1,
-    flex: 1,
-    minHeight: 40,
-    justifyContent: 'center',
-  },
-  accountabilityCard: {
-    gap: Spacing.md,
-  },
-  commitmentChecklist: {
-    gap: Spacing.sm,
-  },
-  commitmentStep: {
-    borderRadius: Radius.md,
-    borderWidth: 1,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-  },
-  commitmentStepText: {
-    ...TextPresets.body,
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  shareControlGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.sm,
-  },
-  shareControlRow: {
-    flexBasis: 240,
-    flexGrow: 1,
-  },
-  heroCard: {
-    gap: Spacing.md,
-  },
-  heroHeader: {
-    alignItems: 'flex-start',
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.sm,
-    justifyContent: 'space-between',
-  },
-  heroCopy: {
-    flex: 1,
-    gap: Spacing.xs,
-  },
-  heroTitle: {
-    fontFamily: Fonts.rounded,
-    fontSize: Type.title,
-    fontWeight: '800',
-    lineHeight: 32,
-  },
-  heroBody: {
-    ...TextPresets.body,
-    fontSize: 15,
-    lineHeight: 22,
-  },
-  metricGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.sm,
-  },
-  metricTile: {
-    borderRadius: Radius.md,
-    borderWidth: 1,
-    flexBasis: 120,
-    flexGrow: 1,
-    gap: 2,
-    minHeight: 78,
-    padding: 14,
-  },
-  metricValue: {
-    fontFamily: Fonts.rounded,
-    fontSize: 24,
-    fontWeight: '800',
-    lineHeight: 28,
-  },
-  metricHelper: {
-    ...TextPresets.body,
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  activityStrip: {
-    borderRadius: Radius.md,
-    borderWidth: 1,
-    padding: 14,
-  },
-  activityStripCopy: {
-    gap: 2,
-  },
-  activityStripTitle: {
-    fontFamily: Fonts.rounded,
-    fontSize: 18,
-    fontWeight: '700',
-    lineHeight: 22,
-  },
-  activityStripMeta: {
-    ...TextPresets.body,
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  challengeStrip: {
-    alignItems: 'center',
-    borderRadius: Radius.md,
-    borderWidth: 1,
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.sm,
-    justifyContent: 'space-between',
-    padding: 14,
-  },
-  challengeCopy: {
-    flex: 1,
-    gap: 2,
-  },
-  challengeMeta: {
-    ...TextPresets.body,
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  feedList: {
-    gap: Spacing.sm,
-  },
-  feedTools: {
-    gap: Spacing.sm,
-  },
-  feedSearchWrap: {
-    gap: 0,
-  },
-  feedSearchInput: {
-    minHeight: 46,
-    paddingVertical: 12,
-  },
-  feedFilterRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.sm,
-  },
-  feedFilterChip: {
-    borderRadius: Radius.pill,
-    borderWidth: 1,
-    minHeight: 36,
-    justifyContent: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-  },
-  feedFilterText: {
-    ...TextPresets.label,
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  feedSummary: {
-    ...TextPresets.body,
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  feedRow: {
-    borderRadius: Radius.md,
-    borderWidth: 1,
-    gap: 6,
-    padding: 14,
-  },
-  feedHeader: {
-    alignItems: 'flex-start',
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.sm,
-    justifyContent: 'space-between',
-  },
-  feedCopy: {
-    flex: 1,
-    gap: 2,
-  },
-  feedContext: {
-    ...TextPresets.body,
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  feedTitle: {
-    fontFamily: Fonts.rounded,
-    fontSize: 18,
-    fontWeight: '700',
-    lineHeight: 22,
-  },
-  feedMeta: {
-    ...TextPresets.body,
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  feedFooter: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    minHeight: 36,
-  },
-  feedFooterText: {
-    ...TextPresets.body,
-    fontSize: 13,
-    lineHeight: 18,
-  },
   circleList: {
     gap: Spacing.sm,
   },
-  circleRow: {
-    borderRadius: Radius.lg,
-    borderWidth: 1,
+  circleFlowItem: {
     gap: Spacing.sm,
-    padding: 14,
+    paddingHorizontal: 2,
+    paddingTop: Spacing.xs,
   },
   circleHeader: {
     alignItems: 'flex-start',
@@ -1330,87 +610,109 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 20,
   },
-  circleMeta: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.sm,
-  },
-  circleMetaText: {
-    ...TextPresets.body,
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  commitmentHint: {
-    borderRadius: Radius.md,
-    borderWidth: 1,
-    gap: 2,
-    padding: 12,
-  },
-  commitmentHintText: {
-    ...TextPresets.body,
-    fontSize: 14,
-    lineHeight: 20,
-  },
   circleActions: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: Spacing.sm,
+    paddingLeft: 42,
+  },
+  circleDivider: {
+    height: 1,
+    marginLeft: 42,
+    marginTop: Spacing.sm,
   },
   actionFill: {
     flexBasis: 140,
     flexGrow: 1,
   },
-  leaderboardList: {
-    gap: Spacing.sm,
+  copiedButton: {
+    borderColor: 'transparent',
   },
-  leaderboardRow: {
-    alignItems: 'center',
-    borderRadius: Radius.md,
+  sheetOverlay: {
+    flex: 1,
+    justifyContent: 'flex-end',
+  },
+  sheetBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0, 0, 0, 0.42)',
+  },
+  sheetStack: {
+    width: '100%',
+  },
+  sheet: {
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
     borderWidth: 1,
-    flexDirection: 'row',
     gap: Spacing.md,
-    padding: Spacing.md,
+    paddingBottom: 34,
+    paddingHorizontal: Spacing.lg,
+    paddingTop: Spacing.sm,
   },
-  rank: {
-    fontFamily: Fonts.rounded,
-    fontSize: 18,
-    fontWeight: '800',
-    width: 36,
+  sheetKeyboardFill: {
+    width: '100%',
   },
-  leaderboardStats: {
-    alignItems: 'flex-end',
+  sheetHandle: {
+    alignSelf: 'center',
+    backgroundColor: 'rgba(142, 142, 147, 0.45)',
+    borderRadius: Radius.pill,
+    height: 4,
+    width: 38,
+  },
+  sheetHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  sheetTitleWrap: {
+    alignItems: 'center',
+    flexDirection: 'row',
     gap: Spacing.xs,
   },
-  quickActions: {
+  sheetTitle: {
+    ...TextPresets.title,
+    fontSize: 20,
+    lineHeight: 24,
+  },
+  sheetCloseButton: {
+    alignItems: 'center',
+    borderRadius: Radius.pill,
+    height: 34,
+    justifyContent: 'center',
+    width: 34,
+  },
+  sheetModePicker: {
+    borderRadius: 10,
+    flexDirection: 'row',
+    gap: 4,
+    padding: 4,
+  },
+  sheetModeButton: {
+    alignItems: 'center',
+    borderRadius: 8,
+    flex: 1,
+    minHeight: 36,
+    justifyContent: 'center',
+  },
+  sheetModeLabel: {
+    ...TextPresets.label,
+    fontSize: 13,
+    lineHeight: 17,
+  },
+  sheetForm: {
     gap: Spacing.md,
   },
-  actionPanel: {
-    borderRadius: Radius.lg,
-    borderWidth: 1,
-    gap: Spacing.md,
-    padding: 14,
-  },
-  panelCopy: {
-    gap: 2,
-  },
-  panelDescription: {
-    ...TextPresets.body,
+  sheetInput: {
+    borderRadius: 12,
     fontSize: 14,
-    lineHeight: 20,
-  },
-  messageBanner: {
-    borderRadius: Radius.md,
-    borderWidth: 1,
-    paddingHorizontal: 14,
+    minHeight: 46,
+    paddingHorizontal: Spacing.md,
     paddingVertical: 12,
   },
-  messageText: {
-    ...TextPresets.body,
-    fontSize: 14,
-    lineHeight: 20,
+  sheetMultilineInput: {
+    minHeight: 82,
   },
-  multilineInput: {
-    minHeight: 96,
-    textAlignVertical: 'top',
+  sheetButton: {
+    borderRadius: 8,
+    minHeight: 46,
   },
 });

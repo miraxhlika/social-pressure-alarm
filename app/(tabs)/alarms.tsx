@@ -7,6 +7,7 @@ import { AppButton } from '@/components/ui/app-button';
 import { AppCard } from '@/components/ui/app-card';
 import { AppScreen } from '@/components/ui/app-screen';
 import { EmptyState } from '@/components/ui/empty-state';
+import { FlowFooterButton } from '@/components/ui/flow-primitives';
 import { LoadingBlock } from '@/components/ui/loading-block';
 import { PageHeader } from '@/components/ui/page-header';
 import { StatTile } from '@/components/ui/stat-tile';
@@ -179,7 +180,16 @@ export default function AlarmsScreen() {
     : 'No attempts yet';
 
   return (
-    <AppScreen>
+    <AppScreen
+      backgroundColor={colors.elevated}
+      contentStyle={styles.screenContent}
+      footer={
+        isLoading ? null : (
+          <View style={styles.createCtaFooter}>
+            <FlowFooterButton label="Create Checkpoint" onPress={handleCreateAlarmPress} />
+          </View>
+        )
+      }>
       <PageHeader
         action={<AppButton label="New checkpoint" onPress={handleCreateAlarmPress} size="compact" />}
         eyebrow="Checkpoints"
@@ -253,6 +263,12 @@ export default function AlarmsScreen() {
 }
 
 const styles = StyleSheet.create({
+  screenContent: {
+    paddingBottom: 150,
+  },
+  createCtaFooter: {
+    marginBottom: 56,
+  },
   loadingBlock: {
     minHeight: 180,
   },
