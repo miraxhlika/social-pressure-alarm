@@ -253,9 +253,11 @@ const styles = StyleSheet.create({
     gap: 1,
   },
   topBarTitle: {
-    ...TextPresets.title,
-    fontSize: 18,
-    lineHeight: 22,
+    fontFamily: Fonts.serif,
+    fontSize: 19,
+    fontWeight: '800',
+    letterSpacing: -0.35,
+    lineHeight: 23,
     textAlign: 'center',
   },
   topBarSubtitle: {

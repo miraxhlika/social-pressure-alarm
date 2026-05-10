@@ -795,13 +795,27 @@ export default function AccountScreen() {
   };
 
   return (
-    <AppScreen contentStyle={styles.flowContent} keyboardAware>
+    <AppScreen backgroundColor={colors.elevated} contentStyle={styles.flowContent} keyboardAware>
       <FlowHeader
         subtitle="Transparent. Secure. Yours."
         title="Settings & Privacy"
       />
 
       <View style={styles.settingsList}>
+        <SettingsRow
+          icon={user ? 'person-circle-outline' : 'person-outline'}
+          subtitle={user ? signedInAccountLabel : 'Enable sync, backup, and circles'}
+          title={user ? 'Signed In' : 'Optional Sign In'}
+          value={user ? 'Manage' : configured ? undefined : 'Unavailable'}
+          onPress={() => {
+            if (user) {
+              setActiveSettingsPanel(activeSettingsPanel === 'privacy' ? null : 'privacy');
+              return;
+            }
+
+            router.push('/sync');
+          }}
+        />
         <SettingsRow
           icon="notifications-outline"
           subtitle="Customize reminders and alerts"

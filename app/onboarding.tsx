@@ -180,7 +180,7 @@ function WelcomeStep({ onNext, width }: { onNext: () => void; width: number }) {
       <Header
         title={
           <>
-            Don&apos;t dismiss it.{'\n'}Prove it.
+            Don’t dismiss it.{'\n'}Prove it.
           </>
         }
         description="Checkpoints only clear when you scan the QR code or barcode you've saved."

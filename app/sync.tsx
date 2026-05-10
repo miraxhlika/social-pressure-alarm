@@ -17,14 +17,14 @@ export default function SyncScreen() {
   const supportsAppleSignIn = Platform.OS === 'ios';
   const isSyncing = Boolean(authProviderInFlight);
 
-  const handleEnableSync = async () => {
+  const handleEnableSync = async (provider: 'apple' | 'google') => {
     if (!configured) {
       Alert.alert('Sync is not configured', 'Local checkpoints still work. Add backend configuration before enabling sync.');
       return;
     }
 
     try {
-      if (supportsAppleSignIn) {
+      if (provider === 'apple') {
         await continueWithApple();
       } else {
         await continueWithGoogle();
@@ -43,11 +43,11 @@ export default function SyncScreen() {
   return (
     <AppScreen contentStyle={styles.content}>
       <View style={styles.header}>
-        <Text style={[styles.title, { color: colors.text }]}>Optional Sync{'\n'}You&apos;re in control.</Text>
-        <View style={[styles.rule, { backgroundColor: colors.primary }]} />
+        <Text style={[styles.title, { color: colors.text }]}>Optional Sync{'\n'}You’re in control.</Text>
         <Text style={[styles.subtitle, { color: colors.textSoft }]}>
           The app is local-first by default. Sync is optional for backup and cross-device use.
         </Text>
+        <View style={[styles.rule, { backgroundColor: colors.primary }]} />
       </View>
 
       <View style={styles.artWrap}>
@@ -86,22 +86,53 @@ export default function SyncScreen() {
         <Pressable
           accessibilityRole="button"
           disabled={isSyncing}
-          onPress={handleEnableSync}
+          onPress={() => {
+            void handleEnableSync('google');
+          }}
           style={({ pressed }) => [
-            styles.primaryButton,
-            { backgroundColor: colors.text, borderColor: colors.text },
+            styles.providerButton,
+            { backgroundColor: colors.elevated, borderColor: colors.borderStrong },
             isSyncing ? styles.disabled : null,
             pressed ? styles.pressed : null,
           ]}>
-          <Text style={[styles.primaryButtonText, { color: colors.elevated }]}>{isSyncing ? 'Enabling Sync...' : 'Enable Sync'}</Text>
-          <Ionicons color={colors.elevated} name="chevron-forward" size={18} />
+          <View style={styles.providerIconSlot}>
+            <Ionicons color={colors.text} name="logo-google" size={20} />
+          </View>
+          <Text style={[styles.providerButtonText, { color: colors.text }]}>
+            {authProviderInFlight === 'google' ? 'Signing in with Google...' : 'Continue with Google'}
+          </Text>
+          <Ionicons color={colors.text} name="chevron-forward" size={18} />
         </Pressable>
+        {supportsAppleSignIn ? (
+          <Pressable
+            accessibilityRole="button"
+            disabled={isSyncing}
+            onPress={() => {
+              void handleEnableSync('apple');
+            }}
+            style={({ pressed }) => [
+              styles.providerButton,
+              { backgroundColor: colors.elevated, borderColor: colors.borderStrong },
+              isSyncing ? styles.disabled : null,
+              pressed ? styles.pressed : null,
+            ]}>
+            <View style={styles.providerIconSlot}>
+              <Ionicons color={colors.text} name="logo-apple" size={21} />
+            </View>
+            <Text style={[styles.providerButtonText, { color: colors.text }]}>
+              {authProviderInFlight === 'apple' ? 'Signing in with Apple...' : 'Continue with Apple'}
+            </Text>
+            <Ionicons color={colors.text} name="chevron-forward" size={18} />
+          </Pressable>
+        ) : null}
         <Pressable
           accessibilityRole="button"
+          disabled={isSyncing}
           onPress={handleKeepLocalOnly}
           style={({ pressed }) => [
-            styles.secondaryButton,
+            styles.localOnlyButton,
             { backgroundColor: colors.elevated, borderColor: colors.borderStrong },
+            isSyncing ? styles.disabled : null,
             pressed ? styles.pressed : null,
           ]}>
           <Text style={[styles.secondaryButtonText, { color: colors.text }]}>Keep Local Only</Text>
@@ -267,27 +298,32 @@ const styles = StyleSheet.create({
   actions: {
     gap: Spacing.sm,
   },
-  primaryButton: {
+  providerButton: {
     alignItems: 'center',
     borderRadius: Radius.md,
     borderWidth: 1,
     flexDirection: 'row',
-    justifyContent: 'center',
+    gap: Spacing.sm,
     minHeight: 52,
-    paddingHorizontal: Spacing.xl,
+    paddingHorizontal: Spacing.lg,
   },
-  primaryButtonText: {
+  providerIconSlot: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 26,
+  },
+  providerButtonText: {
     ...TextPresets.label,
     flex: 1,
     fontWeight: '800',
     textAlign: 'center',
   },
-  secondaryButton: {
+  localOnlyButton: {
     alignItems: 'center',
     borderRadius: Radius.md,
     borderWidth: 1,
     justifyContent: 'center',
-    minHeight: 48,
+    minHeight: 52,
     paddingHorizontal: Spacing.xl,
   },
   secondaryButtonText: {
