@@ -8,6 +8,7 @@ import { Alert, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View
 import { AppButton } from '@/components/ui/app-button';
 import { AppInput } from '@/components/ui/app-input';
 import { AppScreen } from '@/components/ui/app-screen';
+import { StatusPill } from '@/components/ui/status-pill';
 import {
   FlowFooterButton,
   FlowIconBadge,
@@ -32,11 +33,10 @@ import {
   scheduleAlarmNotificationAsync,
 } from '@/lib/notifications';
 import { markOnboardingCompleted } from '@/lib/onboarding';
-import { readAppPreferences } from '@/lib/preferences';
 import {
   Alarm,
   AlarmProofCodeType,
-  AlarmProofStrictness,
+  CheckpointPreset,
   RepeatSchedule,
   UseCaseType,
 } from '@/types/alarm';
@@ -64,9 +64,9 @@ const PROOF_CODE_BARCODE_TYPES: CameraBarcodeTypes = [
 
 const SCAN_DEDUPE_WINDOW_MS = 3000;
 
-type LinkMode = 'generateQr' | 'scanQr' | 'scanBarcode' | 'manual';
+type LinkMode = 'generateQr' | 'scanQr' | 'scanBarcode' | 'manual' | 'saved';
 type ScannerPurpose = 'link' | 'test';
-type ExpandedField = 'name' | 'category' | 'schedule' | 'window' | 'recurrence' | 'place' | 'notes' | 'strictness' | null;
+type ExpandedField = 'name' | 'category' | 'schedule' | 'window' | 'recurrence' | 'place' | 'notes' | null;
 
 type FormErrors = {
   label?: string;
@@ -86,11 +86,6 @@ const GRACE_PRESET_OPTIONS = [
   { value: 120, label: '2 min', help: 'Balanced' },
   { value: 180, label: '3 min', help: 'Forgiving' },
 ] as const;
-
-const STRICTNESS_OPTIONS: { value: AlarmProofStrictness; label: string; help: string }[] = [
-  { value: 'strict', label: 'Strict', help: 'Exact saved code only.' },
-  { value: 'standard', label: 'Standard', help: 'Exact match with softer guidance.' },
-];
 
 function createInitialTime() {
   const now = new Date();
@@ -139,6 +134,8 @@ function getLinkModeLabel(linkMode: LinkMode) {
       return 'Scanned barcode';
     case 'manual':
       return 'Manual entry';
+    case 'saved':
+      return 'Saved code';
     default:
       return 'Scanned QR';
   }
@@ -171,10 +168,10 @@ function buildSavedCodeId(payload: string) {
     hash = (hash * 31 + payload.charCodeAt(index)) >>> 0;
   }
 
-  return `CP-${hash.toString(16).toUpperCase().padStart(8, '0').slice(0, 4)}-${payload.length
-    .toString(16)
-    .toUpperCase()
-    .padStart(4, '0')}`;
+  const hashPart = hash.toString(16).toUpperCase().padStart(8, '0');
+  const lengthPart = payload.length.toString(16).toUpperCase().padStart(4, '0');
+
+  return `CP-${hashPart.slice(0, 4)}-${hashPart.slice(4)}-${lengthPart}`;
 }
 
 export default function CreateAlarmScreen() {
@@ -197,7 +194,6 @@ export default function CreateAlarmScreen() {
   const [useCaseType, setUseCaseType] = useState<UseCaseType>('custom');
   const [placeObject, setPlaceObject] = useState('');
   const [notes, setNotes] = useState('');
-  const [proofStrictness, setProofStrictness] = useState<AlarmProofStrictness>('strict');
   const [expectedQrPayload, setExpectedQrPayload] = useState('');
   const [linkMode, setLinkMode] = useState<LinkMode>('scanQr');
   const [proofCodeCapturedAt, setProofCodeCapturedAt] = useState<string | null>(null);
@@ -212,6 +208,8 @@ export default function CreateAlarmScreen() {
   const [activeStep, setActiveStep] = useState<1 | 2>(1);
   const [expandedField, setExpandedField] = useState<ExpandedField>(null);
   const [sourceAlarm, setSourceAlarm] = useState<Alarm | null>(null);
+  const [savedCodePresets, setSavedCodePresets] = useState<CheckpointPreset[]>([]);
+  const [selectedSavedCodePresetId, setSelectedSavedCodePresetId] = useState<string | null>(null);
   const [errors, setErrors] = useState<FormErrors>({});
   const [permission, requestPermission] = useCameraPermissions();
   const scrollViewRef = useRef<ScrollView | null>(null);
@@ -246,8 +244,6 @@ export default function CreateAlarmScreen() {
       }),
     [time]
   );
-  const checkpointName = label.trim() || selectedTemplate.defaultLabel || 'Checkpoint name';
-  const placeObjectLabel = placeObject.trim() || checkpointName;
   const shouldShowCameraFallback = Boolean(
     scannerMessage &&
       !isScannerVisible &&
@@ -268,7 +264,8 @@ export default function CreateAlarmScreen() {
   useEffect(() => {
     const loadFormData = async () => {
       await hydrateAlarmRuntimeForCurrentUser().catch(() => null);
-      const [store, appPreferences] = await Promise.all([readAlarmStore(), readAppPreferences()]);
+      const store = await readAlarmStore();
+      setSavedCodePresets(store.checkpointPresets);
       setErrors({});
       setActiveStep(1);
 
@@ -281,11 +278,11 @@ export default function CreateAlarmScreen() {
         setLabel(typeof params.prefillLabel === 'string' ? params.prefillLabel : prefilledTemplate.label);
         setPlaceObject('');
         setNotes('');
-        setProofStrictness(appPreferences.defaultProofStrictness);
         setExpectedQrPayload('');
         setLinkMode('scanQr');
         setProofCodeCapturedAt(null);
         setProofCodeVerifiedAt(null);
+        setSelectedSavedCodePresetId(null);
         setRepeatSchedule(normalizeRepeatScheduleParam(params.prefillRepeatSchedule, prefilledTemplate.repeatSchedule));
         setGracePeriodSeconds(
           Number.isFinite(prefilledGracePeriod) && prefilledGracePeriod >= 15
@@ -303,11 +300,11 @@ export default function CreateAlarmScreen() {
         setLabel('');
         setPlaceObject('');
         setNotes('');
-        setProofStrictness(appPreferences.defaultProofStrictness);
         setExpectedQrPayload('');
         setLinkMode('scanQr');
         setProofCodeCapturedAt(null);
         setProofCodeVerifiedAt(null);
+        setSelectedSavedCodePresetId(null);
         return;
       }
 
@@ -320,11 +317,11 @@ export default function CreateAlarmScreen() {
       setUseCaseType(alarm.useCaseType);
       setPlaceObject(alarm.placeObject ?? '');
       setNotes(alarm.notes ?? '');
-      setProofStrictness(alarm.proofStrictness);
       setExpectedQrPayload(alarm.expectedQrPayload);
       setLinkMode(getLinkModeFromProofCodeType(alarm.proofCodeType));
       setProofCodeCapturedAt(alarm.createdAt);
       setProofCodeVerifiedAt(null);
+      setSelectedSavedCodePresetId(null);
       setRepeatSchedule(alarm.repeatSchedule);
       setGracePeriodSeconds(String(alarm.gracePeriodSeconds));
     };
@@ -402,6 +399,7 @@ export default function CreateAlarmScreen() {
   const handleOpenScanner = useCallback(async (mode: Extract<LinkMode, 'scanQr' | 'scanBarcode'>) => {
     setLinkMode(mode);
     setScannerPurpose('link');
+    setSelectedSavedCodePresetId(null);
     lastScannedPayloadRef.current = null;
     setScannerMessage('');
 
@@ -431,6 +429,7 @@ export default function CreateAlarmScreen() {
     setExpectedQrPayload('');
     setProofCodeCapturedAt(null);
     setProofCodeVerifiedAt(null);
+    setSelectedSavedCodePresetId(null);
     setErrors((currentErrors) => ({
       ...currentErrors,
       expectedQrPayload: undefined,
@@ -455,6 +454,7 @@ export default function CreateAlarmScreen() {
     setProofCodeVerifiedAt(null);
     setIsScannerVisible(false);
     setScannerPurpose('link');
+    setSelectedSavedCodePresetId(null);
     lastScannedPayloadRef.current = null;
     setScannerMessage('Generated a unique proof payload. Place the matching QR at the checkpoint.');
     setErrors((currentErrors) => ({
@@ -462,6 +462,30 @@ export default function CreateAlarmScreen() {
       expectedQrPayload: undefined,
     }));
   }, [label, selectedTemplate.defaultLabel]);
+
+  const handleOpenSavedCodes = useCallback(() => {
+    setLinkMode('saved');
+    setIsScannerVisible(false);
+    setScannerPurpose('link');
+    lastScannedPayloadRef.current = null;
+    setScannerMessage('Choose one saved code below.');
+  }, []);
+
+  const handleUseSavedProofCode = useCallback((preset: CheckpointPreset) => {
+    setLinkMode('saved');
+    setExpectedQrPayload(preset.expectedQrPayload);
+    setProofCodeCapturedAt(preset.createdAt);
+    setProofCodeVerifiedAt(null);
+    setSelectedSavedCodePresetId(preset.id);
+    setIsScannerVisible(false);
+    setScannerPurpose('link');
+    lastScannedPayloadRef.current = null;
+    setScannerMessage(`Using saved code from ${preset.label}.`);
+    setErrors((currentErrors) => ({
+      ...currentErrors,
+      expectedQrPayload: undefined,
+    }));
+  }, []);
 
   const handleOpenTestScanner = useCallback(async () => {
     if (!expectedQrPayload.trim()) {
@@ -554,6 +578,7 @@ export default function CreateAlarmScreen() {
       setExpectedQrPayload(data);
       setProofCodeCapturedAt(new Date().toISOString());
       setProofCodeVerifiedAt(null);
+      setSelectedSavedCodePresetId(null);
       setErrors((currentErrors) => ({
         ...currentErrors,
         expectedQrPayload: undefined,
@@ -634,7 +659,6 @@ export default function CreateAlarmScreen() {
         useCaseType,
         placeObject: trimmedPlaceObject || trimmedLabel,
         notes: trimmedNotes || undefined,
-        proofStrictness,
         expectedQrPayload: trimmedExpectedQrPayload,
         proofCodeType: getProofCodeTypeFromLinkMode(linkMode),
         repeatSchedule,
@@ -710,7 +734,6 @@ export default function CreateAlarmScreen() {
     linkMode,
     notes,
     placeObject,
-    proofStrictness,
     repeatSchedule,
     returnTo,
     router,
@@ -771,7 +794,6 @@ export default function CreateAlarmScreen() {
           }}
           onNotesChange={setNotes}
           onPlaceObjectChange={setPlaceObject}
-          onProofStrictnessChange={setProofStrictness}
           onRepeatScheduleChange={setRepeatSchedule}
           onTemplateSelect={(nextUseCaseType) => {
             const defaults = getCheckpointTemplateDefaults(nextUseCaseType);
@@ -782,7 +804,6 @@ export default function CreateAlarmScreen() {
           }}
           onTimeChange={handleTimeChange}
           placeObject={placeObject}
-          proofStrictness={proofStrictness}
           repeatSchedule={repeatSchedule}
           selectedTemplate={selectedTemplate}
           time={time}
@@ -797,21 +818,23 @@ export default function CreateAlarmScreen() {
           isScannerEnabled={isScannerEnabled}
           isScannerVisible={isScannerVisible}
           linkMode={linkMode}
+          savedCodePresets={savedCodePresets}
+          selectedSavedCodePresetId={selectedSavedCodePresetId}
           onBarcodeScanned={handleBarcodeScanned}
           onCameraFallbackAction={handleCameraFallbackAction}
           onClearCode={handleClearProofCode}
           onGenerate={handleGenerateProofCode}
           onHideScanner={() => setIsScannerVisible(false)}
+          onOpenSavedCodes={handleOpenSavedCodes}
           onOpenScanner={handleOpenScanner}
           onOpenTestScanner={handleOpenTestScanner}
+          onUseSavedCode={handleUseSavedProofCode}
           permissionGranted={Boolean(permission?.granted)}
-          placeObjectLabel={placeObjectLabel}
           proofCodeCapturedAt={proofCodeCapturedAt}
           proofCodeVerifiedAt={proofCodeVerifiedAt}
           scannerMessage={scannerMessage}
           scannerPurpose={scannerPurpose}
           shouldShowCameraFallback={shouldShowCameraFallback}
-          strictnessLabel={proofStrictness === 'strict' ? 'Exact matching is required.' : 'Exact match with guided fallback.'}
         />
       )}
     </AppScreen>
@@ -834,13 +857,11 @@ function CreateDetailsStep({
   onLabelChange,
   onNotesChange,
   onPlaceObjectChange,
-  onProofStrictnessChange,
   onRepeatScheduleChange,
   onTemplateSelect,
   onTimeChange,
   placeObject,
   proofCodeVerifiedAt,
-  proofStrictness,
   repeatSchedule,
   selectedTemplate,
   time,
@@ -860,13 +881,11 @@ function CreateDetailsStep({
   onLabelChange: (value: string) => void;
   onNotesChange: (value: string) => void;
   onPlaceObjectChange: (value: string) => void;
-  onProofStrictnessChange: (value: AlarmProofStrictness) => void;
   onRepeatScheduleChange: (value: RepeatSchedule) => void;
   onTemplateSelect: (value: UseCaseType) => void;
   onTimeChange: (event: DateTimePickerEvent, selectedDate?: Date) => void;
   placeObject: string;
   proofCodeVerifiedAt: string | null;
-  proofStrictness: AlarmProofStrictness;
   repeatSchedule: RepeatSchedule;
   selectedTemplate: ReturnType<typeof getCheckpointTemplate>;
   time: Date;
@@ -1018,25 +1037,6 @@ function CreateDetailsStep({
         />
       </CreateFieldRow>
 
-      <CreateFieldRow
-        description="How strict the match should be"
-        expanded={expandedField === 'strictness'}
-        icon="flash-outline"
-        onPress={() => onFieldToggle('strictness')}
-        title="Strictness"
-        value={proofStrictness === 'strict' ? 'Strict' : 'Standard'}>
-        <View style={styles.optionGrid}>
-          {STRICTNESS_OPTIONS.map((option) => (
-            <OptionChip
-              description={option.help}
-              key={option.value}
-              onPress={() => onProofStrictnessChange(option.value)}
-              selected={proofStrictness === option.value}
-              title={option.label}
-            />
-          ))}
-        </View>
-      </CreateFieldRow>
     </FlowPanel>
   );
 }
@@ -1050,21 +1050,23 @@ function LinkCodeStep({
   isScannerEnabled,
   isScannerVisible,
   linkMode,
+  savedCodePresets,
+  selectedSavedCodePresetId,
   onBarcodeScanned,
   onCameraFallbackAction,
   onClearCode,
   onGenerate,
   onHideScanner,
+  onOpenSavedCodes,
   onOpenScanner,
   onOpenTestScanner,
+  onUseSavedCode,
   permissionGranted,
-  placeObjectLabel,
   proofCodeCapturedAt,
   proofCodeVerifiedAt,
   scannerMessage,
   scannerPurpose,
   shouldShowCameraFallback,
-  strictnessLabel,
 }: {
   cameraFallbackActionLabel: string;
   cameraFallbackTitle: string;
@@ -1074,25 +1076,28 @@ function LinkCodeStep({
   isScannerEnabled: boolean;
   isScannerVisible: boolean;
   linkMode: LinkMode;
+  savedCodePresets: CheckpointPreset[];
+  selectedSavedCodePresetId: string | null;
   onBarcodeScanned: (result: BarcodeScanningResult) => void;
   onCameraFallbackAction: () => void;
   onClearCode: () => void;
   onGenerate: () => void;
   onHideScanner: () => void;
+  onOpenSavedCodes: () => void;
   onOpenScanner: (mode: Extract<LinkMode, 'scanQr' | 'scanBarcode'>) => void;
   onOpenTestScanner: () => void;
+  onUseSavedCode: (preset: CheckpointPreset) => void;
   permissionGranted: boolean;
-  placeObjectLabel: string;
   proofCodeCapturedAt: string | null;
   proofCodeVerifiedAt: string | null;
   scannerMessage: string;
   scannerPurpose: ScannerPurpose;
   shouldShowCameraFallback: boolean;
-  strictnessLabel: string;
 }) {
   const activeBarcodeTypes =
     scannerPurpose === 'test' || linkMode === 'scanBarcode' ? PROOF_CODE_BARCODE_TYPES : QR_BARCODE_TYPES;
   const cameraScannerKey = `${scannerPurpose}:${linkMode}`;
+  const selectedSavedCodePreset = savedCodePresets.find((preset) => preset.id === selectedSavedCodePresetId) ?? null;
 
   return (
     <>
@@ -1115,7 +1120,55 @@ function LinkCodeStep({
           onPress={() => onOpenScanner('scanBarcode')}
           selected={linkMode === 'scanBarcode'}
         />
+        {savedCodePresets.length > 0 ? (
+          <LinkModeTile
+            glyph="bookmark-outline"
+            label="Use Saved Code"
+            onPress={onOpenSavedCodes}
+            selected={linkMode === 'saved'}
+          />
+        ) : null}
       </View>
+
+      {linkMode === 'saved' && savedCodePresets.length > 0 ? (
+        <FlowPanel>
+          <FlowSectionLabel>SAVED CODES</FlowSectionLabel>
+          {savedCodePresets.map((preset) => {
+            const isSelected = selectedSavedCodePresetId === preset.id;
+
+            return (
+              <FlowListRow
+                key={preset.id}
+                description={`${buildSavedCodeId(preset.expectedQrPayload)} · Last used ${new Date(
+                  preset.lastUsedAt
+                ).toLocaleDateString([], {
+                  month: 'short',
+                  day: 'numeric',
+                })}`}
+                leading={
+                  <Ionicons
+                    color={isSelected ? colors.success : colors.primary}
+                    name={isSelected ? 'checkmark-circle' : 'bookmark-outline'}
+                    size={20}
+                  />
+                }
+                onPress={() => onUseSavedCode(preset)}
+                statusLabel={isSelected ? 'Selected' : 'Use'}
+                statusTone={isSelected ? 'success' : 'default'}
+                style={
+                  isSelected
+                    ? {
+                        backgroundColor: colors.successSurface,
+                        borderColor: colors.success,
+                      }
+                    : undefined
+                }
+                title={preset.label}
+              />
+            );
+          })}
+        </FlowPanel>
+      ) : null}
 
       {isScannerVisible ? (
         <FlowPanel style={styles.scannerPanel}>
@@ -1147,14 +1200,16 @@ function LinkCodeStep({
           <View style={[styles.codePreview, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
             <View style={styles.codePreviewHeader}>
               <Text style={[styles.savedBadge, { backgroundColor: colors.successSurface, color: colors.success }]}>
-                {proofCodeVerifiedAt ? 'Tested' : 'Saved'}
+                {proofCodeVerifiedAt ? 'Tested' : selectedSavedCodePreset ? 'Saved code' : 'Saved'}
               </Text>
               <AppButton label="Clear" onPress={onClearCode} size="compact" variant="danger" />
             </View>
             <QrMosaic payload={expectedQrPayload} />
             <Text style={[styles.codeId, { color: colors.text }]}>ID: {buildSavedCodeId(expectedQrPayload)}</Text>
             <Text style={[styles.codeTimestamp, { color: colors.textSoft }]}>
-              {proofCodeCapturedAt
+              {selectedSavedCodePreset
+                ? `Picked from ${selectedSavedCodePreset.label}`
+                : proofCodeCapturedAt
                 ? `Created ${new Date(proofCodeCapturedAt).toLocaleString([], {
                     month: 'short',
                     day: 'numeric',
@@ -1176,33 +1231,29 @@ function LinkCodeStep({
         )}
       </FlowPanel>
 
-      <FlowPanel>
-        <FlowSectionLabel>PLACE / OBJECT</FlowSectionLabel>
-        <FlowListRow
-          description="Outside by the front entrance"
-          leading={<Ionicons color={colors.primary} name="location-outline" size={19} />}
-          title={placeObjectLabel}
-        />
-      </FlowPanel>
-
-      <FlowPanel>
+      <View style={styles.testScanGroup}>
         <FlowSectionLabel>TEST SCAN</FlowSectionLabel>
-        <FlowListRow
-          description="Verify this code matches"
-          leading={<Ionicons color={colors.primary} name="scan-outline" size={19} />}
+        <Pressable
+          accessibilityLabel={`Test Scan. Verify this code matches. ${proofCodeVerifiedAt ? 'Matched' : 'Test'}.`}
+          accessibilityRole="button"
           onPress={onOpenTestScanner}
-          statusLabel={proofCodeVerifiedAt ? 'Matched' : 'Test'}
-          statusTone={proofCodeVerifiedAt ? 'success' : 'default'}
-          title="Test Scan"
-        />
-      </FlowPanel>
+          style={({ pressed }) => [styles.testScanRow, pressed && styles.pressed]}>
+          <Ionicons color={colors.primary} name="scan-outline" size={19} />
+          <View style={styles.testScanCopy}>
+            <Text style={[styles.testScanTitle, { color: colors.text }]}>Test Scan</Text>
+            <Text style={[styles.testScanDescription, { color: colors.textSoft }]}>Verify this code matches</Text>
+          </View>
+          <StatusPill label={proofCodeVerifiedAt ? 'Matched' : 'Test'} tone={proofCodeVerifiedAt ? 'success' : 'default'} />
+          <Ionicons color={colors.muted} name="chevron-forward" size={17} />
+        </Pressable>
+      </View>
 
       <FlowPanel style={styles.strictInfo} tone="muted">
         <View style={styles.strictInfoIcon}>
           <Ionicons color={colors.primary} name="shield-checkmark-outline" size={22} />
         </View>
         <View style={styles.strictInfoCopy}>
-          <Text style={[TextPresets.label, { color: colors.text }]}>{strictnessLabel}</Text>
+          <Text style={[TextPresets.label, { color: colors.text }]}>Exact matching is required.</Text>
           <Text style={[TextPresets.body, styles.smallBody, { color: colors.textSoft }]}>
             The scanned code must match this code exactly to check in.
           </Text>
@@ -1251,6 +1302,7 @@ function CreateFieldRow({
     <View style={styles.fieldBlock}>
       <FlowListRow
         description={description}
+        isExpanded={expanded}
         leading={<Ionicons color={colors.primary} name={icon} size={19} />}
         onPress={onPress}
         title={title}
@@ -1445,6 +1497,7 @@ const styles = StyleSheet.create({
   },
   scanModeGrid: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 8,
   },
   linkModeTile: {
@@ -1452,6 +1505,7 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     borderWidth: 1,
     flex: 1,
+    flexBasis: 96,
     gap: 7,
     justifyContent: 'center',
     minHeight: 84,
@@ -1532,6 +1586,35 @@ const styles = StyleSheet.create({
     ...TextPresets.body,
     fontSize: 11,
     lineHeight: 15,
+  },
+  testScanGroup: {
+    gap: 7,
+  },
+  testScanRow: {
+    alignItems: 'center',
+    borderRadius: 12,
+    flexDirection: 'row',
+    gap: 10,
+    minHeight: 56,
+    paddingHorizontal: 2,
+    paddingVertical: 8,
+  },
+  testScanCopy: {
+    flex: 1,
+    gap: 1,
+    minWidth: 0,
+  },
+  testScanTitle: {
+    ...TextPresets.label,
+    flexShrink: 1,
+    fontSize: 13,
+    lineHeight: 17,
+  },
+  testScanDescription: {
+    ...TextPresets.body,
+    flexShrink: 1,
+    fontSize: 10,
+    lineHeight: 14,
   },
   strictInfo: {
     alignItems: 'flex-start',

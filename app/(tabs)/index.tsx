@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
 
@@ -330,6 +330,8 @@ export default function TodayScreen() {
   const router = useRouter();
   const colors = getAppColors(useColorScheme());
   const { configured, user } = useSocialSession();
+  const hasLoadedHomeRef = useRef(false);
+  const loadHomeRequestRef = useRef(0);
   const [isLoading, setIsLoading] = useState(true);
   const [state, setState] = useState<HomeState>({
     alarms: [],
@@ -345,8 +347,13 @@ export default function TodayScreen() {
   });
 
   const loadHome = useCallback(async () => {
-    const shouldLoadCircles = Boolean(configured && user);
-    setIsLoading(true);
+    const requestId = loadHomeRequestRef.current + 1;
+    loadHomeRequestRef.current = requestId;
+    const shouldLoadCircles = Boolean(configured && user?.id);
+
+    if (!hasLoadedHomeRef.current) {
+      setIsLoading(true);
+    }
 
     try {
       await hydrateAlarmRuntimeForCurrentUser().catch(() => null);
@@ -357,22 +364,27 @@ export default function TodayScreen() {
         shouldLoadCircles ? listMySocialCircles().catch(() => []) : Promise.resolve([]),
       ]);
 
-      setState({
-        alarms: store.alarms,
-        currentStreak: store.currentStreak,
-        lifetimeAlarmCreations: store.lifetimeAlarmCreations,
-        progressSummary: getProgressSummary(store),
-        socialRuntime,
-        circleCount: circles.length,
-        successHistory: store.successHistory,
-        failureHistory: store.failureHistory,
-        latestSuccess: store.successHistory[0] ?? null,
-        latestFailure: store.failureHistory[0] ?? null,
-      });
+      if (loadHomeRequestRef.current === requestId) {
+        setState({
+          alarms: store.alarms,
+          currentStreak: store.currentStreak,
+          lifetimeAlarmCreations: store.lifetimeAlarmCreations,
+          progressSummary: getProgressSummary(store),
+          socialRuntime,
+          circleCount: circles.length,
+          successHistory: store.successHistory,
+          failureHistory: store.failureHistory,
+          latestSuccess: store.successHistory[0] ?? null,
+          latestFailure: store.failureHistory[0] ?? null,
+        });
+      }
     } finally {
-      setIsLoading(false);
+      if (loadHomeRequestRef.current === requestId) {
+        hasLoadedHomeRef.current = true;
+        setIsLoading(false);
+      }
     }
-  }, [configured, user]);
+  }, [configured, user?.id]);
 
   useFocusEffect(
     useCallback(() => {
@@ -399,7 +411,7 @@ export default function TodayScreen() {
   const upcomingAlarms = useMemo(() => getUpcomingAlarms(state.alarms, primaryAlarm?.id), [primaryAlarm?.id, state.alarms]);
   const primaryPhaseLabel = getAlarmPhaseLabel(primaryAlarm);
 
-  const handlePrimaryPress = () => {
+  const handlePrimaryPress = useCallback(() => {
     if (primaryAlarm && primaryPhaseLabel === 'Scan now') {
       router.push(`/ringing?alarmId=${primaryAlarm.id}`);
       return;
@@ -411,8 +423,10 @@ export default function TodayScreen() {
     }
 
     router.push({ pathname: '/create', params: { returnTo: '/' } });
-  };
-  const handleCreateCheckpoint = () => router.push({ pathname: '/create', params: { returnTo: '/' } });
+  }, [primaryAlarm, primaryPhaseLabel, router]);
+  const handleCreateCheckpoint = useCallback(() => {
+    router.push({ pathname: '/create', params: { returnTo: '/' } });
+  }, [router]);
 
   return (
     <AppScreen
@@ -445,8 +459,9 @@ export default function TodayScreen() {
           actionLabel="Create your first checkpoint"
           description="Start with one checkpoint tied to something real: waking up, medication, study, training, or leaving on time."
           eyebrow="Today"
+          icon="scan-outline"
           onAction={() => router.push({ pathname: '/create', params: { returnTo: '/' } })}
-          title="No commitment is protected yet"
+          title="No checkpoint scheduled"
           tone="primary"
         />
       ) : (
@@ -519,6 +534,7 @@ export default function TodayScreen() {
                   description={alarm.scheduledFor ? formatScheduledFor(alarm.scheduledFor) : formatAlarmTime(alarm.hour, alarm.minute)}
                   key={alarm.id}
                   onPress={() => router.push(`/checkpoint/${alarm.id}`)}
+                  style={styles.inlineFlowRow}
                   title={alarm.label}
                   trailing={<Text style={[styles.trailingTime, { color: colors.textSoft }]}>{formatAlarmTime(alarm.hour, alarm.minute)}</Text>}
                 />
@@ -534,6 +550,7 @@ export default function TodayScreen() {
               onPress={() => router.push('/today-activity')}
               statusLabel={`${todayMisses.length} missed`}
               statusTone={todayMisses.length > 0 ? 'danger' : 'success'}
+              style={styles.inlineFlowRow}
               title="Cleared today"
             />
             <FlowListRow
@@ -541,6 +558,7 @@ export default function TodayScreen() {
               onPress={() => router.push('/circles')}
               statusLabel={socialStatusLabel}
               statusTone={socialStatusTone}
+              style={styles.inlineFlowRow}
               title={state.circleCount === 0 ? 'Accountability' : `${state.circleCount} circle${state.circleCount === 1 ? '' : 's'}`}
             />
             <FlowListRow
@@ -548,6 +566,7 @@ export default function TodayScreen() {
               onPress={() => router.push('/today-activity')}
               statusLabel={latestOutcome ? (latestOutcome.tone === 'success' ? 'Saved' : 'Missed') : 'Waiting'}
               statusTone={latestOutcome ? latestOutcome.tone : 'default'}
+              style={styles.inlineFlowRow}
               title={latestOutcome ? latestOutcome.title : 'Latest proof'}
             />
           </FlowPanel>
@@ -650,7 +669,7 @@ function StreakDots({ activeDots }: { activeDots: number }) {
 const styles = StyleSheet.create({
   screenContent: {
     gap: 10,
-    paddingBottom: 150,
+    paddingBottom: Spacing.lg,
     paddingHorizontal: Spacing.lg,
     paddingTop: 2,
   },
@@ -768,6 +787,12 @@ const styles = StyleSheet.create({
   metricAction: {
     flex: 1,
     minWidth: 0,
+  },
+  inlineFlowRow: {
+    backgroundColor: 'transparent',
+    borderColor: 'transparent',
+    borderRadius: 0,
+    paddingHorizontal: 2,
   },
   weekBars: {
     alignItems: 'flex-end',

@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
 
@@ -22,6 +22,8 @@ type PaywallState = {
 export default function PaywallScreen() {
   const router = useRouter();
   const colors = getAppColors(useColorScheme());
+  const hasLoadedPaywallRef = useRef(false);
+  const loadPaywallRequestRef = useRef(0);
   const [isLoading, setIsLoading] = useState(true);
   const [state, setState] = useState<PaywallState>({
     alarms: [],
@@ -29,18 +31,28 @@ export default function PaywallScreen() {
   });
 
   const loadPaywallState = useCallback(async () => {
-    setIsLoading(true);
+    const requestId = loadPaywallRequestRef.current + 1;
+    loadPaywallRequestRef.current = requestId;
+
+    if (!hasLoadedPaywallRef.current) {
+      setIsLoading(true);
+    }
 
     try {
       await hydrateAlarmRuntimeForCurrentUser().catch(() => null);
       const store = await readAlarmStore();
 
-      setState({
-        alarms: store.alarms,
-        lifetimeAlarmCreations: store.lifetimeAlarmCreations,
-      });
+      if (loadPaywallRequestRef.current === requestId) {
+        setState({
+          alarms: store.alarms,
+          lifetimeAlarmCreations: store.lifetimeAlarmCreations,
+        });
+      }
     } finally {
-      setIsLoading(false);
+      if (loadPaywallRequestRef.current === requestId) {
+        hasLoadedPaywallRef.current = true;
+        setIsLoading(false);
+      }
     }
   }, []);
 

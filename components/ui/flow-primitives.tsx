@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
-import { ReactNode } from 'react';
-import { Pressable, StyleProp, StyleSheet, Text, View, ViewStyle } from 'react-native';
+import { ReactNode, useEffect, useRef } from 'react';
+import { Animated, Easing, Pressable, StyleProp, StyleSheet, Text, View, ViewStyle } from 'react-native';
 
 import { StatusPill } from '@/components/ui/status-pill';
 import { Fonts, Radius, Spacing, TextPresets, getAppColors, getTonePalette } from '@/constants/theme';
@@ -116,6 +116,7 @@ export function FlowListRow({
   statusTone = 'default',
   onPress,
   accessibilityLabel,
+  isExpanded,
   style,
 }: {
   title: string;
@@ -127,6 +128,7 @@ export function FlowListRow({
   statusTone?: 'default' | 'primary' | 'success' | 'danger' | 'warning';
   onPress?: () => void;
   accessibilityLabel?: string;
+  isExpanded?: boolean;
   style?: StyleProp<ViewStyle>;
 }) {
   const colors = getAppColors(useColorScheme());
@@ -141,7 +143,7 @@ export function FlowListRow({
       <View style={styles.rowTrailing}>
         {statusLabel ? <StatusPill label={statusLabel} tone={statusTone} /> : null}
         {trailing}
-        {onPress ? <Ionicons color={colors.muted} name="chevron-forward" size={17} /> : null}
+        {onPress ? <FlowRowChevron color={colors.muted} isExpanded={isExpanded} /> : null}
       </View>
     </>
   );
@@ -164,6 +166,30 @@ export function FlowListRow({
   }
 
   return <View style={[styles.listRow, { backgroundColor: colors.elevated, borderColor: colors.line }, style]}>{content}</View>;
+}
+
+function FlowRowChevron({ color, isExpanded }: { color: string; isExpanded?: boolean }) {
+  const arrowProgress = useRef(new Animated.Value(isExpanded ? 1 : 0)).current;
+
+  useEffect(() => {
+    Animated.timing(arrowProgress, {
+      duration: 180,
+      easing: Easing.out(Easing.cubic),
+      toValue: isExpanded ? 1 : 0,
+      useNativeDriver: true,
+    }).start();
+  }, [arrowProgress, isExpanded]);
+
+  const arrowRotation = arrowProgress.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '90deg'],
+  });
+
+  return (
+    <Animated.View style={{ transform: [{ rotate: arrowRotation }] }}>
+      <Ionicons color={color} name="chevron-forward" size={17} />
+    </Animated.View>
+  );
 }
 
 export function FlowSectionLabel({ children }: { children: ReactNode }) {
@@ -349,7 +375,7 @@ const styles = StyleSheet.create({
   },
   footerButton: {
     alignItems: 'center',
-    borderRadius: 8,
+    borderRadius: Radius.lg,
     borderWidth: 1,
     justifyContent: 'center',
     minHeight: 46,
@@ -358,9 +384,9 @@ const styles = StyleSheet.create({
   footerButtonLabel: {
     ...TextPresets.label,
     fontFamily: Fonts.rounded,
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: '800',
-    lineHeight: 18,
+    lineHeight: 22,
     textAlign: 'center',
   },
   metricTile: {

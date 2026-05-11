@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
 
@@ -292,6 +292,8 @@ function getCountDelta(currentCount: number, previous: PeriodStats, previousCoun
 export default function HistoryScreen() {
   const router = useRouter();
   const colors = getAppColors(useColorScheme());
+  const hasLoadedHistoryRef = useRef(false);
+  const loadHistoryRequestRef = useRef(0);
   const [isLoading, setIsLoading] = useState(true);
   const [analyticPeriod, setAnalyticPeriod] = useState<AnalyticPeriod>('thisWeek');
   const [calendarPeriod, setCalendarPeriod] = useState<CalendarPeriod>('thisMonth');
@@ -299,14 +301,24 @@ export default function HistoryScreen() {
   const [state, setState] = useState<HistoryState>({ store: null, summary: null });
 
   const loadHistory = useCallback(async () => {
-    setIsLoading(true);
+    const requestId = loadHistoryRequestRef.current + 1;
+    loadHistoryRequestRef.current = requestId;
+
+    if (!hasLoadedHistoryRef.current) {
+      setIsLoading(true);
+    }
 
     try {
       await hydrateAlarmRuntimeForCurrentUser().catch(() => null);
       const store = await readAlarmStore();
-      setState({ store, summary: getProgressSummary(store) });
+      if (loadHistoryRequestRef.current === requestId) {
+        setState({ store, summary: getProgressSummary(store) });
+      }
     } finally {
-      setIsLoading(false);
+      if (loadHistoryRequestRef.current === requestId) {
+        hasLoadedHistoryRef.current = true;
+        setIsLoading(false);
+      }
     }
   }, []);
 
@@ -375,7 +387,7 @@ export default function HistoryScreen() {
         title="History & Analytics"
       />
 
-      <FlowPanel style={styles.reliabilityPanel}>
+      <FlowPanel style={[styles.reliabilityPanel, openDropdown === 'analytics' && styles.dropdownPanelOpen]}>
         <View style={styles.panelHeader}>
           <FlowSectionLabel>WEEKLY RELIABILITY</FlowSectionLabel>
           <Pressable
@@ -427,7 +439,7 @@ export default function HistoryScreen() {
         </FlowMetricCard>
       </View>
 
-      <FlowPanel style={styles.calendarPanel}>
+      <FlowPanel style={[styles.calendarPanel, openDropdown === 'calendar' && styles.dropdownPanelOpen]}>
         <View style={styles.panelHeader}>
           <FlowSectionLabel>ACTIVITY CALENDAR</FlowSectionLabel>
           <Pressable
@@ -510,7 +522,7 @@ function PeriodMenu<TValue extends string>({
   const colors = getAppColors(useColorScheme());
 
   return (
-    <View style={[styles.periodMenu, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
+    <View style={[styles.periodMenu, { backgroundColor: colors.elevated, borderColor: colors.line }]} role="menu">
       {options.map((option) => {
         const isActive = option === activeValue;
 
@@ -608,6 +620,8 @@ const styles = StyleSheet.create({
   },
   reliabilityPanel: {
     gap: 8,
+    position: 'relative',
+    zIndex: 2,
   },
   panelHeader: {
     alignItems: 'center',
@@ -662,14 +676,28 @@ const styles = StyleSheet.create({
   },
   calendarPanel: {
     gap: 8,
+    position: 'relative',
+    zIndex: 1,
+  },
+  dropdownPanelOpen: {
+    elevation: 8,
+    zIndex: 10,
   },
   periodMenu: {
-    alignSelf: 'flex-end',
     borderRadius: 12,
     borderWidth: 1,
+    elevation: 8,
     gap: 2,
     minWidth: 128,
     padding: 4,
+    position: 'absolute',
+    right: 10,
+    shadowColor: '#000000',
+    shadowOffset: { height: 8, width: 0 },
+    shadowOpacity: 0.16,
+    shadowRadius: 14,
+    top: 38,
+    zIndex: 20,
   },
   periodOption: {
     alignItems: 'center',

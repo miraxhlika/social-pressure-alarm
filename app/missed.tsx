@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 
@@ -7,8 +7,6 @@ import { AppScreen } from '@/components/ui/app-screen';
 import { EmptyState } from '@/components/ui/empty-state';
 import {
   FlowIconBadge,
-  FlowListRow,
-  FlowPanel,
   FlowSectionLabel,
   FlowTopBar,
 } from '@/components/ui/flow-primitives';
@@ -33,13 +31,11 @@ type MissedScreenState = {
   progressSummary: ProgressSummary | null;
 };
 
-type RecoveryAction = 'restart' | 'reschedule' | 'schedule' | 'code' | 'tomorrow';
+type RecoveryAction = 'restart' | 'adjust' | 'tomorrow';
 
 const ANALYTICS_ACTION_BY_RECOVERY_ACTION: Record<RecoveryAction, 'retry' | 'reschedule' | 'edit'> = {
-  code: 'edit',
-  reschedule: 'reschedule',
+  adjust: 'edit',
   restart: 'retry',
-  schedule: 'edit',
   tomorrow: 'reschedule',
 };
 
@@ -60,6 +56,8 @@ export default function MissedScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ alarmId?: string }>();
   const colors = getAppColors(useColorScheme());
+  const loadedMissedAlarmIdRef = useRef<string | null>(null);
+  const loadMissedRequestRef = useRef(0);
   const [isLoading, setIsLoading] = useState(true);
   const [processingAction, setProcessingAction] = useState<RecoveryAction | null>(null);
   const [state, setState] = useState<MissedScreenState>({
@@ -69,26 +67,39 @@ export default function MissedScreen() {
   });
 
   const loadScreen = useCallback(async () => {
-    if (!params.alarmId) {
+    const requestId = loadMissedRequestRef.current + 1;
+    loadMissedRequestRef.current = requestId;
+
+    const alarmId = params.alarmId;
+
+    if (!alarmId) {
+      loadedMissedAlarmIdRef.current = null;
       setState({ alarm: null, latestFailure: null, progressSummary: null });
       setIsLoading(false);
       return;
     }
 
-    setIsLoading(true);
+    if (loadedMissedAlarmIdRef.current !== alarmId) {
+      setIsLoading(true);
+    }
 
     try {
       await hydrateAlarmRuntimeForCurrentUser().catch(() => null);
-      const [store, alarm] = await Promise.all([readAlarmStore(), getAlarmById(params.alarmId)]);
-      const latestFailure = store.failureHistory.find((entry) => entry.alarmId === params.alarmId) ?? null;
+      const [store, alarm] = await Promise.all([readAlarmStore(), getAlarmById(alarmId)]);
+      const latestFailure = store.failureHistory.find((entry) => entry.alarmId === alarmId) ?? null;
 
-      setState({
-        alarm,
-        latestFailure,
-        progressSummary: getProgressSummary(store),
-      });
+      if (loadMissedRequestRef.current === requestId) {
+        setState({
+          alarm,
+          latestFailure,
+          progressSummary: getProgressSummary(store),
+        });
+      }
     } finally {
-      setIsLoading(false);
+      if (loadMissedRequestRef.current === requestId) {
+        loadedMissedAlarmIdRef.current = alarmId;
+        setIsLoading(false);
+      }
     }
   }, [params.alarmId]);
 
@@ -160,8 +171,8 @@ export default function MissedScreen() {
     });
   }, [handleRecoveryAction, router, state.alarm, trackRecovery]);
 
-  const handleRescheduleToday = useCallback(() => {
-    void handleRecoveryAction('reschedule', async () => {
+  const handleAdjustCheckpoint = useCallback(() => {
+    void handleRecoveryAction('adjust', async () => {
       if (!state.alarm) {
         return;
       }
@@ -171,49 +182,10 @@ export default function MissedScreen() {
         params: {
           alarmId: state.alarm.id,
           mode: 'edit',
-          recoveryFocus: 'time',
           returnTo: `/missed?alarmId=${state.alarm.id}`,
         },
       });
-      await trackRecovery('reschedule');
-    });
-  }, [handleRecoveryAction, router, state.alarm, trackRecovery]);
-
-  const handleAdjustSchedule = useCallback(() => {
-    void handleRecoveryAction('schedule', async () => {
-      if (!state.alarm) {
-        return;
-      }
-
-      router.push({
-        pathname: '/create',
-        params: {
-          alarmId: state.alarm.id,
-          mode: 'edit',
-          recoveryFocus: 'time',
-          returnTo: `/missed?alarmId=${state.alarm.id}`,
-        },
-      });
-      await trackRecovery('schedule');
-    });
-  }, [handleRecoveryAction, router, state.alarm, trackRecovery]);
-
-  const handleCodeLocation = useCallback(() => {
-    void handleRecoveryAction('code', async () => {
-      if (!state.alarm) {
-        return;
-      }
-
-      router.push({
-        pathname: '/create',
-        params: {
-          alarmId: state.alarm.id,
-          mode: 'edit',
-          recoveryFocus: 'code',
-          returnTo: `/missed?alarmId=${state.alarm.id}`,
-        },
-      });
-      await trackRecovery('code');
+      await trackRecovery('adjust');
     });
   }, [handleRecoveryAction, router, state.alarm, trackRecovery]);
 
@@ -283,7 +255,7 @@ export default function MissedScreen() {
 
       <MissedLandscape />
 
-      <FlowPanel style={styles.actionSheet}>
+      <View style={styles.actionGroup}>
         <FlowSectionLabel>WHAT WOULD YOU LIKE TO DO?</FlowSectionLabel>
         <RecoveryRow
           description={processingAction === 'restart' ? 'Starting scanner...' : 'Mark it clear and continue'}
@@ -293,22 +265,10 @@ export default function MissedScreen() {
           title="Restart now"
         />
         <RecoveryRow
-          description={processingAction === 'reschedule' ? 'Opening schedule...' : 'Pick a new time today'}
-          icon="calendar-outline"
-          onPress={handleRescheduleToday}
-          title="Reschedule"
-        />
-        <RecoveryRow
-          description="Change days or time"
-          icon="time-outline"
-          onPress={handleAdjustSchedule}
-          title="Adjust schedule"
-        />
-        <RecoveryRow
-          description="Move it somewhere easier"
-          icon="location-outline"
-          onPress={handleCodeLocation}
-          title="Add a better code location"
+          description={processingAction === 'adjust' ? 'Opening checkpoint...' : 'Change time, schedule, or code location'}
+          icon="options-outline"
+          onPress={handleAdjustCheckpoint}
+          title="Adjust checkpoint"
         />
         <RecoveryRow
           description={processingAction === 'tomorrow' ? 'Scheduling tomorrow...' : "We'll remind you then"}
@@ -316,18 +276,20 @@ export default function MissedScreen() {
           onPress={handleTryTomorrow}
           title="Try again tomorrow"
         />
-      </FlowPanel>
-
-      <View style={styles.recoveryFootnote}>
-        <Ionicons color={colors.muted} name="heart-outline" size={15} />
-        <Text style={[styles.footnoteText, { color: colors.textSoft }]}>
-          Small resets lead to big consistency.
-        </Text>
       </View>
 
-      <Text style={[styles.contextCopy, { color: colors.muted }]}>
-        {state.alarm.label} missed {missedAtLabel}. Protect the next {routineCopy}.
-      </Text>
+      <View style={styles.bottomCopy}>
+        <View style={styles.recoveryFootnote}>
+          <Ionicons color={colors.muted} name="heart-outline" size={15} />
+          <Text style={[styles.footnoteText, { color: colors.textSoft }]}>
+            Small resets lead to big consistency.
+          </Text>
+        </View>
+
+        <Text style={[styles.contextCopy, { color: colors.muted }]}>
+          {state.alarm.label} missed {missedAtLabel}. Protect the next {routineCopy}.
+        </Text>
+      </View>
     </AppScreen>
   );
 }
@@ -349,12 +311,18 @@ function RecoveryRow({
 
   if (!isPrimary) {
     return (
-      <FlowListRow
-        description={description}
-        leading={<FlowIconBadge icon={icon} size="small" tone="muted" />}
+      <Pressable
+        accessibilityLabel={`${title}. ${description}.`}
+        accessibilityRole="button"
         onPress={onPress}
-        title={title}
-      />
+        style={({ pressed }) => [styles.recoveryRow, pressed && styles.pressed]}>
+        <FlowIconBadge icon={icon} size="small" tone="muted" />
+        <View style={styles.recoveryCopy}>
+          <Text style={[styles.recoveryTitle, { color: colors.text }]}>{title}</Text>
+          <Text style={[styles.recoveryDescription, { color: colors.textSoft }]}>{description}</Text>
+        </View>
+        <Ionicons color={colors.muted} name="chevron-forward" size={17} />
+      </Pressable>
     );
   }
 
@@ -405,6 +373,7 @@ function MissedLandscape() {
 
 const styles = StyleSheet.create({
   screenContent: {
+    flexGrow: 1,
     gap: 10,
     paddingBottom: 32,
     paddingHorizontal: Spacing.lg,
@@ -537,10 +506,35 @@ const styles = StyleSheet.create({
     transform: [{ rotate: '17deg' }],
     width: 18,
   },
-  actionSheet: {
+  actionGroup: {
     gap: 7,
-    marginTop: -2,
-    padding: 10,
+    marginTop: 2,
+  },
+  recoveryRow: {
+    alignItems: 'center',
+    borderRadius: 12,
+    flexDirection: 'row',
+    gap: 10,
+    minHeight: 56,
+    paddingHorizontal: 2,
+    paddingVertical: 8,
+  },
+  recoveryCopy: {
+    flex: 1,
+    gap: 1,
+    minWidth: 0,
+  },
+  recoveryTitle: {
+    ...TextPresets.label,
+    flexShrink: 1,
+    fontSize: 13,
+    lineHeight: 17,
+  },
+  recoveryDescription: {
+    ...TextPresets.body,
+    flexShrink: 1,
+    fontSize: 10,
+    lineHeight: 14,
   },
   primaryRecoveryRow: {
     alignItems: 'center',
@@ -577,6 +571,11 @@ const styles = StyleSheet.create({
   pressed: {
     opacity: 0.86,
     transform: [{ scale: 0.99 }],
+  },
+  bottomCopy: {
+    gap: 7,
+    marginTop: 'auto',
+    paddingTop: Spacing.md,
   },
   recoveryFootnote: {
     alignItems: 'center',
