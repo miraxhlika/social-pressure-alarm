@@ -1,23 +1,22 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import { useCameraPermissions } from 'expo-camera';
 import type { User } from '@supabase/supabase-js';
-import { useFocusEffect, useRouter } from 'expo-router';
-import { Alert, Linking, Pressable, Share, StyleSheet, Switch, Text, View } from 'react-native';
+import { useRouter } from 'expo-router';
+import { Alert, Animated, Easing, Linking, Pressable, Share, StyleSheet, Switch, Text, View } from 'react-native';
 
-import { ActionRow, ActionRowGlyph } from '@/components/ui/action-row';
 import { AppButton } from '@/components/ui/app-button';
 import { AppCard } from '@/components/ui/app-card';
 import { AppInput } from '@/components/ui/app-input';
 import { AppScreen } from '@/components/ui/app-screen';
+import { FlowTopBar } from '@/components/ui/flow-primitives';
 import { LoadingBlock } from '@/components/ui/loading-block';
-import { SectionHeader } from '@/components/ui/section-header';
 import { StateCard } from '@/components/ui/state-card';
 import { StatusPill } from '@/components/ui/status-pill';
 import { Fonts, Radius, Spacing, TextPresets, Type, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { clearUnusedCheckpointPresets, readAlarmStore, resetAlarmStore } from '@/lib/alarms';
+import { readAlarmStore, resetAlarmStore } from '@/lib/alarms';
 import {
   DEFAULT_NOTIFICATION_PREFERENCES,
   NotificationPermissionState,
@@ -29,53 +28,21 @@ import {
   syncNotificationStrategyAsync,
   syncWeeklyReviewReminderAsync,
 } from '@/lib/notifications';
-import { DEFAULT_APP_PREFERENCES, AppPreferences, readAppPreferences, saveAppPreferences } from '@/lib/preferences';
 import { resetSocialSyncState } from '@/lib/social/queue';
 import { getActiveStorageScope } from '@/lib/storage';
 import { useSocialSession } from '@/providers/social-session-provider';
-import { AlarmProofStrictness } from '@/types/alarm';
 
 type FormFeedbackTone = 'success' | 'danger' | 'warning';
 type ProfileFieldErrors = {
   displayName?: string;
   handle?: string;
-  timezone?: string;
 };
 type FormFeedback = {
   tone: FormFeedbackTone;
   message: string;
 };
-type SettingsPanel = 'notifications' | 'reminders' | 'codes' | 'strictness' | 'privacy' | null;
-type ProofCodeStats = {
-  linkedCodeCount: number;
-  savedPresetCount: number;
-  unusedPresetCount: number;
-  strictCount: number;
-  standardCount: number;
-};
-
-const EMPTY_PROOF_CODE_STATS: ProofCodeStats = {
-  linkedCodeCount: 0,
-  savedPresetCount: 0,
-  unusedPresetCount: 0,
-  strictCount: 0,
-  standardCount: 0,
-};
+type SettingsPanel = 'account' | 'notifications' | 'camera' | 'reminders' | null;
 const DEFAULT_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
-const COMMON_TIMEZONES = [
-  'UTC',
-  DEFAULT_TIMEZONE,
-  'Europe/London',
-  'Europe/Berlin',
-  'America/New_York',
-  'America/Chicago',
-  'America/Los_Angeles',
-  'Asia/Tokyo',
-  'Australia/Sydney',
-];
-const intlWithSupportedValues = Intl as typeof Intl & {
-  supportedValuesOf?: (key: 'timeZone') => string[];
-};
 
 function getMetadataString(user: User | null | undefined, ...keys: string[]) {
   const metadata = user?.user_metadata;
@@ -166,29 +133,15 @@ function getAccountLabel(user: User | null) {
   return user?.email ?? getMetadataString(user, 'email') ?? `${getProviderLabel(user) ?? 'Connected'} account`;
 }
 
-function getSuggestedTimezones(...zones: (string | null | undefined)[]) {
-  const supportedTimezones = intlWithSupportedValues.supportedValuesOf?.('timeZone') ?? [];
-  const hasSupportedTimezones = supportedTimezones.length > 0;
-
-  return Array.from(new Set([...zones, ...COMMON_TIMEZONES].filter((zone): zone is string => Boolean(zone))))
-    .filter((zone) => !hasSupportedTimezones || supportedTimezones.includes(zone))
-    .slice(0, 8);
-}
-
 function getProfileErrors({
   displayName,
   handle,
-  timezone,
 }: {
   displayName: string;
   handle: string;
-  timezone: string;
 }): ProfileFieldErrors {
   const trimmedDisplayName = displayName.trim();
   const normalizedHandle = normalizeHandle(handle);
-  const trimmedTimezone = timezone.trim();
-  const supportedTimezones = intlWithSupportedValues.supportedValuesOf?.('timeZone') ?? [];
-  const hasSupportedTimezones = supportedTimezones.length > 0;
   const errors: ProfileFieldErrors = {};
 
   if (!trimmedDisplayName) {
@@ -199,12 +152,6 @@ function getProfileErrors({
     errors.handle = 'Choose a handle for circles and the activity feed.';
   } else if (normalizedHandle.length < 3) {
     errors.handle = 'Use at least 3 letters or numbers.';
-  }
-
-  if (!trimmedTimezone) {
-    errors.timezone = 'Choose the timezone used for social timing.';
-  } else if (hasSupportedTimezones && !supportedTimezones.includes(trimmedTimezone)) {
-    errors.timezone = 'Use one of the suggested IANA timezones, like Europe/Skopje.';
   }
 
   return errors;
@@ -222,16 +169,6 @@ function getFriendlyProfileError(error: unknown) {
 
 function hasErrors(errors: Record<string, string | undefined>) {
   return Object.values(errors).some(Boolean);
-}
-
-function getProofCodeStatsDescription(stats: ProofCodeStats) {
-  if (stats.linkedCodeCount === 0) {
-    return 'No proof codes are linked yet. Create a checkpoint to save the first exact QR or barcode.';
-  }
-
-  return `${stats.linkedCodeCount} linked proof code${stats.linkedCodeCount === 1 ? '' : 's'} across saved checkpoints. ${
-    stats.savedPresetCount
-  } reusable preset${stats.savedPresetCount === 1 ? '' : 's'} kept for faster setup.`;
 }
 
 function getFeedbackColors(tone: FormFeedbackTone, colors: ReturnType<typeof getAppColors>) {
@@ -277,21 +214,10 @@ function getNotificationPermissionTone(state: NotificationPermissionState) {
       return 'success' as const;
     case 'provisional':
       return 'primary' as const;
+    case 'denied':
+      return 'danger' as const;
     default:
       return 'warning' as const;
-  }
-}
-
-function getNotificationPermissionHelper(state: NotificationPermissionState) {
-  switch (state) {
-    case 'granted':
-      return 'Core checkpoint alerts can fire on time. Optional reminders use the switches below.';
-    case 'provisional':
-      return 'Notifications can arrive quietly. Open device settings if you want banners and sound.';
-    case 'denied':
-      return 'Device notifications are blocked right now. Core checkpoint alerts and optional reminders will stay quiet until you re-enable them in system settings.';
-    default:
-      return 'Turn notifications on when prompted so your live checkpoints can ring on time.';
   }
 }
 
@@ -307,22 +233,6 @@ function getCameraPermissionLabel(permission: ReturnType<typeof useCameraPermiss
   return 'Not set';
 }
 
-function getCameraPermissionHelper(permission: ReturnType<typeof useCameraPermissions>[0]) {
-  if (permission?.granted) {
-    return 'Camera access is ready for linking and clearing proof codes.';
-  }
-
-  if (permission?.canAskAgain === false) {
-    return 'Camera access is blocked in device settings. Manual entry stays available, but scanning needs camera access.';
-  }
-
-  return 'Allow camera access before your first live checkpoint so proof-code scans are ready.';
-}
-
-function getProofStrictnessLabel(strictness: AlarmProofStrictness) {
-  return strictness === 'strict' ? 'Strict' : 'Standard';
-}
-
 export default function AccountScreen() {
   const router = useRouter();
   const colors = getAppColors(useColorScheme());
@@ -334,16 +244,17 @@ export default function AccountScreen() {
     profileError,
     refreshProfile,
     saveProfile,
+    signOut,
     user,
   } = useSocialSession();
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const hydratedFormKeyRef = useRef<string | null>(null);
   const [displayName, setDisplayName] = useState('');
   const [handle, setHandle] = useState('');
-  const [timezone, setTimezone] = useState(DEFAULT_TIMEZONE);
   const [allowCircleNotifications, setAllowCircleNotifications] = useState(true);
   const [allowMissedAlarmAlerts, setAllowMissedAlarmAlerts] = useState(true);
   const [isProfileSubmitting, setIsProfileSubmitting] = useState(false);
+  const [isSigningOut, setIsSigningOut] = useState(false);
   const [hasAttemptedProfileSubmit, setHasAttemptedProfileSubmit] = useState(false);
   const [profileFeedback, setProfileFeedback] = useState<FormFeedback | null>(null);
   const [notificationPermissionState, setNotificationPermissionState] =
@@ -355,13 +266,6 @@ export default function AccountScreen() {
   const [dataFeedback, setDataFeedback] = useState<FormFeedback | null>(null);
   const [isExportingData, setIsExportingData] = useState(false);
   const [isDeletingData, setIsDeletingData] = useState(false);
-  const [proofCodeStats, setProofCodeStats] = useState<ProofCodeStats>(EMPTY_PROOF_CODE_STATS);
-  const [isProofCodeStatsLoading, setIsProofCodeStatsLoading] = useState(true);
-  const [codeFeedback, setCodeFeedback] = useState<FormFeedback | null>(null);
-  const [isClearingUnusedCodes, setIsClearingUnusedCodes] = useState(false);
-  const [appPreferences, setAppPreferences] = useState<AppPreferences>(DEFAULT_APP_PREFERENCES);
-  const [isAppPreferencesLoading, setIsAppPreferencesLoading] = useState(true);
-  const [isAppPreferencesSubmitting, setIsAppPreferencesSubmitting] = useState(false);
   const [deviceFeedback, setDeviceFeedback] = useState<FormFeedback | null>(null);
   const [activeSettingsPanel, setActiveSettingsPanel] = useState<SettingsPanel>(null);
   const suggestedDisplayName = createSuggestedDisplayName(user);
@@ -378,7 +282,6 @@ export default function AccountScreen() {
     hydratedFormKeyRef.current = hydrationKey;
     setDisplayName(profile?.displayName ?? suggestedDisplayName);
     setHandle(profile?.handle ?? suggestedHandle);
-    setTimezone(profile?.timezone ?? DEFAULT_TIMEZONE);
     setAllowCircleNotifications(profile?.allowCircleNotifications ?? true);
     setAllowMissedAlarmAlerts(profile?.allowMissedAlarmAlerts ?? true);
     setProfileFeedback(null);
@@ -388,24 +291,33 @@ export default function AccountScreen() {
   const profileErrors = getProfileErrors({
     displayName,
     handle,
-    timezone,
   });
   const normalizedHandle = normalizeHandle(handle);
-  const timezoneSuggestions = getSuggestedTimezones(timezone, profile?.timezone, DEFAULT_TIMEZONE);
   const profileFeedbackColors = profileFeedback ? getFeedbackColors(profileFeedback.tone, colors) : null;
   const reminderFeedbackColors = reminderFeedback ? getFeedbackColors(reminderFeedback.tone, colors) : null;
   const dataFeedbackColors = dataFeedback ? getFeedbackColors(dataFeedback.tone, colors) : null;
-  const codeFeedbackColors = codeFeedback ? getFeedbackColors(codeFeedback.tone, colors) : null;
   const deviceFeedbackColors = deviceFeedback ? getFeedbackColors(deviceFeedback.tone, colors) : null;
+
+  useEffect(() => {
+    if (!dataFeedback || dataFeedback.tone !== 'success') {
+      return;
+    }
+
+    const timeoutId = setTimeout(() => {
+      setDataFeedback(null);
+    }, 4500);
+
+    return () => {
+      clearTimeout(timeoutId);
+    };
+  }, [dataFeedback]);
+
   const handleHelper =
     normalizedHandle.length >= 3
       ? `Circle members will see @${normalizedHandle}.`
-      : 'Lowercase only, with letters, numbers, and underscores.';
+      : 'Unique @name for circles and activity. Lowercase letters, numbers, and underscores.';
   const notificationPermissionLabel = getNotificationPermissionLabel(notificationPermissionState);
-  const notificationPermissionHelper = getNotificationPermissionHelper(notificationPermissionState);
   const cameraPermissionLabel = getCameraPermissionLabel(cameraPermission);
-  const cameraPermissionHelper = getCameraPermissionHelper(cameraPermission);
-  const proofCodeStatsDescription = getProofCodeStatsDescription(proofCodeStats);
 
   const loadReminderSettings = useCallback(async () => {
     setIsReminderPreferencesLoading(true);
@@ -428,50 +340,6 @@ export default function AccountScreen() {
     void loadReminderSettings();
   }, [loadReminderSettings]);
 
-  const loadAppPreferences = useCallback(async () => {
-    setIsAppPreferencesLoading(true);
-
-    try {
-      setAppPreferences(await readAppPreferences());
-      setDeviceFeedback(null);
-    } finally {
-      setIsAppPreferencesLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadAppPreferences();
-  }, [loadAppPreferences, user?.id]);
-
-  const loadProofCodeStats = useCallback(async () => {
-    setIsProofCodeStatsLoading(true);
-
-    try {
-      const store = await readAlarmStore();
-      const linkedPresetKeys = new Set(
-        store.alarms.map((alarm) => `${alarm.label.trim().toLowerCase()}::${alarm.expectedQrPayload}`)
-      );
-
-      setProofCodeStats({
-        linkedCodeCount: store.alarms.filter((alarm) => alarm.expectedQrPayload.trim().length > 0).length,
-        savedPresetCount: store.checkpointPresets.length,
-        unusedPresetCount: store.checkpointPresets.filter(
-          (preset) => !linkedPresetKeys.has(`${preset.label.trim().toLowerCase()}::${preset.expectedQrPayload}`)
-        ).length,
-        strictCount: store.alarms.filter((alarm) => alarm.proofStrictness === 'strict').length,
-        standardCount: store.alarms.filter((alarm) => alarm.proofStrictness === 'standard').length,
-      });
-    } finally {
-      setIsProofCodeStatsLoading(false);
-    }
-  }, []);
-
-  useFocusEffect(
-    useCallback(() => {
-      void loadProofCodeStats();
-    }, [loadProofCodeStats])
-  );
-
   const handleSaveProfile = async () => {
     setHasAttemptedProfileSubmit(true);
 
@@ -481,7 +349,7 @@ export default function AccountScreen() {
     }
 
     const trimmedDisplayName = displayName.trim();
-    const trimmedTimezone = timezone.trim();
+    const profileTimezone = (profile?.timezone ?? DEFAULT_TIMEZONE).trim() || DEFAULT_TIMEZONE;
 
     setIsProfileSubmitting(true);
     setProfileFeedback(null);
@@ -490,12 +358,11 @@ export default function AccountScreen() {
       await saveProfile({
         displayName: trimmedDisplayName,
         handle: normalizedHandle,
-        timezone: trimmedTimezone,
+        timezone: profileTimezone,
         allowCircleNotifications,
         allowMissedAlarmAlerts,
       });
       setHandle(normalizedHandle);
-      setTimezone(trimmedTimezone);
       setProfileFeedback({
         tone: 'success',
         message: 'Profile saved.',
@@ -510,8 +377,41 @@ export default function AccountScreen() {
     }
   };
 
-  const handleReviewCheckpoints = () => {
-    router.push('/alarms');
+  const signOutAccount = async () => {
+    setIsSigningOut(true);
+    setProfileFeedback(null);
+
+    try {
+      await signOut();
+      setActiveSettingsPanel(null);
+    } catch (error) {
+      setProfileFeedback({
+        tone: 'danger',
+        message: error instanceof Error ? error.message : 'Sign out could not be completed right now.',
+      });
+    } finally {
+      setIsSigningOut(false);
+    }
+  };
+
+  const handleSignOut = () => {
+    Alert.alert(
+      'Sign out?',
+      'This disconnects sync and circles on this device. Your local checkpoints stay on the device.',
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel',
+        },
+        {
+          text: 'Sign out',
+          style: 'destructive',
+          onPress: () => {
+            void signOutAccount();
+          },
+        },
+      ]
+    );
   };
 
   const handleRequestCameraAccess = async () => {
@@ -537,6 +437,11 @@ export default function AccountScreen() {
     setActiveSettingsPanel('notifications');
 
     try {
+      if (notificationPermissionState === 'denied') {
+        await Linking.openSettings();
+        return;
+      }
+
       const granted = await ensureNotificationPermissionsAsync();
       const nextPermissionState = await getNotificationPermissionState();
       setNotificationPermissionState(nextPermissionState);
@@ -554,110 +459,14 @@ export default function AccountScreen() {
     }
   };
 
-  const handleShowAccessibilityInfo = () => {
-    Alert.alert(
-      'Accessibility',
-      'The app follows device text scaling, safe-area layout, reduced-motion expectations, and system permission controls.',
-      [
-        {
-          text: 'Open Settings',
-          onPress: () => {
-            void Linking.openSettings();
-          },
-        },
-        {
-          text: 'Done',
-          style: 'cancel',
-        },
-      ]
-    );
-  };
-
-  const handleSaveDefaultProofStrictness = async (defaultProofStrictness: AlarmProofStrictness) => {
-    setIsAppPreferencesSubmitting(true);
-    setDeviceFeedback(null);
-
-    try {
-      const nextPreferences = await saveAppPreferences({
-        ...appPreferences,
-        defaultProofStrictness,
-      });
-      setAppPreferences(nextPreferences);
-      setDeviceFeedback({
-        tone: 'success',
-        message: `${getProofStrictnessLabel(defaultProofStrictness)} is now the default for new checkpoints.`,
-      });
-    } catch (error) {
-      setDeviceFeedback({
-        tone: 'danger',
-        message: error instanceof Error ? error.message : 'Default checkpoint settings could not be saved right now.',
-      });
-    } finally {
-      setIsAppPreferencesSubmitting(false);
-    }
-  };
-
-  const clearUnusedCodes = async () => {
-    setIsClearingUnusedCodes(true);
-    setCodeFeedback(null);
-
-    try {
-      const result = await clearUnusedCheckpointPresets();
-      await loadProofCodeStats();
-      setCodeFeedback({
-        tone: 'success',
-        message:
-          result.removedCount === 0
-            ? 'No unused saved proof codes to clear.'
-            : `Cleared ${result.removedCount} unused saved proof code${result.removedCount === 1 ? '' : 's'}.`,
-      });
-    } catch (error) {
-      setCodeFeedback({
-        tone: 'danger',
-        message: error instanceof Error ? error.message : 'Unused proof codes could not be cleared right now.',
-      });
-    } finally {
-      setIsClearingUnusedCodes(false);
-    }
-  };
-
-  const handleClearUnusedCodes = () => {
-    if (proofCodeStats.unusedPresetCount === 0) {
-      setCodeFeedback({
-        tone: 'success',
-        message: 'No unused saved proof codes to clear.',
-      });
-      return;
-    }
-
-    Alert.alert(
-      'Clear unused saved codes?',
-      'This removes reusable proof-code presets that are not currently linked to any checkpoint. Linked checkpoint proof codes stay unchanged.',
-      [
-        {
-          text: 'Cancel',
-          style: 'cancel',
-        },
-        {
-          text: 'Clear unused',
-          style: 'destructive',
-          onPress: () => {
-            void clearUnusedCodes();
-          },
-        },
-      ]
-    );
-  };
-
   const handleExportData = async () => {
     setIsExportingData(true);
     setDataFeedback(null);
 
     try {
-      const [store, notificationPreferences, preferences, storageScope] = await Promise.all([
+      const [store, notificationPreferences, storageScope] = await Promise.all([
         readAlarmStore(),
         readNotificationPreferences(),
-        readAppPreferences(),
         getActiveStorageScope(),
       ]);
       const exportedData = {
@@ -679,7 +488,6 @@ export default function AccountScreen() {
             : null,
         },
         notificationPreferences,
-        appPreferences: preferences,
         store,
       };
       const serializedData = JSON.stringify(exportedData, null, 2);
@@ -711,7 +519,7 @@ export default function AccountScreen() {
       const store = await readAlarmStore();
       await Promise.all(store.alarms.map((alarm) => cancelAlarmNotificationAsync(alarm.notificationIds)));
       await Promise.all([resetAlarmStore(), resetSocialSyncState()]);
-      await Promise.all([loadReminderSettings(), loadProofCodeStats()]);
+      await loadReminderSettings();
       setDataFeedback({
         tone: 'success',
         message: user
@@ -796,7 +604,7 @@ export default function AccountScreen() {
 
   return (
     <AppScreen backgroundColor={colors.elevated} contentStyle={styles.flowContent} keyboardAware>
-      <FlowHeader
+      <FlowTopBar
         subtitle="Transparent. Secure. Yours."
         title="Settings & Privacy"
       />
@@ -804,192 +612,246 @@ export default function AccountScreen() {
       <View style={styles.settingsList}>
         <SettingsRow
           icon={user ? 'person-circle-outline' : 'person-outline'}
+          isExpanded={user ? activeSettingsPanel === 'account' : undefined}
           subtitle={user ? signedInAccountLabel : 'Enable sync, backup, and circles'}
           title={user ? 'Signed In' : 'Optional Sign In'}
           value={user ? 'Manage' : configured ? undefined : 'Unavailable'}
           onPress={() => {
             if (user) {
-              setActiveSettingsPanel(activeSettingsPanel === 'privacy' ? null : 'privacy');
+              setActiveSettingsPanel(activeSettingsPanel === 'account' ? null : 'account');
               return;
             }
 
             router.push('/sync');
           }}
         />
+        {activeSettingsPanel === 'account' ? (
+          <View style={styles.settingsDetailSlot}>
+            <AppCard tone="canvas" variant="inline" style={styles.settingsDetailCard}>
+              {configured && isLoading ? (
+                <LoadingBlock description="Checking your profile." title="Loading account" />
+              ) : !configured || !user ? (
+                <SettingsPanelHeader
+                  title="Your data stays on your device"
+                  description="Sync and circles are optional."
+                />
+              ) : isProfileLoading && !profile ? (
+                <LoadingBlock description="Loading profile details." title="Loading profile" />
+              ) : profileError && !profile ? (
+                <StateCard
+                  actionLabel="Try again"
+                  description={profileError}
+                  onAction={() => {
+                    void refreshProfile();
+                  }}
+                  title="Could not load your profile"
+                  tone="danger"
+                />
+              ) : (
+                <>
+                  <SettingsPanelHeader
+                    title={profile?.displayName || suggestedDisplayName || 'Your account'}
+                    description={profile?.handle ? `@${profile.handle} - ${signedInAccountLabel}` : signedInAccountLabel}
+                  />
+                  <AppInput
+                    autoCapitalize="words"
+                    error={hasAttemptedProfileSubmit ? profileErrors.displayName : undefined}
+                    helper="The readable name your circles see."
+                    label="Display name"
+                    onChangeText={(value) => {
+                      setDisplayName(value);
+                      setProfileFeedback(null);
+                    }}
+                    placeholder="Early Riser"
+                    value={displayName}
+                  />
+                  <AppInput
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    error={hasAttemptedProfileSubmit ? profileErrors.handle : undefined}
+                    helper={hasAttemptedProfileSubmit && profileErrors.handle ? undefined : handleHelper}
+                    label="Handle"
+                    onChangeText={(value) => {
+                      setHandle(normalizeHandle(value));
+                      setProfileFeedback(null);
+                    }}
+                    placeholder="early_riser"
+                    value={handle}
+                  />
+                  <PreferenceSwitch
+                    label="Circle notifications"
+                    description="Updates for circles, invites, and shared progress."
+                    value={allowCircleNotifications}
+                    onValueChange={(value) => {
+                      setAllowCircleNotifications(value);
+                      setProfileFeedback(null);
+                    }}
+                  />
+                  <PreferenceSwitch
+                    label="Missed-checkpoint alerts"
+                    description="Alerts when you miss a scheduled checkpoint."
+                    value={allowMissedAlarmAlerts}
+                    onValueChange={(value) => {
+                      setAllowMissedAlarmAlerts(value);
+                      setProfileFeedback(null);
+                    }}
+                  />
+                  {profileError ? <Text style={[TextPresets.body, { color: colors.danger }]}>{profileError}</Text> : null}
+                  {profileFeedback && profileFeedbackColors ? (
+                    <FeedbackMessage colors={profileFeedbackColors} message={profileFeedback.message} />
+                  ) : null}
+                  <AppButton
+                    disabled={isProfileSubmitting || isProfileLoading}
+                    label={isProfileSubmitting || isProfileLoading ? 'Saving...' : 'Save profile'}
+                    onPress={handleSaveProfile}
+                  />
+                  <AppButton
+                    disabled={isSigningOut}
+                    label={isSigningOut ? 'Signing out...' : 'Sign out'}
+                    onPress={handleSignOut}
+                    variant="danger"
+                  />
+                </>
+              )}
+            </AppCard>
+          </View>
+        ) : null}
         <SettingsRow
           icon="notifications-outline"
-          subtitle="Customize reminders and alerts"
+          isExpanded={activeSettingsPanel === 'notifications'}
+          subtitle="Required for checkpoint alarms"
           title="Notifications"
           value={notificationPermissionLabel}
           onPress={() => {
-            void handleRequestNotificationAccess();
-          }}
-        />
-        <SettingsRow
-          icon="camera-outline"
-          subtitle="QR scanning and camera access"
-          title="Camera"
-          value={cameraPermissionLabel}
-          onPress={() => {
-            void handleRequestCameraAccess();
+            if (activeSettingsPanel === 'notifications') {
+              setActiveSettingsPanel(null);
+              return;
+            }
+
             setActiveSettingsPanel('notifications');
           }}
         />
-        <SettingsRow
-          icon="qr-code-outline"
-          subtitle="Add, edit, and organize codes"
-          title="Code Management"
-          value={isProofCodeStatsLoading ? 'Loading' : `${proofCodeStats.linkedCodeCount} linked`}
-          onPress={() => setActiveSettingsPanel(activeSettingsPanel === 'codes' ? null : 'codes')}
-        />
-        <SettingsRow
-          icon="time-outline"
-          subtitle="Timing, snooze, and persistence"
-          title="Reminder Behavior"
-          onPress={() => setActiveSettingsPanel(activeSettingsPanel === 'reminders' ? null : 'reminders')}
-        />
-        <SettingsRow
-          icon="sparkles-outline"
-          subtitle="Set default strictness level"
-          title="Strictness Defaults"
-          value={getProofStrictnessLabel(appPreferences.defaultProofStrictness)}
-          onPress={() => setActiveSettingsPanel(activeSettingsPanel === 'strictness' ? null : 'strictness')}
-        />
-      </View>
-
-      {activeSettingsPanel === 'notifications' ? (
-        <SettingsDetailCard
-          title="Device access"
-          description={`${notificationPermissionHelper} ${cameraPermissionHelper}`}
-          feedback={reminderFeedback}
-          feedbackColors={reminderFeedbackColors}
-          secondaryFeedback={deviceFeedback}
-          secondaryFeedbackColors={deviceFeedbackColors}
-        />
-      ) : null}
-
-      {activeSettingsPanel === 'reminders' ? (
-        <AppCard elevated tone="canvas">
-          <SectionHeader
-            action={<StatusPill label={notificationPermissionLabel} tone={getNotificationPermissionTone(notificationPermissionState)} />}
-            kicker="Device reminders"
-            size="compact"
-            title="Reminder behavior"
-            description="Core checkpoint alerts still follow your schedules. These switches only control extra nudges."
-          />
-          {isReminderPreferencesLoading ? (
-            <Text style={[styles.helperCaption, { color: colors.muted }]}>Loading reminder preferences...</Text>
-          ) : (
-            <>
-              <PreferenceSwitch
-                label="Urgency reminder"
-                description="Send one follow-up while a live checkpoint window is still open."
-                value={reminderPreferences.urgencyRemindersEnabled}
-                onValueChange={(value) => {
-                  setReminderPreferences((current) => ({ ...current, urgencyRemindersEnabled: value }));
-                  setReminderFeedback(null);
-                }}
+        {activeSettingsPanel === 'notifications' ? (
+          <View style={styles.settingsDetailSlot}>
+            <AppCard tone="canvas" variant="inline" style={styles.settingsDetailCard}>
+              <SettingsPanelHeader
+                action={<StatusPill label={notificationPermissionLabel} tone={getNotificationPermissionTone(notificationPermissionState)} />}
+                title="Notifications"
+                description={
+                  notificationPermissionState === 'granted'
+                    ? 'Checkpoint alarms can ring in the background.'
+                    : 'Enable alerts so checkpoint alarms ring on time.'
+                }
               />
-              <PreferenceSwitch
-                label="Evening readiness reminder"
-                description="For morning checkpoints, send one low-noise prep reminder the night before."
-                value={reminderPreferences.eveningReadinessRemindersEnabled}
-                onValueChange={(value) => {
-                  setReminderPreferences((current) => ({ ...current, eveningReadinessRemindersEnabled: value }));
-                  setReminderFeedback(null);
-                }}
-              />
-              <PreferenceSwitch
-                label="Weekly review reminder"
-                description="Send one Sunday-evening prompt to review what held and what needs work."
-                value={reminderPreferences.weeklyReviewRemindersEnabled}
-                onValueChange={(value) => {
-                  setReminderPreferences((current) => ({ ...current, weeklyReviewRemindersEnabled: value }));
-                  setReminderFeedback(null);
-                }}
-              />
+              {notificationPermissionState !== 'granted' ? (
+                <AppButton
+                  label={notificationPermissionState === 'denied' ? 'Open device settings' : 'Enable notifications'}
+                  onPress={handleRequestNotificationAccess}
+                  variant="secondary"
+                />
+              ) : null}
               {reminderFeedback && reminderFeedbackColors ? (
                 <FeedbackMessage colors={reminderFeedbackColors} message={reminderFeedback.message} />
               ) : null}
-              <AppButton
-                disabled={isReminderPreferencesSubmitting}
-                label={isReminderPreferencesSubmitting ? 'Saving...' : 'Save reminder preferences'}
-                onPress={handleSaveReminderPreferences}
-                variant="secondary"
-              />
-            </>
-          )}
-        </AppCard>
-      ) : null}
-
-      {activeSettingsPanel === 'codes' ? (
-        <AppCard elevated tone="canvas">
-          <SectionHeader
-            action={
-              <StatusPill
-                label={isProofCodeStatsLoading ? 'Loading' : `${proofCodeStats.linkedCodeCount} linked`}
-                tone={proofCodeStats.linkedCodeCount > 0 ? 'success' : 'default'}
-              />
+            </AppCard>
+          </View>
+        ) : null}
+        <SettingsRow
+          icon="camera-outline"
+          isExpanded={activeSettingsPanel === 'camera'}
+          subtitle="Required for QR proof scans"
+          title="Camera"
+          value={cameraPermissionLabel}
+          onPress={() => {
+            if (activeSettingsPanel === 'camera') {
+              setActiveSettingsPanel(null);
+              return;
             }
-            kicker="Code management"
-            size="compact"
-            title="Proof codes live on checkpoints"
-            description={proofCodeStatsDescription}
-          />
-          <View style={styles.buttonGroup}>
-            <AppButton label="Review checkpoints" onPress={handleReviewCheckpoints} variant="secondary" />
-            <AppButton
-              disabled={isProofCodeStatsLoading || isClearingUnusedCodes}
-              label={isClearingUnusedCodes ? 'Clearing...' : 'Clear unused saved codes'}
-              onPress={handleClearUnusedCodes}
-              variant="ghost"
-            />
-          </View>
-          {codeFeedback && codeFeedbackColors ? (
-            <FeedbackMessage colors={codeFeedbackColors} message={codeFeedback.message} />
-          ) : null}
-        </AppCard>
-      ) : null}
 
-      {activeSettingsPanel === 'strictness' ? (
-        <AppCard elevated tone="canvas">
-          <SectionHeader
-            kicker="Defaults"
-            size="compact"
-            title="Strictness defaults"
-            description="Existing checkpoints keep their saved strictness. This only changes new checkpoint setup."
-          />
-          <View style={styles.modeGrid}>
-            <ActionRow
-              description="Use original exact-match behavior for every new checkpoint."
-              disabled={isAppPreferencesLoading || isAppPreferencesSubmitting}
-              leading={<ActionRowGlyph label="X" />}
-              onPress={() => {
-                void handleSaveDefaultProofStrictness('strict');
-              }}
-              statusLabel={appPreferences.defaultProofStrictness === 'strict' ? 'Default' : 'Available'}
-              statusTone={appPreferences.defaultProofStrictness === 'strict' ? 'success' : 'default'}
-              style={styles.modeRow}
-              title="Strict"
-            />
-            <ActionRow
-              description="Keep exact-match proof with more guided fallback copy."
-              disabled={isAppPreferencesLoading || isAppPreferencesSubmitting}
-              leading={<ActionRowGlyph label="S" />}
-              onPress={() => {
-                void handleSaveDefaultProofStrictness('standard');
-              }}
-              statusLabel={appPreferences.defaultProofStrictness === 'standard' ? 'Default' : 'Available'}
-              statusTone={appPreferences.defaultProofStrictness === 'standard' ? 'primary' : 'default'}
-              style={styles.modeRow}
-              title="Standard"
-            />
+            setActiveSettingsPanel('camera');
+          }}
+        />
+        {activeSettingsPanel === 'camera' ? (
+          <View style={styles.settingsDetailSlot}>
+            <AppCard tone="canvas" variant="inline" style={styles.settingsDetailCard}>
+              <SettingsPanelHeader
+                action={<StatusPill label={cameraPermissionLabel} tone={cameraPermission?.granted ? 'success' : 'warning'} />}
+                title="Camera"
+                description={
+                  cameraPermission?.granted
+                    ? 'Ready to scan proof codes.'
+                    : 'Enable camera to scan QR and barcode proof codes.'
+                }
+              />
+              {!cameraPermission?.granted ? (
+                <AppButton
+                  label={cameraPermission?.canAskAgain === false ? 'Open device settings' : 'Enable camera'}
+                  onPress={handleRequestCameraAccess}
+                  variant="secondary"
+                />
+              ) : null}
+              {deviceFeedback && deviceFeedbackColors ? (
+                <FeedbackMessage colors={deviceFeedbackColors} message={deviceFeedback.message} />
+              ) : null}
+            </AppCard>
           </View>
-          {deviceFeedback && deviceFeedbackColors ? (
-            <FeedbackMessage colors={deviceFeedbackColors} message={deviceFeedback.message} />
-          ) : null}
-        </AppCard>
-      ) : null}
+        ) : null}
+        <SettingsRow
+          icon="time-outline"
+          isExpanded={activeSettingsPanel === 'reminders'}
+          subtitle="Urgency, evening prep, and weekly review"
+          title="Reminder Behavior"
+          onPress={() => setActiveSettingsPanel(activeSettingsPanel === 'reminders' ? null : 'reminders')}
+        />
+        {activeSettingsPanel === 'reminders' ? (
+          <View style={styles.settingsDetailSlot}>
+            <AppCard tone="canvas" variant="inline" style={styles.settingsDetailCard}>
+              {isReminderPreferencesLoading ? (
+                <Text style={[styles.helperCaption, { color: colors.muted }]}>Loading reminder preferences...</Text>
+              ) : (
+                <>
+                  <PreferenceSwitch
+                    label="Urgency reminder"
+                    description="One follow-up during a live checkpoint."
+                    value={reminderPreferences.urgencyRemindersEnabled}
+                    onValueChange={(value) => {
+                      setReminderPreferences((current) => ({ ...current, urgencyRemindersEnabled: value }));
+                      setReminderFeedback(null);
+                    }}
+                  />
+                  <PreferenceSwitch
+                    label="Evening prep"
+                    description="A quiet reminder the night before."
+                    value={reminderPreferences.eveningReadinessRemindersEnabled}
+                    onValueChange={(value) => {
+                      setReminderPreferences((current) => ({ ...current, eveningReadinessRemindersEnabled: value }));
+                      setReminderFeedback(null);
+                    }}
+                  />
+                  <PreferenceSwitch
+                    label="Weekly review"
+                    description="A Sunday prompt to reflect and adjust."
+                    value={reminderPreferences.weeklyReviewRemindersEnabled}
+                    onValueChange={(value) => {
+                      setReminderPreferences((current) => ({ ...current, weeklyReviewRemindersEnabled: value }));
+                      setReminderFeedback(null);
+                    }}
+                  />
+                  {reminderFeedback && reminderFeedbackColors ? (
+                    <FeedbackMessage colors={reminderFeedbackColors} message={reminderFeedback.message} />
+                  ) : null}
+                  <AppButton
+                    disabled={isReminderPreferencesSubmitting}
+                    label={isReminderPreferencesSubmitting ? 'Saving...' : 'Save'}
+                    onPress={handleSaveReminderPreferences}
+                    variant="secondary"
+                  />
+                </>
+              )}
+            </AppCard>
+          </View>
+        ) : null}
+      </View>
 
       <View style={styles.settingsList}>
         <SettingsRow
@@ -1011,155 +873,9 @@ export default function AccountScreen() {
       {dataFeedback && dataFeedbackColors ? (
         <FeedbackMessage colors={dataFeedbackColors} message={dataFeedback.message} />
       ) : null}
-
-      <View style={styles.settingsList}>
-        <SettingsRow
-          icon="accessibility-outline"
-          subtitle="Display, motion, and interaction"
-          title="Accessibility"
-          onPress={handleShowAccessibilityInfo}
-        />
-        <SettingsRow
-          icon="lock-closed-outline"
-          subtitle="Encryption, sync, and permissions"
-          title="Privacy Controls"
-          onPress={() => setActiveSettingsPanel(activeSettingsPanel === 'privacy' ? null : 'privacy')}
-        />
-      </View>
-
-      {activeSettingsPanel === 'privacy' ? (
-        <AppCard elevated tone="canvas">
-          {configured && isLoading ? (
-            <LoadingBlock description="Checking your account session and profile." title="Loading account" />
-          ) : !configured || !user ? (
-            <SectionHeader
-              kicker="Privacy"
-              size="compact"
-              title="Your data stays on your device"
-              description="Sync and circles remain optional. Enable sync above only when you want backup or private accountability."
-            />
-          ) : isProfileLoading && !profile ? (
-            <LoadingBlock description="Pulling down your name, handle, timezone, and alert preferences." title="Loading profile" />
-          ) : profileError && !profile ? (
-            <StateCard
-              actionLabel="Try again"
-              description={profileError}
-              onAction={() => {
-                void refreshProfile();
-              }}
-              title="Could not load your profile"
-              tone="danger"
-            />
-          ) : (
-            <>
-              <SectionHeader
-                kicker="Signed in"
-                size="compact"
-                title={profile?.displayName || suggestedDisplayName || 'Your account'}
-                description={`${profile?.handle ? `@${profile.handle}` : 'Finish your profile to show up clearly in circles.'} ${signedInAccountLabel}`}
-              />
-              <AppInput
-                autoCapitalize="words"
-                error={hasAttemptedProfileSubmit ? profileErrors.displayName : undefined}
-                helper="Use the name your circle will recognize quickly."
-                label="Display name"
-                onChangeText={(value) => {
-                  setDisplayName(value);
-                  setProfileFeedback(null);
-                }}
-                placeholder="Early Riser"
-                value={displayName}
-              />
-              <AppInput
-                autoCapitalize="none"
-                autoCorrect={false}
-                error={hasAttemptedProfileSubmit ? profileErrors.handle : undefined}
-                helper={hasAttemptedProfileSubmit && profileErrors.handle ? undefined : handleHelper}
-                label="Handle"
-                onChangeText={(value) => {
-                  setHandle(normalizeHandle(value));
-                  setProfileFeedback(null);
-                }}
-                placeholder="early_riser"
-                value={handle}
-              />
-              <AppInput
-                autoCapitalize="none"
-                autoCorrect={false}
-                error={hasAttemptedProfileSubmit ? profileErrors.timezone : undefined}
-                helper="Used for circle timestamps and checkpoint follow-up timing."
-                label="Timezone"
-                onChangeText={(value) => {
-                  setTimezone(value);
-                  setProfileFeedback(null);
-                }}
-                placeholder="Europe/Skopje"
-                value={timezone}
-              />
-              <View style={styles.timezoneSuggestions}>
-                {timezoneSuggestions.map((zone) => {
-                  const isSelected = timezone === zone;
-
-                  return (
-                    <Pressable
-                      key={zone}
-                      accessibilityHint="Sets the profile timezone."
-                      accessibilityLabel={`Use timezone ${zone}`}
-                      accessibilityRole="button"
-                      accessibilityState={{ selected: isSelected }}
-                      onPress={() => {
-                        setTimezone(zone);
-                        setProfileFeedback(null);
-                      }}
-                      style={[
-                        styles.timezoneChip,
-                        {
-                          backgroundColor: isSelected ? colors.primarySurface : colors.elevated,
-                          borderColor: isSelected ? colors.primary : colors.border,
-                        },
-                      ]}>
-                      <Text style={[styles.timezoneChipLabel, { color: isSelected ? colors.primary : colors.textSoft }]}>
-                        {zone}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
-              <PreferenceSwitch
-                label="Circle notifications"
-                description="Updates for circles, invites, and shared progress."
-                value={allowCircleNotifications}
-                onValueChange={(value) => {
-                  setAllowCircleNotifications(value);
-                  setProfileFeedback(null);
-                }}
-              />
-              <PreferenceSwitch
-                label="Missed-checkpoint alerts"
-                description="Alerts when you miss a scheduled checkpoint."
-                value={allowMissedAlarmAlerts}
-                onValueChange={(value) => {
-                  setAllowMissedAlarmAlerts(value);
-                  setProfileFeedback(null);
-                }}
-              />
-              {profileError ? <Text style={[TextPresets.body, { color: colors.danger }]}>{profileError}</Text> : null}
-              {profileFeedback && profileFeedbackColors ? (
-                <FeedbackMessage colors={profileFeedbackColors} message={profileFeedback.message} />
-              ) : null}
-              <AppButton
-                disabled={isProfileSubmitting || isProfileLoading}
-                label={isProfileSubmitting || isProfileLoading ? 'Saving...' : 'Save profile'}
-                onPress={handleSaveProfile}
-              />
-            </>
-          )}
-        </AppCard>
-      ) : null}
-
       <View style={[styles.localFooter, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
         <Ionicons color={colors.textSoft} name="lock-closed-outline" size={20} />
-        <Text style={[styles.helperCaption, { color: colors.textSoft }]}>
+        <Text style={[styles.helperCaption, styles.localFooterText, { color: colors.textSoft }]}>
           Your data stays on your device. You are always in control.
         </Text>
       </View>
@@ -1167,43 +883,65 @@ export default function AccountScreen() {
   );
 }
 
-function FlowHeader({
-  subtitle,
+function SettingsPanelHeader({
+  action,
+  description,
   title,
 }: {
-  subtitle: string;
+  action?: ReactNode;
+  description: string;
   title: string;
 }) {
   const colors = getAppColors(useColorScheme());
 
   return (
-    <View style={styles.flowHeader}>
-      <Text style={[styles.flowTitle, { color: colors.text }]}>{title}</Text>
-      <Text style={[styles.flowSubtitle, { color: colors.textSoft }]}>{subtitle}</Text>
-      <View style={[styles.flowRule, { backgroundColor: colors.primary }]} />
+    <View style={styles.settingsPanelHeader}>
+      <View style={styles.settingsPanelCopy}>
+        <Text style={[styles.settingsPanelTitle, { color: colors.text }]}>{title}</Text>
+        <Text style={[styles.settingsPanelDescription, { color: colors.textSoft }]}>{description}</Text>
+      </View>
+      {action ? <View style={styles.settingsPanelAction}>{action}</View> : null}
     </View>
   );
 }
 
 function SettingsRow({
   icon,
+  isExpanded,
   onPress,
   subtitle,
   title,
   value,
 }: {
   icon: keyof typeof Ionicons.glyphMap;
+  isExpanded?: boolean;
   onPress: () => void;
   subtitle: string;
   title: string;
   value?: string;
 }) {
   const colors = getAppColors(useColorScheme());
+  const arrowProgress = useRef(new Animated.Value(isExpanded ? 1 : 0)).current;
+
+  useEffect(() => {
+    Animated.timing(arrowProgress, {
+      duration: 180,
+      easing: Easing.out(Easing.cubic),
+      toValue: isExpanded ? 1 : 0,
+      useNativeDriver: true,
+    }).start();
+  }, [arrowProgress, isExpanded]);
+
+  const arrowRotation = arrowProgress.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '90deg'],
+  });
 
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={`${title}. ${subtitle}${value ? `. ${value}` : ''}`}
+      accessibilityState={typeof isExpanded === 'boolean' ? { expanded: isExpanded } : undefined}
       onPress={onPress}
       style={({ pressed }) => [
         styles.settingsRow,
@@ -1221,7 +959,9 @@ function SettingsRow({
         <Text style={[styles.settingsSubtitle, { color: colors.textSoft }]}>{subtitle}</Text>
       </View>
       {value ? <Text style={[styles.settingsValue, { color: colors.muted }]}>{value}</Text> : null}
-      <Ionicons color={colors.muted} name="chevron-forward" size={19} />
+      <Animated.View style={{ transform: [{ rotate: arrowRotation }] }}>
+        <Ionicons color={colors.muted} name="chevron-forward" size={19} />
+      </Animated.View>
     </Pressable>
   );
 }
@@ -1281,60 +1021,12 @@ function FeedbackMessage({
   );
 }
 
-function SettingsDetailCard({
-  description,
-  feedback,
-  feedbackColors,
-  secondaryFeedback,
-  secondaryFeedbackColors,
-  title,
-}: {
-  description: string;
-  feedback: FormFeedback | null;
-  feedbackColors: ReturnType<typeof getFeedbackColors> | null;
-  secondaryFeedback?: FormFeedback | null;
-  secondaryFeedbackColors?: ReturnType<typeof getFeedbackColors> | null;
-  title: string;
-}) {
-  return (
-    <AppCard elevated tone="canvas">
-      <SectionHeader kicker="Device access" size="compact" title={title} description={description} />
-      {feedback && feedbackColors ? <FeedbackMessage colors={feedbackColors} message={feedback.message} /> : null}
-      {secondaryFeedback && secondaryFeedbackColors ? (
-        <FeedbackMessage colors={secondaryFeedbackColors} message={secondaryFeedback.message} />
-      ) : null}
-    </AppCard>
-  );
-}
-
 const styles = StyleSheet.create({
   flowContent: {
     gap: Spacing.md,
     paddingHorizontal: Spacing.lg,
-  },
-  flowHeader: {
-    alignItems: 'center',
-    gap: Spacing.xs,
-    paddingTop: Spacing.sm,
-  },
-  flowTitle: {
-    fontFamily: Fonts.serif,
-    fontSize: 28,
-    fontWeight: '800',
-    lineHeight: 34,
-    textAlign: 'center',
-  },
-  flowSubtitle: {
-    ...TextPresets.body,
-    fontSize: 15,
-    lineHeight: 20,
-    textAlign: 'center',
-  },
-  flowRule: {
-    borderRadius: Radius.pill,
-    height: 2,
-    marginTop: Spacing.sm,
-    width: 42,
+    paddingBottom: 88,
+    paddingTop: 2,
   },
   syncCard: {
     gap: Spacing.md,
@@ -1376,6 +1068,38 @@ const styles = StyleSheet.create({
   settingsList: {
     borderRadius: Radius.lg,
     overflow: 'hidden',
+  },
+  settingsDetailSlot: {
+    backgroundColor: 'transparent',
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: Spacing.xs,
+  },
+  settingsDetailCard: {
+    gap: Spacing.md,
+  },
+  settingsPanelHeader: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    gap: Spacing.md,
+    justifyContent: 'space-between',
+  },
+  settingsPanelCopy: {
+    flex: 1,
+    gap: 2,
+    minWidth: 0,
+  },
+  settingsPanelTitle: {
+    ...TextPresets.label,
+    fontSize: 16,
+    lineHeight: 21,
+  },
+  settingsPanelDescription: {
+    ...TextPresets.body,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  settingsPanelAction: {
+    alignSelf: 'flex-start',
   },
   settingsRow: {
     alignItems: 'center',
@@ -1428,6 +1152,12 @@ const styles = StyleSheet.create({
     maxWidth: 360,
     paddingHorizontal: Spacing.md,
     paddingVertical: Spacing.sm,
+    width: '100%',
+  },
+  localFooterText: {
+    flex: 1,
+    flexShrink: 1,
+    minWidth: 0,
   },
   safeArea: {
     flex: 1,
@@ -1464,9 +1194,6 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     lineHeight: 22,
   },
-  buttonGroup: {
-    gap: Spacing.sm,
-  },
   helperCaption: {
     ...TextPresets.body,
     fontSize: 14,
@@ -1475,8 +1202,8 @@ const styles = StyleSheet.create({
   feedbackCard: {
     borderRadius: Radius.md,
     borderWidth: 1,
-    paddingHorizontal: Spacing.lg,
-    paddingVertical: Spacing.md,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
   },
   accountStrip: {
     alignItems: 'flex-start',
@@ -1519,29 +1246,12 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 18,
   },
-  timezoneSuggestions: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.sm,
-    marginTop: -Spacing.xs,
-  },
-  timezoneChip: {
-    borderRadius: Radius.pill,
-    borderWidth: 1,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: 10,
-  },
-  timezoneChipLabel: {
-    ...TextPresets.label,
-    fontSize: 13,
-    lineHeight: 18,
-  },
   preferenceRow: {
     alignItems: 'flex-start',
     borderTopWidth: 1,
     flexDirection: 'row',
     gap: Spacing.md,
-    paddingTop: Spacing.md,
+    paddingTop: Spacing.sm,
   },
   preferenceCopy: {
     flex: 1,

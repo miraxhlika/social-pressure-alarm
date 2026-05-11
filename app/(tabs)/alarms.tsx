@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { Alert, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
 
@@ -7,9 +7,8 @@ import { AppButton } from '@/components/ui/app-button';
 import { AppCard } from '@/components/ui/app-card';
 import { AppScreen } from '@/components/ui/app-screen';
 import { EmptyState } from '@/components/ui/empty-state';
-import { FlowFooterButton } from '@/components/ui/flow-primitives';
+import { FlowFooterButton, FlowTopBar } from '@/components/ui/flow-primitives';
 import { LoadingBlock } from '@/components/ui/loading-block';
-import { PageHeader } from '@/components/ui/page-header';
 import { StatTile } from '@/components/ui/stat-tile';
 import { Spacing, TextPresets, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
@@ -36,6 +35,8 @@ type AlarmScreenState = {
 export default function AlarmsScreen() {
   const router = useRouter();
   const colors = getAppColors(useColorScheme());
+  const hasLoadedAlarmsRef = useRef(false);
+  const loadAlarmsRequestRef = useRef(0);
   const [isLoading, setIsLoading] = useState(true);
   const [state, setState] = useState<AlarmScreenState>({
     alarms: [],
@@ -43,18 +44,28 @@ export default function AlarmsScreen() {
   });
 
   const loadData = useCallback(async () => {
-    setIsLoading(true);
+    const requestId = loadAlarmsRequestRef.current + 1;
+    loadAlarmsRequestRef.current = requestId;
+
+    if (!hasLoadedAlarmsRef.current) {
+      setIsLoading(true);
+    }
 
     try {
       await hydrateAlarmRuntimeForCurrentUser().catch(() => null);
       const store = await readAlarmStore();
 
-      setState({
-        alarms: store.alarms,
-        progressSummary: getProgressSummary(store),
-      });
+      if (loadAlarmsRequestRef.current === requestId) {
+        setState({
+          alarms: store.alarms,
+          progressSummary: getProgressSummary(store),
+        });
+      }
     } finally {
-      setIsLoading(false);
+      if (loadAlarmsRequestRef.current === requestId) {
+        hasLoadedAlarmsRef.current = true;
+        setIsLoading(false);
+      }
     }
   }, []);
 
@@ -64,11 +75,11 @@ export default function AlarmsScreen() {
     }, [loadData])
   );
 
-  const handleCreateAlarmPress = () => {
+  const handleCreateAlarmPress = useCallback(() => {
     router.push({ pathname: '/create', params: { returnTo: '/alarms' } });
-  };
+  }, [router]);
 
-  const handleDeleteAlarm = (alarm: Alarm) => {
+  const handleDeleteAlarm = useCallback((alarm: Alarm) => {
     Alert.alert('Delete checkpoint?', `Remove the ${alarm.label} checkpoint?`, [
       { text: 'Cancel', style: 'cancel' },
       {
@@ -81,9 +92,9 @@ export default function AlarmsScreen() {
         },
       },
     ]);
-  };
+  }, [loadData]);
 
-  const handleEditAlarm = (alarm: Alarm) => {
+  const handleEditAlarm = useCallback((alarm: Alarm) => {
     if (alarm.lastOutcome === 'missed') {
       void trackAnalyticsEvent('miss_recovery_action', {
         checkpointId: alarm.id,
@@ -102,9 +113,9 @@ export default function AlarmsScreen() {
         returnTo: '/alarms',
       },
     });
-  };
+  }, [router]);
 
-  const handleReuseAlarm = (alarm: Alarm) => {
+  const handleReuseAlarm = useCallback((alarm: Alarm) => {
     router.push({
       pathname: '/create',
       params: {
@@ -113,9 +124,9 @@ export default function AlarmsScreen() {
         returnTo: '/alarms',
       },
     });
-  };
+  }, [router]);
 
-  const handleRescheduleAlarm = (alarm: Alarm) => {
+  const handleRescheduleAlarm = useCallback((alarm: Alarm) => {
     Alert.alert(
       'Reschedule checkpoint?',
       `Schedule ${alarm.label} for its next ${alarm.repeatSchedule === 'once' ? 'available slot' : 'repeat window'}?`,
@@ -139,17 +150,17 @@ export default function AlarmsScreen() {
         },
       ]
     );
-  };
+  }, [loadData]);
 
-  const handleOpenAlarm = (alarm: Alarm) => {
+  const handleOpenAlarm = useCallback((alarm: Alarm) => {
     router.push(`/ringing?alarmId=${alarm.id}`);
-  };
+  }, [router]);
 
-  const handleOpenDetails = (alarm: Alarm) => {
+  const handleOpenDetails = useCallback((alarm: Alarm) => {
     router.push(`/checkpoint/${alarm.id}`);
-  };
+  }, [router]);
 
-  const handleResetDemoData = () => {
+  const handleResetDemoData = useCallback(() => {
     Alert.alert(
       'Reset local data?',
       'This clears checkpoints and cancels scheduled notifications on this device.',
@@ -166,7 +177,7 @@ export default function AlarmsScreen() {
         },
       ]
     );
-  };
+  }, [loadData, state.alarms]);
 
   const primaryAlarm = useMemo(() => getPrimaryAlarm(state.alarms), [state.alarms]);
   const uniqueUseCaseCount = new Set(state.alarms.map((alarm) => alarm.useCaseType)).size;
@@ -190,11 +201,12 @@ export default function AlarmsScreen() {
           </View>
         )
       }>
-      <PageHeader
-        action={<AppButton label="New checkpoint" onPress={handleCreateAlarmPress} size="compact" />}
-        eyebrow="Checkpoints"
-        title="Checkpoint library"
-        description="Keep reusable proof setups for the commitments you repeat."
+      <FlowTopBar
+        rightAccessibilityLabel="Create checkpoint"
+        rightIcon="add"
+        onRightPress={handleCreateAlarmPress}
+        subtitle="Reusable proof setups"
+        title="Checkpoints"
       />
 
       {isLoading ? (
@@ -206,10 +218,11 @@ export default function AlarmsScreen() {
       ) : state.alarms.length === 0 ? (
         <EmptyState
           actionLabel="Create checkpoint"
-          description="Save one checkpoint for a real commitment, then return here to adjust or reuse it instead of starting over."
+          description="Save a proof setup once, then reuse it whenever that routine needs accountability."
+          icon="albums-outline"
           onAction={handleCreateAlarmPress}
           style={styles.emptyCard}
-          title="Your library is empty"
+          title="No saved checkpoints"
         />
       ) : (
         <>
@@ -264,7 +277,10 @@ export default function AlarmsScreen() {
 
 const styles = StyleSheet.create({
   screenContent: {
+    gap: 10,
     paddingBottom: 150,
+    paddingHorizontal: Spacing.lg,
+    paddingTop: 2,
   },
   createCtaFooter: {
     marginBottom: 56,

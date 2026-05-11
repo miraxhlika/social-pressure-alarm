@@ -1,3 +1,4 @@
+import { memo, useCallback } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { AppCard } from '@/components/ui/app-card';
@@ -51,21 +52,41 @@ function getLastOutcomeCopy(alarm: Alarm) {
   return 'Awaiting first result';
 }
 
-export function AlarmCard({ alarm, onDelete, onDetails, onEdit, onOpen, onReschedule, onReuse }: AlarmCardProps) {
+function AlarmCardComponent({ alarm, onDelete, onDetails, onEdit, onOpen, onReschedule, onReuse }: AlarmCardProps) {
   const colors = getAppColors(useColorScheme());
   const phase = getAlarmPhase(alarm);
   const sharesToCircle = Boolean(
     alarm.socialSettings?.circleId && (alarm.socialSettings.shareSuccesses || alarm.socialSettings.shareMisses)
   );
   const primaryActionLabel = getPrimaryActionLabel(phase);
-  const primaryAction =
-    phase === 'missed' || phase === 'inactive'
-      ? () => onReschedule(alarm)
-      : phase === 'ringing'
-        ? () => onOpen(alarm)
-        : () => onEdit(alarm);
+  const primaryAction = useCallback(() => {
+    if (phase === 'missed' || phase === 'inactive') {
+      onReschedule(alarm);
+      return;
+    }
+
+    if (phase === 'ringing') {
+      onOpen(alarm);
+      return;
+    }
+
+    onEdit(alarm);
+  }, [alarm, onEdit, onOpen, onReschedule, phase]);
   const secondaryActionLabel = phase === 'ringing' ? 'Adjust' : 'Reuse';
-  const secondaryAction = phase === 'ringing' ? () => onEdit(alarm) : () => onReuse(alarm);
+  const secondaryAction = useCallback(() => {
+    if (phase === 'ringing') {
+      onEdit(alarm);
+      return;
+    }
+
+    onReuse(alarm);
+  }, [alarm, onEdit, onReuse, phase]);
+  const handleDetailsPress = useCallback(() => {
+    onDetails(alarm);
+  }, [alarm, onDetails]);
+  const handleDeletePress = useCallback(() => {
+    onDelete(alarm);
+  }, [alarm, onDelete]);
   const accountabilityLabel = sharesToCircle ? 'Accountability on' : 'Private';
 
   return (
@@ -110,19 +131,21 @@ export function AlarmCard({ alarm, onDelete, onDetails, onEdit, onOpen, onResche
           accessibilityLabel={`View details for ${alarm.label}`}
           color={colors.primary}
           label="Details"
-          onPress={() => onDetails(alarm)}
+          onPress={handleDetailsPress}
         />
         <UtilityAction
           accessibilityHint={`Deletes ${alarm.label}. This action cannot be undone.`}
           accessibilityLabel={`Delete ${alarm.label}`}
           color={colors.danger}
           label="Delete"
-          onPress={() => onDelete(alarm)}
+          onPress={handleDeletePress}
         />
       </View>
     </AppCard>
   );
 }
+
+export const AlarmCard = memo(AlarmCardComponent);
 
 function UtilityAction({
   accessibilityHint,

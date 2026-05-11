@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
 
@@ -79,17 +79,30 @@ function getTodayActivityEvents(store: AlarmStore): TodayActivityEvent[] {
 export default function TodayActivityScreen() {
   const router = useRouter();
   const colors = getAppColors(useColorScheme());
+  const hasLoadedActivityRef = useRef(false);
+  const loadActivityRequestRef = useRef(0);
   const [isLoading, setIsLoading] = useState(true);
   const [store, setStore] = useState<AlarmStore | null>(null);
 
   const loadActivity = useCallback(async () => {
-    setIsLoading(true);
+    const requestId = loadActivityRequestRef.current + 1;
+    loadActivityRequestRef.current = requestId;
+
+    if (!hasLoadedActivityRef.current) {
+      setIsLoading(true);
+    }
 
     try {
       await hydrateAlarmRuntimeForCurrentUser().catch(() => null);
-      setStore(await readAlarmStore());
+      const nextStore = await readAlarmStore();
+      if (loadActivityRequestRef.current === requestId) {
+        setStore(nextStore);
+      }
     } finally {
-      setIsLoading(false);
+      if (loadActivityRequestRef.current === requestId) {
+        hasLoadedActivityRef.current = true;
+        setIsLoading(false);
+      }
     }
   }, []);
 
@@ -117,7 +130,7 @@ export default function TodayActivityScreen() {
         leftAccessibilityLabel="Go back"
         leftIcon="chevron-back"
         onLeftPress={() => router.back()}
-        title="Today Activity"
+        title="Today's Activity"
       />
 
       <FlowPanel style={styles.summaryPanel}>
@@ -159,6 +172,7 @@ export default function TodayActivityScreen() {
               }
               statusLabel={event.statusLabel}
               statusTone={event.statusTone}
+              style={styles.inlineFlowRow}
               title={event.title}
             />
           ))}
@@ -202,5 +216,11 @@ const styles = StyleSheet.create({
   },
   eventsPanel: {
     gap: 8,
+  },
+  inlineFlowRow: {
+    backgroundColor: 'transparent',
+    borderColor: 'transparent',
+    borderRadius: 0,
+    paddingHorizontal: 2,
   },
 });

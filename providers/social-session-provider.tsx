@@ -51,7 +51,7 @@ export function SocialSessionProvider({ children }: { children: ReactNode }) {
   const [profileError, setProfileError] = useState<string | null>(null);
 
   const refreshProfile = useCallback(async () => {
-    if (!configured || !session?.user) {
+    if (!configured || !session?.user?.id) {
       setProfile(null);
       setProfileError(null);
       setIsProfileLoading(false);
@@ -69,7 +69,7 @@ export function SocialSessionProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsProfileLoading(false);
     }
-  }, [configured, session?.user]);
+  }, [configured, session?.user?.id]);
 
   useEffect(() => {
     if (!configured) {
@@ -146,7 +146,7 @@ export function SocialSessionProvider({ children }: { children: ReactNode }) {
   }, [configured]);
 
   useEffect(() => {
-    if (session?.user) {
+    if (session?.user?.id) {
       void refreshProfile();
       return;
     }
@@ -154,7 +154,7 @@ export function SocialSessionProvider({ children }: { children: ReactNode }) {
     setProfile(null);
     setProfileError(null);
     setIsProfileLoading(false);
-  }, [refreshProfile, session?.user]);
+  }, [refreshProfile, session?.user?.id]);
 
   const handleContinueWithGoogle = useCallback(async () => {
     setAuthProviderInFlight('google');

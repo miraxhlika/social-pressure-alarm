@@ -13,7 +13,6 @@ import {
   MAX_SUCCESS_HISTORY,
   RepeatSchedule,
   SuccessHistoryEntry,
-  AlarmProofStrictness,
 } from '@/types/alarm';
 import { normalizeUseCaseType } from '@/lib/checkpoint-templates';
 import { getWeeklyCompletionStats } from '@/lib/progress';
@@ -103,10 +102,6 @@ function getRepeatSchedule(value: unknown): RepeatSchedule {
   return value === 'daily' || value === 'weekdays' ? value : 'once';
 }
 
-function getProofStrictness(value: unknown): AlarmProofStrictness {
-  return value === 'standard' ? 'standard' : 'strict';
-}
-
 function normalizeSocialSettings(value: unknown): AlarmSocialSettings | undefined {
   if (!isRecord(value)) {
     return undefined;
@@ -162,7 +157,6 @@ function normalizeAlarm(rawAlarm: unknown): Alarm | null {
     useCaseType: normalizeUseCaseType(legacyAlarm.useCaseType),
     placeObject: getTrimmedString(legacyAlarm.placeObject),
     notes: getTrimmedString(legacyAlarm.notes),
-    proofStrictness: getProofStrictness(legacyAlarm.proofStrictness),
     expectedQrPayload,
     repeatSchedule: getRepeatSchedule(legacyAlarm.repeatSchedule),
     gracePeriodSeconds: getBoundedNumber(legacyAlarm.gracePeriodSeconds, 15, 3600, 120),

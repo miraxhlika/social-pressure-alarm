@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 
@@ -139,6 +139,8 @@ export default function CheckpointDetailsScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string }>();
   const colors = getAppColors(useColorScheme());
+  const loadedDetailsIdRef = useRef<string | null>(null);
+  const loadDetailsRequestRef = useRef(0);
   const [isLoading, setIsLoading] = useState(true);
   const [state, setState] = useState<CheckpointDetailsState>({
     alarm: null,
@@ -150,7 +152,13 @@ export default function CheckpointDetailsScreen() {
   });
 
   const loadDetails = useCallback(async () => {
-    if (!params.id) {
+    const requestId = loadDetailsRequestRef.current + 1;
+    loadDetailsRequestRef.current = requestId;
+
+    const checkpointId = params.id;
+
+    if (!checkpointId) {
+      loadedDetailsIdRef.current = null;
       setState({
         alarm: null,
         progressSummary: null,
@@ -163,22 +171,29 @@ export default function CheckpointDetailsScreen() {
       return;
     }
 
-    setIsLoading(true);
+    if (loadedDetailsIdRef.current !== checkpointId) {
+      setIsLoading(true);
+    }
 
     try {
       await hydrateAlarmRuntimeForCurrentUser().catch(() => null);
-      const [store, alarm] = await Promise.all([readAlarmStore(), getAlarmById(params.id)]);
+      const [store, alarm] = await Promise.all([readAlarmStore(), getAlarmById(checkpointId)]);
 
-      setState({
-        alarm,
-        progressSummary: getProgressSummary(store),
-        successes: store.successHistory.filter((entry) => entry.alarmId === params.id),
-        failures: store.failureHistory.filter((entry) => entry.alarmId === params.id),
-        currentStreak: store.currentStreak,
-        longestStreak: store.longestStreak,
-      });
+      if (loadDetailsRequestRef.current === requestId) {
+        setState({
+          alarm,
+          progressSummary: getProgressSummary(store),
+          successes: store.successHistory.filter((entry) => entry.alarmId === checkpointId),
+          failures: store.failureHistory.filter((entry) => entry.alarmId === checkpointId),
+          currentStreak: store.currentStreak,
+          longestStreak: store.longestStreak,
+        });
+      }
     } finally {
-      setIsLoading(false);
+      if (loadDetailsRequestRef.current === requestId) {
+        loadedDetailsIdRef.current = checkpointId;
+        setIsLoading(false);
+      }
     }
   }, [params.id]);
 

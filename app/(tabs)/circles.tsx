@@ -24,7 +24,6 @@ import { EmptyState } from '@/components/ui/empty-state';
 import {
   FlowFooterButton,
   FlowIconBadge,
-  FlowListRow,
   FlowPanel,
   FlowSectionLabel,
   FlowTopBar,
@@ -61,6 +60,7 @@ export default function CirclesScreen() {
   const params = useLocalSearchParams<{ inviteCode?: string }>();
   const colors = getAppColors(useColorScheme());
   const { configured, isLoading, isProfileComplete, user } = useSocialSession();
+  const loadCirclesRequestRef = useRef(0);
   const [circles, setCircles] = useState<SocialCircleSummary[]>([]);
   const [circleName, setCircleName] = useState('');
   const [circleDescription, setCircleDescription] = useState('');
@@ -77,7 +77,10 @@ export default function CirclesScreen() {
   const copyFeedbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadCircles = useCallback(async () => {
-    if (!configured || !user || !isProfileComplete) {
+    const requestId = loadCirclesRequestRef.current + 1;
+    loadCirclesRequestRef.current = requestId;
+
+    if (!configured || !user?.id || !isProfileComplete) {
       setCircles([]);
       setIsRefreshing(false);
       setLoadError('');
@@ -89,13 +92,19 @@ export default function CirclesScreen() {
 
     try {
       const nextCircles = await listMySocialCircles();
-      setCircles(nextCircles);
+      if (loadCirclesRequestRef.current === requestId) {
+        setCircles(nextCircles);
+      }
     } catch (error) {
-      setLoadError(getErrorMessage(error, 'The latest circles could not be loaded.'));
+      if (loadCirclesRequestRef.current === requestId) {
+        setLoadError(getErrorMessage(error, 'The latest circles could not be loaded.'));
+      }
     } finally {
-      setIsRefreshing(false);
+      if (loadCirclesRequestRef.current === requestId) {
+        setIsRefreshing(false);
+      }
     }
-  }, [configured, isProfileComplete, user]);
+  }, [configured, isProfileComplete, user?.id]);
 
   useEffect(() => {
     if (typeof params.inviteCode === 'string' && params.inviteCode.trim()) {
@@ -172,6 +181,11 @@ export default function CirclesScreen() {
     Keyboard.dismiss();
     setIsCircleSheetVisible(false);
   }, []);
+
+  const openCircleSheet = useCallback(() => {
+    setCircleSheetMode(circles.length === 0 ? 'create' : 'join');
+    setIsCircleSheetVisible(true);
+  }, [circles.length]);
 
   const handleCreateCircle = async () => {
     if (!circleName.trim()) {
@@ -255,7 +269,6 @@ export default function CirclesScreen() {
     }
   };
 
-  const totalMembers = circles.reduce((count, circle) => count + circle.memberCount, 0);
   const circleSheetTranslateY = circleSheetAnimation.interpolate({
     inputRange: [0, 1],
     outputRange: [96, 0],
@@ -274,14 +287,16 @@ export default function CirclesScreen() {
           <View style={styles.createCtaFooter}>
             <FlowFooterButton
               label="Create or Join Circle"
-              onPress={() => {
-                setCircleSheetMode(circles.length === 0 ? 'create' : 'join');
-                setIsCircleSheetVisible(true);
-              }}
+              onPress={openCircleSheet}
             />
           </View>
         )
       }>
+      <FlowTopBar
+        subtitle="Private. Optional. Yours."
+        title="Circles"
+      />
+
       {!configured ? (
         <StateCard
           actionLabel="Open account"
@@ -292,11 +307,14 @@ export default function CirclesScreen() {
       ) : isLoading ? (
         <LoadingBlock description="Loading your account session for circles." title="Loading circles" />
       ) : !user ? (
-        <StateCard
+        <EmptyState
           actionLabel="Go to account"
           description="Sign in if you want durable invites and small-group accountability."
+          eyebrow="Circles"
+          icon="people-outline"
           onAction={() => router.push('/account')}
           title="Sign in first"
+          tone="primary"
         />
       ) : !isProfileComplete ? (
         <StateCard
@@ -307,29 +325,6 @@ export default function CirclesScreen() {
         />
       ) : (
         <>
-          <FlowTopBar
-            subtitle="Private. Optional. Yours."
-            title="Circles"
-          />
-
-          <FlowPanel style={styles.flowHeroPanel}>
-            <View style={styles.flowHeroRow}>
-              <FlowIconBadge icon="people" size="large" tone="primary" />
-              <View style={styles.flowHeroCopy}>
-                <Text style={[styles.flowKicker, { color: colors.primary }]}>TRUSTED SUPPORT</Text>
-                <Text style={[styles.flowHeroTitle, { color: colors.text }]}>Support, on your terms</Text>
-              </View>
-            </View>
-
-            <FlowListRow
-              description={circles.length === 0 ? 'No circles yet' : `${totalMembers} member${totalMembers === 1 ? '' : 's'} across your groups`}
-              leading={<FlowIconBadge icon="people-outline" size="small" tone="muted" />}
-              statusLabel={`${circles.length}`}
-              statusTone={circles.length > 0 ? 'success' : 'default'}
-              title="Your circles"
-            />
-          </FlowPanel>
-
           {loadError ? (
             <StateCard
               actionLabel="Retry"
@@ -342,7 +337,19 @@ export default function CirclesScreen() {
             />
           ) : null}
 
-          {!loadError ? (
+          {!loadError && circles.length === 0 ? (
+            <EmptyState
+              actionLabel="Create or join circle"
+              description="Start a small accountability circle or join one with an invite code when you want someone to notice your progress."
+              eyebrow="Circles"
+              icon="people-outline"
+              onAction={openCircleSheet}
+              title="No circles yet"
+              tone="primary"
+            />
+          ) : null}
+
+          {!loadError && circles.length > 0 ? (
             <FlowPanel>
               <View style={styles.compactSectionHeader}>
                 <FlowSectionLabel>YOUR CIRCLES</FlowSectionLabel>
@@ -351,56 +358,48 @@ export default function CirclesScreen() {
                 </View>
               </View>
 
-              {circles.length === 0 ? (
-                <EmptyState
-                  description="Use the button below to create or join one."
-                  title="No circles yet"
-                  variant="inline"
-                />
-              ) : (
-                <View style={styles.circleList}>
-                  {circles.map((circle, index) => {
-                    const isCopied = copiedCircleId === circle.id;
+              <View style={styles.circleList}>
+                {circles.map((circle, index) => {
+                  const isCopied = copiedCircleId === circle.id;
 
-                    return (
-                      <View key={circle.id} style={styles.circleFlowItem}>
-                        <View style={styles.circleHeader}>
-                          <FlowIconBadge icon="people-outline" size="small" tone="muted" />
-                          <View style={styles.circleCopy}>
-                            <Text style={[TextPresets.label, { color: colors.text }]}>{circle.name}</Text>
-                            <Text numberOfLines={1} style={[styles.circleDescription, { color: colors.textSoft }]}>
-                              {formatMemberCount(circle.memberCount)} · Code {circle.inviteCode}
-                            </Text>
-                          </View>
-                          <StatusPill label={circle.myRole === 'owner' ? 'Owner' : 'Member'} tone="primary" />
+                  return (
+                    <View key={circle.id} style={styles.circleFlowItem}>
+                      <View style={styles.circleHeader}>
+                        <FlowIconBadge icon="people-outline" size="small" tone="muted" />
+                        <View style={styles.circleCopy}>
+                          <Text style={[TextPresets.label, { color: colors.text }]}>{circle.name}</Text>
+                          <Text numberOfLines={1} style={[styles.circleDescription, { color: colors.textSoft }]}>
+                            {formatMemberCount(circle.memberCount)} · Code {circle.inviteCode}
+                          </Text>
                         </View>
-
-                        <View style={styles.circleActions}>
-                          <AppButton
-                            label="Share"
-                            onPress={() => {
-                              void handleShareCircle(circle);
-                            }}
-                            size="compact"
-                            style={styles.actionFill}
-                            variant="secondary"
-                          />
-                          <AppButton
-                            label={isCopied ? 'Copied' : 'Copy link'}
-                            onPress={() => {
-                              void handleCopyInviteLink(circle);
-                            }}
-                            size="compact"
-                            style={[styles.actionFill, isCopied ? styles.copiedButton : null]}
-                            variant={isCopied ? 'secondary' : 'ghost'}
-                          />
-                        </View>
-                        {index < circles.length - 1 ? <View style={[styles.circleDivider, { backgroundColor: colors.line }]} /> : null}
+                        <StatusPill label={circle.myRole === 'owner' ? 'Owner' : 'Member'} tone="primary" />
                       </View>
-                    );
-                  })}
-                </View>
-              )}
+
+                      <View style={styles.circleActions}>
+                        <AppButton
+                          label="Share"
+                          onPress={() => {
+                            void handleShareCircle(circle);
+                          }}
+                          size="compact"
+                          style={styles.actionFill}
+                          variant="secondary"
+                        />
+                        <AppButton
+                          label={isCopied ? 'Copied' : 'Copy link'}
+                          onPress={() => {
+                            void handleCopyInviteLink(circle);
+                          }}
+                          size="compact"
+                          style={[styles.actionFill, isCopied ? styles.copiedButton : null]}
+                          variant={isCopied ? 'secondary' : 'ghost'}
+                        />
+                      </View>
+                      {index < circles.length - 1 ? <View style={[styles.circleDivider, { backgroundColor: colors.line }]} /> : null}
+                    </View>
+                  );
+                })}
+              </View>
             </FlowPanel>
           ) : null}
         </>
@@ -547,29 +546,6 @@ const styles = StyleSheet.create({
   pressed: {
     opacity: 0.78,
     transform: [{ scale: 0.99 }],
-  },
-  flowHeroPanel: {
-    padding: 12,
-  },
-  flowHeroRow: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: Spacing.md,
-  },
-  flowHeroCopy: {
-    flex: 1,
-    gap: Spacing.xs,
-    minWidth: 0,
-  },
-  flowKicker: {
-    ...TextPresets.eyebrow,
-    fontSize: 10,
-    lineHeight: 13,
-  },
-  flowHeroTitle: {
-    ...TextPresets.title,
-    fontSize: 18,
-    lineHeight: 22,
   },
   compactSectionHeader: {
     alignItems: 'center',
