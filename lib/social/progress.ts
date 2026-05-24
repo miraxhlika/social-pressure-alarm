@@ -21,6 +21,12 @@ type AccountProgressState = Pick<
   'currentStreak' | 'longestStreak' | 'failureHistory' | 'successHistory'
 >;
 
+type CheckpointStreakState = {
+  currentStreakByAlarmId: Map<string, number>;
+  latestAlarmId: string | null;
+  longestStreak: number;
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
@@ -71,26 +77,38 @@ function mapFailureEntry(row: AlarmEventProgressRow): FailureHistoryEntry | null
   };
 }
 
+function buildCheckpointStreakState(rows: AlarmEventProgressRow[]): CheckpointStreakState {
+  const currentStreakByAlarmId = new Map<string, number>();
+  let latestAlarmId: string | null = null;
+  let longestStreak = 0;
+
+  for (const row of rows) {
+    const previousStreak = currentStreakByAlarmId.get(row.alarm_id) ?? 0;
+    const nextStreak = row.outcome === 'confirmed' ? previousStreak + 1 : 0;
+
+    currentStreakByAlarmId.set(row.alarm_id, nextStreak);
+    latestAlarmId = row.alarm_id;
+    longestStreak = Math.max(longestStreak, nextStreak);
+  }
+
+  return {
+    currentStreakByAlarmId,
+    latestAlarmId,
+    longestStreak,
+  };
+}
+
 export function buildAccountProgressState(rows: AlarmEventProgressRow[]): AccountProgressState {
   const chronologicalRows = [...rows].sort(
     (left, right) => new Date(left.resolved_at).getTime() - new Date(right.resolved_at).getTime()
   );
-  let currentStreak = 0;
-  let longestStreak = 0;
-
-  for (const row of chronologicalRows) {
-    if (row.outcome === 'confirmed') {
-      currentStreak += 1;
-      longestStreak = Math.max(longestStreak, currentStreak);
-      continue;
-    }
-
-    currentStreak = 0;
-  }
+  const streakState = buildCheckpointStreakState(chronologicalRows);
 
   return {
-    currentStreak,
-    longestStreak,
+    currentStreak: streakState.latestAlarmId
+      ? streakState.currentStreakByAlarmId.get(streakState.latestAlarmId) ?? 0
+      : 0,
+    longestStreak: streakState.longestStreak,
     successHistory: sortSuccessHistory(
       rows.map(mapSuccessEntry).filter((entry): entry is SuccessHistoryEntry => entry !== null)
     ),

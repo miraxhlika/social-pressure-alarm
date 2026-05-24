@@ -35,6 +35,7 @@ import {
 import { getUseCaseLabel } from '@/lib/checkpoint-templates';
 import { cancelAlarmNotificationAsync } from '@/lib/notifications';
 import { getProgressSummary, ProgressSummary } from '@/lib/progress';
+import { getCheckpointSocialDescription } from '@/lib/social/settings';
 import { Alarm, AlarmProofCodeType, FailureHistoryEntry, SuccessHistoryEntry } from '@/types/alarm';
 
 type CheckpointDetailsState = {
@@ -349,6 +350,11 @@ export default function CheckpointDetailsScreen() {
 
       <FlowPanel style={styles.placePanel}>
         <FlowInfoLine icon="location-outline" label="Place / Object" value={alarm.placeObject || alarm.label} />
+        <FlowInfoLine
+          icon="people-outline"
+          label="Accountability"
+          value={getCheckpointSocialDescription(alarm.socialSettings)}
+        />
       </FlowPanel>
 
       <View style={styles.streakGrid}>

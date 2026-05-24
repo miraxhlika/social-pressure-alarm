@@ -23,12 +23,15 @@ import {
 } from '@/lib/alarms';
 import { getCheckpointRoutineCopy } from '@/lib/checkpoint-templates';
 import { getProgressSummary, ProgressSummary } from '@/lib/progress';
+import { listMySocialCircles } from '@/lib/social/circles';
+import { findCircleName, getOutcomeShareConfirmation } from '@/lib/social/settings';
 import { Alarm, FailureHistoryEntry } from '@/types/alarm';
 
 type MissedScreenState = {
   alarm: Alarm | null;
   latestFailure: FailureHistoryEntry | null;
   progressSummary: ProgressSummary | null;
+  shareConfirmation: string;
 };
 
 type RecoveryAction = 'restart' | 'adjust' | 'tomorrow';
@@ -64,6 +67,7 @@ export default function MissedScreen() {
     alarm: null,
     latestFailure: null,
     progressSummary: null,
+    shareConfirmation: 'Private. Not shared.',
   });
 
   const loadScreen = useCallback(async () => {
@@ -74,7 +78,7 @@ export default function MissedScreen() {
 
     if (!alarmId) {
       loadedMissedAlarmIdRef.current = null;
-      setState({ alarm: null, latestFailure: null, progressSummary: null });
+      setState({ alarm: null, latestFailure: null, progressSummary: null, shareConfirmation: 'Private. Not shared.' });
       setIsLoading(false);
       return;
     }
@@ -87,12 +91,15 @@ export default function MissedScreen() {
       await hydrateAlarmRuntimeForCurrentUser().catch(() => null);
       const [store, alarm] = await Promise.all([readAlarmStore(), getAlarmById(alarmId)]);
       const latestFailure = store.failureHistory.find((entry) => entry.alarmId === alarmId) ?? null;
+      const circles = alarm?.socialSettings?.circleId ? await listMySocialCircles().catch(() => []) : [];
+      const circleName = findCircleName(circles, alarm?.socialSettings?.circleId);
 
       if (loadMissedRequestRef.current === requestId) {
         setState({
           alarm,
           latestFailure,
           progressSummary: getProgressSummary(store),
+          shareConfirmation: getOutcomeShareConfirmation(alarm?.socialSettings, 'missed', circleName),
         });
       }
     } finally {
@@ -289,6 +296,10 @@ export default function MissedScreen() {
         <Text style={[styles.contextCopy, { color: colors.muted }]}>
           {state.alarm.label} missed {missedAtLabel}. Protect the next {routineCopy}.
         </Text>
+        <View style={styles.shareConfirmationRow}>
+          <Ionicons color={colors.muted} name="people-outline" size={15} />
+          <Text style={[styles.footnoteText, { color: colors.textSoft }]}>{state.shareConfirmation}</Text>
+        </View>
       </View>
     </AppScreen>
   );
@@ -583,6 +594,12 @@ const styles = StyleSheet.create({
     gap: 6,
     justifyContent: 'center',
     paddingTop: 6,
+  },
+  shareConfirmationRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 6,
+    justifyContent: 'center',
   },
   footnoteText: {
     ...TextPresets.body,

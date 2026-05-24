@@ -40,8 +40,11 @@ import {
   joinSocialCircleWithInviteCode,
   listMySocialCircles,
 } from '@/lib/social/circles';
-import { SocialCircleSummary } from '@/lib/social/types';
+import { listVisibleSocialFeed } from '@/lib/social/feed';
+import { getSocialQueueSummary } from '@/lib/social/queue';
+import { SocialCircleSummary, SocialFeedItem } from '@/lib/social/types';
 import { useSocialSession } from '@/providers/social-session-provider';
+import { QueuedAlarmEvent } from '@/types/alarm';
 
 function getErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
@@ -49,6 +52,110 @@ function getErrorMessage(error: unknown, fallback: string) {
 
 function formatMemberCount(count: number) {
   return `${count} member${count === 1 ? '' : 's'}`;
+}
+
+type CircleActivityItem = {
+  id: string;
+  circleId: string;
+  circleName: string;
+  context: string;
+  isPending: boolean;
+  outcome: 'confirmed' | 'missed';
+  person: string;
+  checkpointLabel: string;
+  resolvedAt: string;
+};
+
+function formatActivityTime(timestamp: string) {
+  const date = new Date(timestamp);
+
+  if (Number.isNaN(date.getTime())) {
+    return 'Just now';
+  }
+
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
+
+  if (elapsedSeconds < 60) {
+    return 'Just now';
+  }
+
+  const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+
+  if (elapsedMinutes < 60) {
+    return `${elapsedMinutes}m ago`;
+  }
+
+  const elapsedHours = Math.floor(elapsedMinutes / 60);
+
+  if (elapsedHours < 24) {
+    return `${elapsedHours}h ago`;
+  }
+
+  return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+function formatFeedContext(item: Pick<SocialFeedItem, 'outcome' | 'sharePayload'>) {
+  const streakCopy = `${item.sharePayload.currentStreak}-clear streak`;
+
+  if (item.outcome === 'confirmed') {
+    const scanCopy =
+      typeof item.sharePayload.timeToScanSeconds === 'number'
+        ? `${item.sharePayload.timeToScanSeconds}s to clear`
+        : 'Cleared on time';
+
+    return `${scanCopy} · ${streakCopy}`;
+  }
+
+  return item.sharePayload.currentStreak > 0
+    ? `${streakCopy} before this miss`
+    : 'Miss recorded';
+}
+
+function shouldShowQueuedEvent(event: QueuedAlarmEvent) {
+  return Boolean(
+    event.socialSettings?.circleId &&
+      ((event.outcome === 'confirmed' && event.socialSettings.shareSuccesses) ||
+        (event.outcome === 'missed' && event.socialSettings.shareMisses))
+  );
+}
+
+function buildCircleActivityFeed(
+  remoteItems: SocialFeedItem[],
+  queuedEvents: QueuedAlarmEvent[],
+  circles: SocialCircleSummary[]
+) {
+  const circleNameById = new Map(circles.map((circle) => [circle.id, circle.name]));
+  const queuedItems: CircleActivityItem[] = queuedEvents
+    .filter(shouldShowQueuedEvent)
+    .map((event) => ({
+      id: event.id,
+      circleId: event.socialSettings?.circleId ?? '',
+      circleName: circleNameById.get(event.socialSettings?.circleId ?? '') ?? 'Accountability circle',
+      context: formatFeedContext(event),
+      isPending: true,
+      outcome: event.outcome,
+      person: 'You',
+      checkpointLabel: event.alarmLabel,
+      resolvedAt: event.resolvedAt,
+    }));
+  const queuedIds = new Set(queuedItems.map((item) => item.id));
+  const deliveredItems: CircleActivityItem[] = remoteItems
+    .filter((item) => !queuedIds.has(item.id))
+    .map((item) => ({
+      id: item.id,
+      circleId: item.circleId,
+      circleName: item.circleName,
+      context: formatFeedContext(item),
+      isPending: false,
+      outcome: item.outcome,
+      person: item.isOwnEvent ? 'You' : item.actorDisplayName,
+      checkpointLabel: item.alarmLabel,
+      resolvedAt: item.resolvedAt,
+    }));
+
+  return [...queuedItems, ...deliveredItems]
+    .sort((left, right) => new Date(right.resolvedAt).getTime() - new Date(left.resolvedAt).getTime())
+    .slice(0, 8);
 }
 
 const COPY_FEEDBACK_MS = 2200;
@@ -62,9 +169,11 @@ export default function CirclesScreen() {
   const { configured, isLoading, isProfileComplete, user } = useSocialSession();
   const loadCirclesRequestRef = useRef(0);
   const [circles, setCircles] = useState<SocialCircleSummary[]>([]);
+  const [activityItems, setActivityItems] = useState<CircleActivityItem[]>([]);
   const [circleName, setCircleName] = useState('');
   const [circleDescription, setCircleDescription] = useState('');
   const [inviteCode, setInviteCode] = useState('');
+  const [hasLoadedCircles, setHasLoadedCircles] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [loadError, setLoadError] = useState('');
@@ -82,6 +191,8 @@ export default function CirclesScreen() {
 
     if (!configured || !user?.id || !isProfileComplete) {
       setCircles([]);
+      setActivityItems([]);
+      setHasLoadedCircles(false);
       setIsRefreshing(false);
       setLoadError('');
       return;
@@ -92,12 +203,20 @@ export default function CirclesScreen() {
 
     try {
       const nextCircles = await listMySocialCircles();
+      const [nextFeed, queueSummary] = await Promise.all([
+        listVisibleSocialFeed({ limitCount: 12 }).catch(() => []),
+        getSocialQueueSummary().catch(() => ({ queuedEvents: [] })),
+      ]);
+
       if (loadCirclesRequestRef.current === requestId) {
         setCircles(nextCircles);
+        setActivityItems(buildCircleActivityFeed(nextFeed, queueSummary.queuedEvents, nextCircles));
+        setHasLoadedCircles(true);
       }
     } catch (error) {
       if (loadCirclesRequestRef.current === requestId) {
         setLoadError(getErrorMessage(error, 'The latest circles could not be loaded.'));
+        setHasLoadedCircles(true);
       }
     } finally {
       if (loadCirclesRequestRef.current === requestId) {
@@ -203,7 +322,11 @@ export default function CirclesScreen() {
 
       setCircleName('');
       setCircleDescription('');
-      setCircles((currentCircles) => [...currentCircles, createdCircle]);
+      setCircles((currentCircles) => {
+        const withoutCreatedCircle = currentCircles.filter((circle) => circle.id !== createdCircle.id);
+        return [...withoutCreatedCircle, createdCircle].sort((left, right) => left.name.localeCompare(right.name));
+      });
+      await loadCircles();
       closeCircleSheet();
     } catch (error) {
       Alert.alert('Unable to create circle', getErrorMessage(error, 'The circle could not be created right now.'));
@@ -230,6 +353,7 @@ export default function CirclesScreen() {
         const withoutJoinedCircle = currentCircles.filter((circle) => circle.id !== joinedCircle.id);
         return [...withoutJoinedCircle, joinedCircle].sort((left, right) => left.name.localeCompare(right.name));
       });
+      await loadCircles();
       closeCircleSheet();
     } catch (error) {
       Alert.alert('Unable to join circle', getErrorMessage(error, 'The invite code could not be used right now.'));
@@ -337,7 +461,11 @@ export default function CirclesScreen() {
             />
           ) : null}
 
-          {!loadError && circles.length === 0 ? (
+          {!loadError && !hasLoadedCircles && isRefreshing ? (
+            <LoadingBlock description="Pulling in your circles and recent activity." title="Loading circles" />
+          ) : null}
+
+          {!loadError && hasLoadedCircles && circles.length === 0 ? (
             <EmptyState
               actionLabel="Create or join circle"
               description="Start a small accountability circle or join one with an invite code when you want someone to notice your progress."
@@ -400,6 +528,49 @@ export default function CirclesScreen() {
                   );
                 })}
               </View>
+            </FlowPanel>
+          ) : null}
+
+          {!loadError && circles.length > 0 ? (
+            <FlowPanel>
+              <View style={styles.compactSectionHeader}>
+                <FlowSectionLabel>ACTIVITY</FlowSectionLabel>
+                {isRefreshing ? <ActivityIndicator color={colors.primary} /> : null}
+              </View>
+
+              {isRefreshing && activityItems.length === 0 ? (
+                <LoadingBlock
+                  description="Checking for shared clears and misses."
+                  title="Loading activity"
+                  variant="inline"
+                />
+              ) : activityItems.length > 0 ? (
+                <View style={styles.activityList}>
+                  {activityItems.map((item) => (
+                    <View key={item.id} style={styles.activityItem}>
+                      <FlowIconBadge
+                        icon={item.outcome === 'confirmed' ? 'checkmark' : 'alert'}
+                        size="small"
+                        tone={item.outcome === 'confirmed' ? 'success' : 'danger'}
+                      />
+                      <View style={styles.activityCopy}>
+                        <Text style={[styles.activityTitle, { color: colors.text }]}>
+                          {item.person} {item.outcome === 'confirmed' ? 'cleared' : 'missed'} {item.checkpointLabel}
+                        </Text>
+                        <Text style={[styles.activityMeta, { color: colors.textSoft }]}>
+                          {item.circleName} · {formatActivityTime(item.resolvedAt)}
+                          {item.isPending ? ' · Pending sync' : ''}
+                        </Text>
+                        <Text style={[styles.activityContext, { color: colors.muted }]}>{item.context}</Text>
+                      </View>
+                    </View>
+                  ))}
+                </View>
+              ) : (
+                <Text style={[TextPresets.body, styles.emptyActivityText, { color: colors.textSoft }]}>
+                  Shared clears and misses will appear here after a circle checkpoint runs.
+                </Text>
+              )}
             </FlowPanel>
           ) : null}
         </>
@@ -603,6 +774,38 @@ const styles = StyleSheet.create({
   },
   copiedButton: {
     borderColor: 'transparent',
+  },
+  activityList: {
+    gap: Spacing.md,
+  },
+  activityItem: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    gap: Spacing.sm,
+  },
+  activityCopy: {
+    flex: 1,
+    gap: 2,
+    minWidth: 0,
+  },
+  activityTitle: {
+    ...TextPresets.label,
+    fontSize: 14,
+    lineHeight: 19,
+  },
+  activityMeta: {
+    ...TextPresets.body,
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  activityContext: {
+    ...TextPresets.body,
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  emptyActivityText: {
+    fontSize: 13,
+    lineHeight: 19,
   },
   sheetOverlay: {
     flex: 1,
