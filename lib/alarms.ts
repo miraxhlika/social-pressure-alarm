@@ -70,6 +70,12 @@ function createDefaultRuntimeStore(): AlarmRuntimeStore {
   };
 }
 
+type AlarmAttemptHistoryEntry = {
+  alarmId: string;
+  outcome: AlarmOutcome;
+  resolvedAt: string;
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
@@ -100,6 +106,50 @@ function getRequiredIsoString(value: unknown, fallback: string) {
 
 function getRepeatSchedule(value: unknown): RepeatSchedule {
   return value === 'daily' || value === 'weekdays' ? value : 'once';
+}
+
+function getAlarmAttemptHistory(successHistory: SuccessHistoryEntry[], failureHistory: FailureHistoryEntry[]) {
+  const successAttempts = successHistory.map<AlarmAttemptHistoryEntry>((entry) => ({
+    alarmId: entry.alarmId,
+    outcome: 'confirmed',
+    resolvedAt: entry.confirmedAt,
+  }));
+  const failureAttempts = failureHistory.map<AlarmAttemptHistoryEntry>((entry) => ({
+    alarmId: entry.alarmId,
+    outcome: 'missed',
+    resolvedAt: entry.failedAt,
+  }));
+
+  return [...successAttempts, ...failureAttempts].sort(
+    (left, right) => new Date(left.resolvedAt).getTime() - new Date(right.resolvedAt).getTime()
+  );
+}
+
+function getCheckpointStreakStats(
+  successHistory: SuccessHistoryEntry[],
+  failureHistory: FailureHistoryEntry[],
+  activeAlarmId: string
+) {
+  const currentStreakByAlarmId = new Map<string, number>();
+  let activeAlarmCurrentStreak = 0;
+  let longestStreak = 0;
+
+  for (const attempt of getAlarmAttemptHistory(successHistory, failureHistory)) {
+    const previousStreak = currentStreakByAlarmId.get(attempt.alarmId) ?? 0;
+    const nextStreak = attempt.outcome === 'confirmed' ? previousStreak + 1 : 0;
+
+    currentStreakByAlarmId.set(attempt.alarmId, nextStreak);
+    longestStreak = Math.max(longestStreak, nextStreak);
+
+    if (attempt.alarmId === activeAlarmId) {
+      activeAlarmCurrentStreak = nextStreak;
+    }
+  }
+
+  return {
+    currentStreak: activeAlarmCurrentStreak,
+    longestStreak,
+  };
 }
 
 function normalizeSocialSettings(value: unknown): AlarmSocialSettings | undefined {
@@ -974,7 +1024,6 @@ export async function resolveAlarm(id: string, outcome: AlarmOutcome) {
   const resolvedAt = new Date().toISOString();
   const resolvedTimestamp = new Date(resolvedAt).getTime();
   const scheduledTimestamp = alarm.scheduledFor ? new Date(alarm.scheduledFor).getTime() : resolvedTimestamp;
-  const nextCurrentStreak = outcome === 'confirmed' ? store.currentStreak + 1 : 0;
   const failureEntry: FailureHistoryEntry | null =
     outcome === 'missed'
       ? {
@@ -998,6 +1047,13 @@ export async function resolveAlarm(id: string, outcome: AlarmOutcome) {
           gracePeriodSeconds: alarm.gracePeriodSeconds,
         }
       : null;
+  const nextFailureHistory = failureEntry
+    ? sortFailureHistory([failureEntry, ...store.failureHistory])
+    : store.failureHistory;
+  const nextSuccessHistory = successEntry
+    ? sortSuccessHistory([successEntry, ...store.successHistory])
+    : store.successHistory;
+  const checkpointStreakStats = getCheckpointStreakStats(nextSuccessHistory, nextFailureHistory, alarm.id);
 
   const nextStore: AlarmStore = {
     ...store,
@@ -1006,14 +1062,10 @@ export async function resolveAlarm(id: string, outcome: AlarmOutcome) {
         candidate.id === updatedAlarm.id ? stripAlarmRuntimeMetadata(updatedAlarm) : candidate
       )
     ),
-    currentStreak: nextCurrentStreak,
-    longestStreak: outcome === 'confirmed' ? Math.max(store.longestStreak, nextCurrentStreak) : store.longestStreak,
-    failureHistory: failureEntry
-      ? sortFailureHistory([failureEntry, ...store.failureHistory])
-      : store.failureHistory,
-    successHistory: successEntry
-      ? sortSuccessHistory([successEntry, ...store.successHistory])
-      : store.successHistory,
+    currentStreak: checkpointStreakStats.currentStreak,
+    longestStreak: Math.max(store.longestStreak, checkpointStreakStats.longestStreak),
+    failureHistory: nextFailureHistory,
+    successHistory: nextSuccessHistory,
   };
   let nextRuntimeStore: AlarmRuntimeStore = {
     ...runtimeStore,

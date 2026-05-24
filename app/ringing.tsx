@@ -1,5 +1,5 @@
 import { type ComponentProps, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Animated, Easing, Linking, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, Animated, Easing, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { BarcodeScanningResult, CameraView, useCameraPermissions } from 'expo-camera';
 import * as Haptics from 'expo-haptics';
@@ -101,7 +101,6 @@ export default function RingingScreen() {
   const colors = getAppColors(colorScheme);
   const urgentBackground = '#0D1726';
   const urgentPanel = '#111C2C';
-  const urgentBorder = '#334155';
   const urgentText = '#F8FAFC';
   const urgentTextSoft = '#B7C1CF';
   const [alarm, setAlarm] = useState<Alarm | null>(null);
@@ -110,8 +109,6 @@ export default function RingingScreen() {
   const [scanError, setScanError] = useState('');
   const [scanEnabled, setScanEnabled] = useState(true);
   const [isScannerVisible, setIsScannerVisible] = useState(false);
-  const [isManualEntryVisible, setIsManualEntryVisible] = useState(false);
-  const [manualCode, setManualCode] = useState('');
   const [isTorchEnabled, setIsTorchEnabled] = useState(false);
   const [permission, requestPermission] = useCameraPermissions();
   const hasResolvedRef = useRef(false);
@@ -183,8 +180,6 @@ export default function RingingScreen() {
     setScanEnabled(true);
     setScanError('');
     setIsScannerVisible(false);
-    setIsManualEntryVisible(false);
-    setManualCode('');
     setIsTorchEnabled(false);
   }, [alarm?.id]);
 
@@ -394,35 +389,11 @@ export default function RingingScreen() {
     lastScannedPayloadRef.current = null;
     setIsScannerVisible(true);
     setScanEnabled(true);
-    setIsManualEntryVisible(false);
   }, []);
 
   const handleToggleTorch = useCallback(() => {
     setIsTorchEnabled((currentValue) => !currentValue);
   }, []);
-
-  const handleManualSubmit = useCallback(async () => {
-    if (!alarm || isSubmitting || hasResolvedRef.current) {
-      return;
-    }
-
-    const trimmedManualCode = manualCode.trim();
-
-    if (!trimmedManualCode) {
-      setScanError('Enter the exact proof code payload before submitting.');
-      await triggerHaptic('warning');
-      return;
-    }
-
-    if (trimmedManualCode !== alarm.expectedQrPayload) {
-      setScanError(liveCopy.wrongCodeDescription);
-      setManualCode('');
-      await triggerHaptic('error');
-      return;
-    }
-
-    await handleScanSuccess();
-  }, [alarm, handleScanSuccess, isSubmitting, liveCopy.wrongCodeDescription, manualCode]);
 
   const handleBarcodeScanned = useCallback(
     async ({ data }: BarcodeScanningResult) => {
@@ -443,7 +414,6 @@ export default function RingingScreen() {
 
       if (data !== alarm.expectedQrPayload) {
         setScanError(liveCopy.wrongCodeDescription);
-        setIsManualEntryVisible(false);
         await triggerHaptic('error');
 
         Animated.sequence([
@@ -657,63 +627,6 @@ export default function RingingScreen() {
                 <Text style={styles.activePrimaryButtonText}>Scan proof code</Text>
               </Pressable>
 
-              {isManualEntryVisible ? (
-                <View style={[styles.manualPanel, { backgroundColor: '#101821', borderColor: urgentBorder }]}>
-                  <Text style={[styles.manualTitle, { color: urgentText }]}>Enter code manually</Text>
-                  <Text style={[styles.manualCopy, { color: urgentTextSoft }]}>
-                    Type the exact payload saved for this checkpoint.
-                  </Text>
-                  <TextInput
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    editable={!isSubmitting}
-                    onChangeText={setManualCode}
-                    placeholder="Exact proof payload"
-                    placeholderTextColor="#758190"
-                    style={[styles.manualInput, { borderColor: urgentBorder, color: urgentText }]}
-                    value={manualCode}
-                  />
-                  {scanError ? <Text style={[styles.manualError, { color: colors.danger }]}>{scanError}</Text> : null}
-                  <View style={styles.manualActions}>
-                    <AppButton
-                      disabled={isSubmitting}
-                      label="Submit code"
-                      onPress={() => {
-                        void handleManualSubmit();
-                      }}
-                      size="compact"
-                      style={styles.manualAction}
-                      textStyle={styles.primaryButtonText}
-                    />
-                    <AppButton
-                      label="Cancel"
-                      onPress={() => {
-                        setIsManualEntryVisible(false);
-                        setManualCode('');
-                        setScanError('');
-                      }}
-                      size="compact"
-                      style={styles.manualAction}
-                      variant="ghost"
-                    />
-                  </View>
-                </View>
-              ) : (
-                <Pressable
-                  accessibilityRole="button"
-                  disabled={isSubmitting}
-                  onPress={() => {
-                    setIsManualEntryVisible(true);
-                    setScanError('');
-                  }}
-                  style={({ pressed }) => [
-                    styles.activeSecondaryButton,
-                    { borderColor: '#3D4B5F', opacity: isSubmitting ? 0.55 : 1 },
-                    pressed && styles.pressed,
-                  ]}>
-                  <Text style={[styles.activeSecondaryButtonText, { color: urgentText }]}>Enter code manually</Text>
-                </Pressable>
-              )}
             </View>
 
             <View style={styles.activeLockRow}>
@@ -1024,19 +937,6 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '800',
     lineHeight: 20,
-  },
-  activeSecondaryButton: {
-    alignItems: 'center',
-    borderRadius: Radius.md,
-    borderWidth: 1,
-    justifyContent: 'center',
-    minHeight: 52,
-  },
-  activeSecondaryButtonText: {
-    fontFamily: Fonts.rounded,
-    fontSize: 15,
-    fontWeight: '700',
-    lineHeight: 19,
   },
   activeLockRow: {
     alignItems: 'center',
@@ -1504,43 +1404,6 @@ const styles = StyleSheet.create({
   requiredValue: {
     ...TextPresets.label,
     flex: 1,
-  },
-  manualPanel: {
-    borderRadius: Radius.md,
-    borderWidth: 1,
-    gap: Spacing.sm,
-    padding: Spacing.md,
-  },
-  manualTitle: {
-    ...TextPresets.label,
-  },
-  manualCopy: {
-    ...TextPresets.body,
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  manualError: {
-    ...TextPresets.body,
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  manualInput: {
-    borderRadius: Radius.md,
-    borderWidth: 1,
-    fontFamily: Fonts.mono,
-    fontSize: 14,
-    minHeight: 46,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
-  },
-  manualActions: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.sm,
-  },
-  manualAction: {
-    flexBasis: 128,
-    flexGrow: 1,
   },
   errorOverlay: {
     ...StyleSheet.absoluteFillObject,

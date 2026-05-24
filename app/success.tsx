@@ -12,6 +12,8 @@ import { useColorScheme } from '@/hooks/use-color-scheme';
 import { formatAlarmTime, readAlarmStore } from '@/lib/alarms';
 import { getPrimaryAlarm } from '@/lib/dashboard';
 import { ProgressSummary, getProgressSummary } from '@/lib/progress';
+import { listMySocialCircles } from '@/lib/social/circles';
+import { findCircleName, getOutcomeShareConfirmation } from '@/lib/social/settings';
 import { Alarm, FailureHistoryEntry, SuccessHistoryEntry } from '@/types/alarm';
 
 type SuccessState = {
@@ -22,6 +24,7 @@ type SuccessState = {
   nextAlarm: Alarm | null;
   summary: ProgressSummary;
   successEntry: SuccessHistoryEntry | null;
+  shareConfirmation: string;
   totalToday: number;
 };
 
@@ -141,6 +144,8 @@ export default function SuccessScreen() {
           ? null
           : getLatestSuccessForAlarm(store.successHistory, params.alarmId) ?? summary.latestSuccess;
         const todayProgress = getTodayProgress(store.alarms, store.successHistory, store.failureHistory);
+        const circles = alarm?.socialSettings?.circleId ? await listMySocialCircles().catch(() => []) : [];
+        const circleName = findCircleName(circles, alarm?.socialSettings?.circleId);
 
         setSuccessState({
           alarm,
@@ -150,6 +155,7 @@ export default function SuccessScreen() {
           nextAlarm: getPrimaryAlarm(store.alarms),
           summary,
           successEntry,
+          shareConfirmation: getOutcomeShareConfirmation(alarm?.socialSettings, 'confirmed', circleName),
           totalToday: todayProgress.totalToday,
         });
       } finally {
@@ -311,6 +317,12 @@ export default function SuccessScreen() {
             label="Streak"
             value={isSetupComplete ? 'Starts after first clear' : streakValue}
           />
+          {!isSetupComplete ? (
+            <>
+              <View style={styles.summaryDivider} />
+              <SummaryRow icon="people-outline" label="Sharing" value={successState.shareConfirmation} />
+            </>
+          ) : null}
         </View>
 
         <View style={styles.progressCard}>

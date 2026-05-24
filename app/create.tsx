@@ -33,8 +33,13 @@ import {
   scheduleAlarmNotificationAsync,
 } from '@/lib/notifications';
 import { markOnboardingCompleted } from '@/lib/onboarding';
+import { listMySocialCircles } from '@/lib/social/circles';
+import { findCircleName, getSharedOutcomeLabel } from '@/lib/social/settings';
+import { SocialCircleSummary } from '@/lib/social/types';
+import { useSocialSession } from '@/providers/social-session-provider';
 import {
   Alarm,
+  AlarmSocialSettings,
   AlarmProofCodeType,
   CheckpointPreset,
   RepeatSchedule,
@@ -64,9 +69,10 @@ const PROOF_CODE_BARCODE_TYPES: CameraBarcodeTypes = [
 
 const SCAN_DEDUPE_WINDOW_MS = 3000;
 
-type LinkMode = 'generateQr' | 'scanQr' | 'scanBarcode' | 'manual' | 'saved';
+type LinkMode = 'scanQr' | 'scanBarcode' | 'saved';
 type ScannerPurpose = 'link' | 'test';
-type ExpandedField = 'name' | 'category' | 'schedule' | 'window' | 'recurrence' | 'place' | 'notes' | null;
+type ExpandedField = 'name' | 'category' | 'schedule' | 'window' | 'recurrence' | 'accountability' | 'place' | 'notes' | null;
+type SocialMode = 'private' | 'circle';
 
 type FormErrors = {
   label?: string;
@@ -128,12 +134,8 @@ function getRepeatLabel(repeatSchedule: RepeatSchedule) {
 
 function getLinkModeLabel(linkMode: LinkMode) {
   switch (linkMode) {
-    case 'generateQr':
-      return 'Generated QR';
     case 'scanBarcode':
       return 'Scanned barcode';
-    case 'manual':
-      return 'Manual entry';
     case 'saved':
       return 'Saved code';
     default:
@@ -149,16 +151,30 @@ function getLinkModeFromProofCodeType(proofCodeType?: AlarmProofCodeType): LinkM
   return proofCodeType === 'barcode' ? 'scanBarcode' : 'scanQr';
 }
 
-function createGeneratedProofPayload(label: string) {
-  const seed = label
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 32);
-  const randomSuffix = Math.random().toString(36).slice(2, 10);
+function getSocialSettingsMode(settings?: AlarmSocialSettings): SocialMode {
+  return settings?.circleId && (settings.shareMisses || settings.shareSuccesses) ? 'circle' : 'private';
+}
 
-  return `spa:${seed || 'checkpoint'}:${Date.now().toString(36)}:${randomSuffix}`;
+function buildAlarmSocialSettings({
+  selectedCircleId,
+  shareMisses,
+  shareSuccesses,
+  socialMode,
+}: {
+  selectedCircleId: string | null;
+  shareMisses: boolean;
+  shareSuccesses: boolean;
+  socialMode: SocialMode;
+}): AlarmSocialSettings | undefined {
+  if (socialMode !== 'circle' || !selectedCircleId) {
+    return undefined;
+  }
+
+  return {
+    circleId: selectedCircleId,
+    shareMisses,
+    shareSuccesses,
+  };
 }
 
 function buildSavedCodeId(payload: string) {
@@ -189,6 +205,12 @@ export default function CreateAlarmScreen() {
     returnTo?: string;
   }>();
   const colors = getAppColors(useColorScheme());
+  const {
+    configured: isSocialConfigured,
+    isLoading: isSocialSessionLoading,
+    isProfileComplete,
+    user,
+  } = useSocialSession();
   const [time, setTime] = useState(createInitialTime);
   const [label, setLabel] = useState('');
   const [useCaseType, setUseCaseType] = useState<UseCaseType>('custom');
@@ -210,6 +232,13 @@ export default function CreateAlarmScreen() {
   const [sourceAlarm, setSourceAlarm] = useState<Alarm | null>(null);
   const [savedCodePresets, setSavedCodePresets] = useState<CheckpointPreset[]>([]);
   const [selectedSavedCodePresetId, setSelectedSavedCodePresetId] = useState<string | null>(null);
+  const [socialMode, setSocialMode] = useState<SocialMode>('private');
+  const [selectedCircleId, setSelectedCircleId] = useState<string | null>(null);
+  const [shareSuccesses, setShareSuccesses] = useState(false);
+  const [shareMisses, setShareMisses] = useState(true);
+  const [socialCircles, setSocialCircles] = useState<SocialCircleSummary[]>([]);
+  const [isLoadingSocialCircles, setIsLoadingSocialCircles] = useState(false);
+  const [socialCirclesError, setSocialCirclesError] = useState('');
   const [errors, setErrors] = useState<FormErrors>({});
   const [permission, requestPermission] = useCameraPermissions();
   const scrollViewRef = useRef<ScrollView | null>(null);
@@ -253,6 +282,15 @@ export default function CreateAlarmScreen() {
   const cameraFallbackTitle = permission?.canAskAgain === false ? 'Camera is blocked' : 'Camera is not ready';
   const cameraFallbackActionLabel = permission?.canAskAgain === false ? 'Open settings' : 'Allow camera';
 
+  const applySocialSettingsToForm = useCallback((settings?: AlarmSocialSettings) => {
+    const mode = getSocialSettingsMode(settings);
+
+    setSocialMode(mode);
+    setSelectedCircleId(mode === 'circle' ? settings?.circleId ?? null : null);
+    setShareSuccesses(mode === 'circle' ? Boolean(settings?.shareSuccesses) : false);
+    setShareMisses(mode === 'circle' ? Boolean(settings?.shareMisses) : true);
+  }, []);
+
   const handleTimeChange = (_event: DateTimePickerEvent, selectedDate?: Date) => {
     if (!selectedDate) {
       return;
@@ -260,6 +298,50 @@ export default function CreateAlarmScreen() {
 
     setTime(selectedDate);
   };
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadSocialCircles = async () => {
+      if (!isSocialConfigured || !user?.id || !isProfileComplete) {
+        setSocialCircles([]);
+        setIsLoadingSocialCircles(false);
+        setSocialCirclesError('');
+        return;
+      }
+
+      setIsLoadingSocialCircles(true);
+      setSocialCirclesError('');
+
+      try {
+        const nextCircles = await listMySocialCircles();
+
+        if (isMounted) {
+          setSocialCircles(nextCircles);
+        }
+      } catch (error) {
+        if (isMounted) {
+          setSocialCirclesError(error instanceof Error ? error.message : 'Circles could not be loaded.');
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoadingSocialCircles(false);
+        }
+      }
+    };
+
+    void loadSocialCircles();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isProfileComplete, isSocialConfigured, user?.id]);
+
+  useEffect(() => {
+    if (socialMode === 'circle' && !selectedCircleId && socialCircles.length > 0) {
+      setSelectedCircleId(socialCircles[0].id);
+    }
+  }, [selectedCircleId, socialCircles, socialMode]);
 
   useEffect(() => {
     const loadFormData = async () => {
@@ -283,6 +365,7 @@ export default function CreateAlarmScreen() {
         setProofCodeCapturedAt(null);
         setProofCodeVerifiedAt(null);
         setSelectedSavedCodePresetId(null);
+        applySocialSettingsToForm(undefined);
         setRepeatSchedule(normalizeRepeatScheduleParam(params.prefillRepeatSchedule, prefilledTemplate.repeatSchedule));
         setGracePeriodSeconds(
           Number.isFinite(prefilledGracePeriod) && prefilledGracePeriod >= 15
@@ -305,6 +388,7 @@ export default function CreateAlarmScreen() {
         setProofCodeCapturedAt(null);
         setProofCodeVerifiedAt(null);
         setSelectedSavedCodePresetId(null);
+        applySocialSettingsToForm(undefined);
         return;
       }
 
@@ -322,6 +406,7 @@ export default function CreateAlarmScreen() {
       setProofCodeCapturedAt(alarm.createdAt);
       setProofCodeVerifiedAt(null);
       setSelectedSavedCodePresetId(null);
+      applySocialSettingsToForm(alarm.socialSettings);
       setRepeatSchedule(alarm.repeatSchedule);
       setGracePeriodSeconds(String(alarm.gracePeriodSeconds));
     };
@@ -330,6 +415,7 @@ export default function CreateAlarmScreen() {
   }, [
     isEditMode,
     isReuseMode,
+    applySocialSettingsToForm,
     params.alarmId,
     params.prefillGracePeriodSeconds,
     params.prefillLabel,
@@ -445,31 +531,13 @@ export default function CreateAlarmScreen() {
     handleOpenLinkCodeStep();
   }, [handleOpenLinkCodeStep, validateDetailsStep]);
 
-  const handleGenerateProofCode = useCallback(() => {
-    const generatedPayload = createGeneratedProofPayload(label || selectedTemplate.defaultLabel);
-
-    setLinkMode('generateQr');
-    setExpectedQrPayload(generatedPayload);
-    setProofCodeCapturedAt(new Date().toISOString());
-    setProofCodeVerifiedAt(null);
-    setIsScannerVisible(false);
-    setScannerPurpose('link');
-    setSelectedSavedCodePresetId(null);
-    lastScannedPayloadRef.current = null;
-    setScannerMessage('Generated a unique proof payload. Place the matching QR at the checkpoint.');
-    setErrors((currentErrors) => ({
-      ...currentErrors,
-      expectedQrPayload: undefined,
-    }));
-  }, [label, selectedTemplate.defaultLabel]);
-
   const handleOpenSavedCodes = useCallback(() => {
     setLinkMode('saved');
     setIsScannerVisible(false);
     setScannerPurpose('link');
     lastScannedPayloadRef.current = null;
-    setScannerMessage('Choose one saved code below.');
-  }, []);
+    setScannerMessage(savedCodePresets.length > 0 ? 'Choose one saved code below.' : 'No saved codes are available yet.');
+  }, [savedCodePresets.length]);
 
   const handleUseSavedProofCode = useCallback((preset: CheckpointPreset) => {
     setLinkMode('saved');
@@ -491,7 +559,7 @@ export default function CreateAlarmScreen() {
     if (!expectedQrPayload.trim()) {
       setErrors((currentErrors) => ({
         ...currentErrors,
-        expectedQrPayload: 'Generate, scan, or paste a proof code before testing it.',
+        expectedQrPayload: 'Scan or choose a saved proof code before testing it.',
       }));
       return;
     }
@@ -522,7 +590,7 @@ export default function CreateAlarmScreen() {
     const response = await requestPermission();
 
     if (!response.granted) {
-      setScannerMessage('Camera is still unavailable. Paste the exact QR or barcode payload instead.');
+      setScannerMessage('Camera is still unavailable. Allow camera access to scan a QR code or barcode.');
       return;
     }
 
@@ -606,6 +674,43 @@ export default function CreateAlarmScreen() {
     router.replace(returnTo);
   }, [returnTo, router]);
 
+  const handleSocialModeChange = useCallback(
+    (nextMode: SocialMode) => {
+      setSocialMode(nextMode);
+
+      if (nextMode === 'private') {
+        setSelectedCircleId(null);
+        setShareSuccesses(false);
+        setShareMisses(true);
+        return;
+      }
+
+      setSelectedCircleId((currentCircleId) => currentCircleId ?? socialCircles[0]?.id ?? null);
+      setShareMisses((currentValue) => currentValue || !shareSuccesses);
+    },
+    [shareSuccesses, socialCircles]
+  );
+
+  const handleShareMissesToggle = useCallback(() => {
+    setShareMisses((currentValue) => {
+      if (currentValue && !shareSuccesses) {
+        return currentValue;
+      }
+
+      return !currentValue;
+    });
+  }, [shareSuccesses]);
+
+  const handleShareSuccessesToggle = useCallback(() => {
+    setShareSuccesses((currentValue) => {
+      if (currentValue && !shareMisses) {
+        return currentValue;
+      }
+
+      return !currentValue;
+    });
+  }, [shareMisses]);
+
   const handleSave = useCallback(async () => {
     const trimmedLabel = label.trim();
     const trimmedPlaceObject = placeObject.trim();
@@ -619,7 +724,7 @@ export default function CreateAlarmScreen() {
     }
 
     if (!trimmedExpectedQrPayload) {
-      nextErrors.expectedQrPayload = 'Generate, scan, or paste the exact code this checkpoint should accept.';
+      nextErrors.expectedQrPayload = 'Scan or choose the exact code this checkpoint should accept.';
     }
 
     if (Number.isNaN(gracePeriod) || gracePeriod < 15) {
@@ -651,6 +756,12 @@ export default function CreateAlarmScreen() {
       }
 
       const alarmId = isEditMode && sourceAlarm ? sourceAlarm.id : `${Date.now()}`;
+      const nextSocialSettings = buildAlarmSocialSettings({
+        selectedCircleId,
+        shareMisses,
+        shareSuccesses,
+        socialMode,
+      });
       const baseAlarm: Alarm = {
         id: alarmId,
         hour: time.getHours(),
@@ -665,7 +776,7 @@ export default function CreateAlarmScreen() {
         gracePeriodSeconds: gracePeriod,
         isActive: true,
         createdAt: isEditMode && sourceAlarm ? sourceAlarm.createdAt : new Date().toISOString(),
-        socialSettings: isEditMode ? sourceAlarm?.socialSettings : undefined,
+        socialSettings: nextSocialSettings,
         lastOutcome: undefined,
       };
 
@@ -694,7 +805,7 @@ export default function CreateAlarmScreen() {
           gracePeriodSeconds: gracePeriod,
           creationCountBeforeSave: store.lifetimeAlarmCreations,
           source: isReuseMode ? 'reuse' : 'new',
-          socialMode: 'private',
+          socialMode: nextSocialSettings ? 'circle' : 'private',
         });
       }
 
@@ -737,6 +848,10 @@ export default function CreateAlarmScreen() {
     repeatSchedule,
     returnTo,
     router,
+    selectedCircleId,
+    shareMisses,
+    shareSuccesses,
+    socialMode,
     sourceAlarm,
     time,
     useCaseType,
@@ -788,6 +903,8 @@ export default function CreateAlarmScreen() {
             setGracePeriodSeconds(nextValue);
             setErrors((currentErrors) => ({ ...currentErrors, gracePeriodSeconds: undefined }));
           }}
+          onOpenAccount={() => router.push('/account')}
+          onOpenCircles={() => router.push('/circles')}
           onLabelChange={(nextValue) => {
             setLabel(nextValue);
             setErrors((currentErrors) => ({ ...currentErrors, label: undefined }));
@@ -795,6 +912,10 @@ export default function CreateAlarmScreen() {
           onNotesChange={setNotes}
           onPlaceObjectChange={setPlaceObject}
           onRepeatScheduleChange={setRepeatSchedule}
+          onSelectedCircleChange={setSelectedCircleId}
+          onShareMissesToggle={handleShareMissesToggle}
+          onShareSuccessesToggle={handleShareSuccessesToggle}
+          onSocialModeChange={handleSocialModeChange}
           onTemplateSelect={(nextUseCaseType) => {
             const defaults = getCheckpointTemplateDefaults(nextUseCaseType);
             setUseCaseType(defaults.useCaseType);
@@ -806,6 +927,18 @@ export default function CreateAlarmScreen() {
           placeObject={placeObject}
           repeatSchedule={repeatSchedule}
           selectedTemplate={selectedTemplate}
+          selectedCircleId={selectedCircleId}
+          shareMisses={shareMisses}
+          shareSuccesses={shareSuccesses}
+          socialCircles={socialCircles}
+          socialCirclesError={socialCirclesError}
+          socialMode={socialMode}
+          socialSessionState={{
+            configured: isSocialConfigured,
+            isLoading: isSocialSessionLoading || isLoadingSocialCircles,
+            isProfileComplete,
+            signedIn: Boolean(user?.id),
+          }}
           time={time}
         />
       ) : (
@@ -823,7 +956,6 @@ export default function CreateAlarmScreen() {
           onBarcodeScanned={handleBarcodeScanned}
           onCameraFallbackAction={handleCameraFallbackAction}
           onClearCode={handleClearProofCode}
-          onGenerate={handleGenerateProofCode}
           onHideScanner={() => setIsScannerVisible(false)}
           onOpenSavedCodes={handleOpenSavedCodes}
           onOpenScanner={handleOpenScanner}
@@ -854,16 +986,29 @@ function CreateDetailsStep({
   onExpectedCodePress,
   onFieldToggle,
   onGracePeriodChange,
+  onOpenAccount,
+  onOpenCircles,
   onLabelChange,
   onNotesChange,
   onPlaceObjectChange,
   onRepeatScheduleChange,
+  onSelectedCircleChange,
+  onShareMissesToggle,
+  onShareSuccessesToggle,
+  onSocialModeChange,
   onTemplateSelect,
   onTimeChange,
   placeObject,
   proofCodeVerifiedAt,
   repeatSchedule,
+  selectedCircleId,
   selectedTemplate,
+  shareMisses,
+  shareSuccesses,
+  socialCircles,
+  socialCirclesError,
+  socialMode,
+  socialSessionState,
   time,
 }: {
   colors: ReturnType<typeof getAppColors>;
@@ -878,19 +1023,46 @@ function CreateDetailsStep({
   onExpectedCodePress: () => void;
   onFieldToggle: (field: NonNullable<ExpandedField>) => void;
   onGracePeriodChange: (value: string) => void;
+  onOpenAccount: () => void;
+  onOpenCircles: () => void;
   onLabelChange: (value: string) => void;
   onNotesChange: (value: string) => void;
   onPlaceObjectChange: (value: string) => void;
   onRepeatScheduleChange: (value: RepeatSchedule) => void;
+  onSelectedCircleChange: (value: string) => void;
+  onShareMissesToggle: () => void;
+  onShareSuccessesToggle: () => void;
+  onSocialModeChange: (value: SocialMode) => void;
   onTemplateSelect: (value: UseCaseType) => void;
   onTimeChange: (event: DateTimePickerEvent, selectedDate?: Date) => void;
   placeObject: string;
   proofCodeVerifiedAt: string | null;
   repeatSchedule: RepeatSchedule;
+  selectedCircleId: string | null;
   selectedTemplate: ReturnType<typeof getCheckpointTemplate>;
+  shareMisses: boolean;
+  shareSuccesses: boolean;
+  socialCircles: SocialCircleSummary[];
+  socialCirclesError: string;
+  socialMode: SocialMode;
+  socialSessionState: {
+    configured: boolean;
+    isLoading: boolean;
+    isProfileComplete: boolean;
+    signedIn: boolean;
+  };
   time: Date;
 }) {
   const checkpointTitle = label.trim() || selectedTemplate.defaultLabel || 'Enter a clear name';
+  const selectedCircleName = findCircleName(socialCircles, selectedCircleId ?? undefined);
+  const accountabilityValue =
+    socialMode === 'circle' && selectedCircleId
+      ? selectedCircleName ?? 'Shared circle'
+      : 'Private';
+  const accountabilityDescription =
+    socialMode === 'circle' && selectedCircleId
+      ? getSharedOutcomeLabel({ circleId: selectedCircleId, shareMisses, shareSuccesses })
+      : 'Not shared';
 
   return (
     <FlowPanel style={styles.formPanel}>
@@ -998,6 +1170,31 @@ function CreateDetailsStep({
       </CreateFieldRow>
 
       <CreateFieldRow
+        description={accountabilityDescription}
+        expanded={expandedField === 'accountability'}
+        icon="people-outline"
+        onPress={() => onFieldToggle('accountability')}
+        title="Accountability"
+        value={accountabilityValue}>
+        <AccountabilityEditor
+          circles={socialCircles}
+          colors={colors}
+          error={socialCirclesError}
+          onOpenAccount={onOpenAccount}
+          onOpenCircles={onOpenCircles}
+          onSelectedCircleChange={onSelectedCircleChange}
+          onShareMissesToggle={onShareMissesToggle}
+          onShareSuccessesToggle={onShareSuccessesToggle}
+          onSocialModeChange={onSocialModeChange}
+          selectedCircleId={selectedCircleId}
+          sessionState={socialSessionState}
+          shareMisses={shareMisses}
+          shareSuccesses={shareSuccesses}
+          socialMode={socialMode}
+        />
+      </CreateFieldRow>
+
+      <CreateFieldRow
         description={hasLinkedProofCode ? 'Tap to review or test' : 'Link a QR / Barcode'}
         expanded={false}
         icon="link-outline"
@@ -1055,7 +1252,6 @@ function LinkCodeStep({
   onBarcodeScanned,
   onCameraFallbackAction,
   onClearCode,
-  onGenerate,
   onHideScanner,
   onOpenSavedCodes,
   onOpenScanner,
@@ -1081,7 +1277,6 @@ function LinkCodeStep({
   onBarcodeScanned: (result: BarcodeScanningResult) => void;
   onCameraFallbackAction: () => void;
   onClearCode: () => void;
-  onGenerate: () => void;
   onHideScanner: () => void;
   onOpenSavedCodes: () => void;
   onOpenScanner: (mode: Extract<LinkMode, 'scanQr' | 'scanBarcode'>) => void;
@@ -1103,12 +1298,6 @@ function LinkCodeStep({
     <>
       <View style={styles.scanModeGrid}>
         <LinkModeTile
-          glyph="qr-code-outline"
-          label="Generate New QR"
-          onPress={onGenerate}
-          selected={linkMode === 'generateQr'}
-        />
-        <LinkModeTile
           glyph="scan-outline"
           label="Scan QR Code"
           onPress={() => onOpenScanner('scanQr')}
@@ -1120,20 +1309,18 @@ function LinkCodeStep({
           onPress={() => onOpenScanner('scanBarcode')}
           selected={linkMode === 'scanBarcode'}
         />
-        {savedCodePresets.length > 0 ? (
-          <LinkModeTile
-            glyph="bookmark-outline"
-            label="Use Saved Code"
-            onPress={onOpenSavedCodes}
-            selected={linkMode === 'saved'}
-          />
-        ) : null}
+        <LinkModeTile
+          glyph="bookmark-outline"
+          label="Use Saved Code"
+          onPress={onOpenSavedCodes}
+          selected={linkMode === 'saved'}
+        />
       </View>
 
-      {linkMode === 'saved' && savedCodePresets.length > 0 ? (
+      {linkMode === 'saved' ? (
         <FlowPanel>
           <FlowSectionLabel>SAVED CODES</FlowSectionLabel>
-          {savedCodePresets.map((preset) => {
+          {savedCodePresets.length > 0 ? savedCodePresets.map((preset) => {
             const isSelected = selectedSavedCodePresetId === preset.id;
 
             return (
@@ -1166,7 +1353,11 @@ function LinkCodeStep({
                 title={preset.label}
               />
             );
-          })}
+          }) : (
+            <Text style={[TextPresets.body, styles.smallBody, { color: colors.textSoft }]}>
+              Saved codes appear after you save a checkpoint with a scanned QR code or barcode.
+            </Text>
+          )}
         </FlowPanel>
       ) : null}
 
@@ -1224,7 +1415,7 @@ function LinkCodeStep({
             <FlowIconBadge icon="qr-code-outline" tone="muted" />
             <Text style={[TextPresets.label, { color: colors.text }]}>No code linked yet</Text>
             <Text style={[TextPresets.body, styles.smallBody, { color: colors.textSoft }]}>
-              Generate a QR, scan an existing QR, or scan a barcode to link proof.
+              Scan a QR code, scan a barcode, or choose a saved code to link proof.
             </Text>
             {error ? <Text style={[styles.errorText, { color: colors.danger }]}>{error}</Text> : null}
           </View>
@@ -1270,12 +1461,157 @@ function LinkCodeStep({
         <FlowPanel tone="warning">
           <Text style={[TextPresets.label, { color: colors.text }]}>{cameraFallbackTitle}</Text>
           <Text style={[TextPresets.body, styles.smallBody, { color: colors.textSoft }]}>
-            Scanning is fastest. If this device cannot use the camera, generate a new QR for this checkpoint.
+            Camera access is required to scan a QR code or barcode for this checkpoint.
           </Text>
           <AppButton label={cameraFallbackActionLabel} onPress={onCameraFallbackAction} size="compact" variant="secondary" />
         </FlowPanel>
       ) : null}
     </>
+  );
+}
+
+function AccountabilityEditor({
+  circles,
+  colors,
+  error,
+  onOpenAccount,
+  onOpenCircles,
+  onSelectedCircleChange,
+  onShareMissesToggle,
+  onShareSuccessesToggle,
+  onSocialModeChange,
+  selectedCircleId,
+  sessionState,
+  shareMisses,
+  shareSuccesses,
+  socialMode,
+}: {
+  circles: SocialCircleSummary[];
+  colors: ReturnType<typeof getAppColors>;
+  error: string;
+  onOpenAccount: () => void;
+  onOpenCircles: () => void;
+  onSelectedCircleChange: (value: string) => void;
+  onShareMissesToggle: () => void;
+  onShareSuccessesToggle: () => void;
+  onSocialModeChange: (value: SocialMode) => void;
+  selectedCircleId: string | null;
+  sessionState: {
+    configured: boolean;
+    isLoading: boolean;
+    isProfileComplete: boolean;
+    signedIn: boolean;
+  };
+  shareMisses: boolean;
+  shareSuccesses: boolean;
+  socialMode: SocialMode;
+}) {
+  const hasCircles = circles.length > 0;
+  const canSelectCircle = sessionState.configured && sessionState.signedIn && sessionState.isProfileComplete && hasCircles;
+
+  return (
+    <View style={styles.accountabilityEditor}>
+      <View style={styles.optionGrid}>
+        <OptionChip
+          description="Only you can see outcomes"
+          onPress={() => onSocialModeChange('private')}
+          selected={socialMode === 'private'}
+          title="Private"
+        />
+        <OptionChip
+          description={canSelectCircle ? 'Share selected outcomes' : 'Requires a circle'}
+          onPress={() => {
+            if (canSelectCircle) {
+              onSocialModeChange('circle');
+            }
+          }}
+          selected={socialMode === 'circle'}
+          title="Circle"
+        />
+      </View>
+
+      {!sessionState.configured ? (
+        <FlowPanel tone="muted">
+          <Text style={[TextPresets.label, { color: colors.text }]}>Circles unavailable</Text>
+          <Text style={[TextPresets.body, styles.smallBody, { color: colors.textSoft }]}>
+            Private checkpoints still work. Add backend configuration before sharing outcomes.
+          </Text>
+        </FlowPanel>
+      ) : sessionState.isLoading ? (
+        <Text style={[TextPresets.body, styles.smallBody, { color: colors.textSoft }]}>Loading circles...</Text>
+      ) : !sessionState.signedIn ? (
+        <FlowPanel tone="muted">
+          <Text style={[TextPresets.label, { color: colors.text }]}>Sign in to share</Text>
+          <Text style={[TextPresets.body, styles.smallBody, { color: colors.textSoft }]}>
+            Private checkpoint creation is always available.
+          </Text>
+          <AppButton label="Go to account" onPress={onOpenAccount} size="compact" variant="secondary" />
+        </FlowPanel>
+      ) : !sessionState.isProfileComplete ? (
+        <FlowPanel tone="muted">
+          <Text style={[TextPresets.label, { color: colors.text }]}>Finish your profile</Text>
+          <Text style={[TextPresets.body, styles.smallBody, { color: colors.textSoft }]}>
+            Save a display name before sharing checkpoint outcomes.
+          </Text>
+          <AppButton label="Complete profile" onPress={onOpenAccount} size="compact" variant="secondary" />
+        </FlowPanel>
+      ) : error ? (
+        <FlowPanel tone="warning">
+          <Text style={[TextPresets.label, { color: colors.text }]}>Circles did not load</Text>
+          <Text style={[TextPresets.body, styles.smallBody, { color: colors.textSoft }]}>
+            {error} Private checkpoints still save normally.
+          </Text>
+        </FlowPanel>
+      ) : !hasCircles ? (
+        <FlowPanel tone="muted">
+          <Text style={[TextPresets.label, { color: colors.text }]}>No circles yet</Text>
+          <Text style={[TextPresets.body, styles.smallBody, { color: colors.textSoft }]}>
+            Create or join a circle, then come back to share checkpoint outcomes.
+          </Text>
+          <AppButton label="Create or join" onPress={onOpenCircles} size="compact" variant="secondary" />
+        </FlowPanel>
+      ) : null}
+
+      {canSelectCircle && socialMode === 'circle' ? (
+        <>
+          <View style={styles.circlePickerList}>
+            {circles.map((circle) => (
+              <FlowListRow
+                key={circle.id}
+                description={`${circle.memberCount} member${circle.memberCount === 1 ? '' : 's'}`}
+                leading={
+                  <Ionicons
+                    color={selectedCircleId === circle.id ? colors.success : colors.primary}
+                    name={selectedCircleId === circle.id ? 'checkmark-circle' : 'people-outline'}
+                    size={20}
+                  />
+                }
+                onPress={() => onSelectedCircleChange(circle.id)}
+                statusLabel={selectedCircleId === circle.id ? 'Selected' : undefined}
+                statusTone="success"
+                title={circle.name}
+              />
+            ))}
+          </View>
+
+          <FlowSectionLabel>SHARE WITH CIRCLE</FlowSectionLabel>
+          <View style={styles.optionGrid}>
+            <OptionChip
+              description="Tell the circle when this is missed"
+              onPress={onShareMissesToggle}
+              selected={shareMisses}
+              title="Share misses"
+            />
+            <OptionChip
+              description="Tell the circle when this is cleared"
+              onPress={onShareSuccessesToggle}
+              selected={shareSuccesses}
+              title="Share clears"
+            />
+          </View>
+        </>
+      ) : null}
+    </View>
   );
 }
 
@@ -1494,6 +1830,12 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     gap: Spacing.sm,
     padding: Spacing.md,
+  },
+  accountabilityEditor: {
+    gap: Spacing.md,
+  },
+  circlePickerList: {
+    gap: Spacing.sm,
   },
   scanModeGrid: {
     flexDirection: 'row',

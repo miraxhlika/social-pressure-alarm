@@ -7,6 +7,12 @@ import { StatusPill } from '@/components/ui/status-pill';
 import { Fonts, getAppColors, Spacing, TextPresets } from '@/constants/theme';
 import { formatGracePeriodLabel, getUseCaseShortLabel } from '@/lib/checkpoint-templates';
 import { getAlarmPhase, formatAlarmTime, formatRepeatSchedule, formatScheduledFor } from '@/lib/alarms';
+import {
+  getCheckpointSocialDescription,
+  getCheckpointSocialLabel,
+  getSharedOutcomeLabel,
+  isCheckpointShared,
+} from '@/lib/social/settings';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { Alarm } from '@/types/alarm';
 
@@ -55,9 +61,7 @@ function getLastOutcomeCopy(alarm: Alarm) {
 function AlarmCardComponent({ alarm, onDelete, onDetails, onEdit, onOpen, onReschedule, onReuse }: AlarmCardProps) {
   const colors = getAppColors(useColorScheme());
   const phase = getAlarmPhase(alarm);
-  const sharesToCircle = Boolean(
-    alarm.socialSettings?.circleId && (alarm.socialSettings.shareSuccesses || alarm.socialSettings.shareMisses)
-  );
+  const sharesToCircle = isCheckpointShared(alarm.socialSettings);
   const primaryActionLabel = getPrimaryActionLabel(phase);
   const primaryAction = useCallback(() => {
     if (phase === 'missed' || phase === 'inactive') {
@@ -87,7 +91,11 @@ function AlarmCardComponent({ alarm, onDelete, onDetails, onEdit, onOpen, onResc
   const handleDeletePress = useCallback(() => {
     onDelete(alarm);
   }, [alarm, onDelete]);
-  const accountabilityLabel = sharesToCircle ? 'Accountability on' : 'Private';
+  const accountabilityLabel = getCheckpointSocialLabel(alarm.socialSettings);
+  const accountabilityDescription = getCheckpointSocialDescription(alarm.socialSettings);
+  const accountabilityCopy = sharesToCircle
+    ? `${accountabilityLabel} · ${getSharedOutcomeLabel(alarm.socialSettings)}`
+    : accountabilityDescription;
 
   return (
     <AppCard elevated style={styles.card}>
@@ -111,7 +119,7 @@ function AlarmCardComponent({ alarm, onDelete, onDetails, onEdit, onOpen, onResc
         <Text style={[styles.metaText, { color: colors.muted }]}>
           {formatGracePeriodLabel(alarm.gracePeriodSeconds)} reach window · {getLastOutcomeCopy(alarm)}
         </Text>
-        <Text style={[styles.circleMeta, { color: sharesToCircle ? colors.primary : colors.muted }]}>{accountabilityLabel}</Text>
+        <Text style={[styles.circleMeta, { color: sharesToCircle ? colors.primary : colors.muted }]}>{accountabilityCopy}</Text>
       </View>
 
       <View style={styles.actionRow}>
