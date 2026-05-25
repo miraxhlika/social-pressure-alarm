@@ -10,7 +10,6 @@ import { getAlarmPhase, formatAlarmTime, formatRepeatSchedule, formatScheduledFo
 import {
   getCheckpointSocialDescription,
   getCheckpointSocialLabel,
-  getSharedOutcomeLabel,
   isCheckpointShared,
 } from '@/lib/social/settings';
 import { useColorScheme } from '@/hooks/use-color-scheme';
@@ -18,6 +17,7 @@ import { Alarm } from '@/types/alarm';
 
 type AlarmCardProps = {
   alarm: Alarm;
+  circleName?: string;
   onEdit: (alarm: Alarm) => void;
   onDetails: (alarm: Alarm) => void;
   onOpen: (alarm: Alarm) => void;
@@ -58,7 +58,7 @@ function getLastOutcomeCopy(alarm: Alarm) {
   return 'Awaiting first result';
 }
 
-function AlarmCardComponent({ alarm, onDelete, onDetails, onEdit, onOpen, onReschedule, onReuse }: AlarmCardProps) {
+function AlarmCardComponent({ alarm, circleName, onDelete, onDetails, onEdit, onOpen, onReschedule, onReuse }: AlarmCardProps) {
   const colors = getAppColors(useColorScheme());
   const phase = getAlarmPhase(alarm);
   const sharesToCircle = isCheckpointShared(alarm.socialSettings);
@@ -91,11 +91,9 @@ function AlarmCardComponent({ alarm, onDelete, onDetails, onEdit, onOpen, onResc
   const handleDeletePress = useCallback(() => {
     onDelete(alarm);
   }, [alarm, onDelete]);
-  const accountabilityLabel = getCheckpointSocialLabel(alarm.socialSettings);
+  const accountabilityLabel = getCheckpointSocialLabel(alarm.socialSettings, circleName);
   const accountabilityDescription = getCheckpointSocialDescription(alarm.socialSettings);
-  const accountabilityCopy = sharesToCircle
-    ? `${accountabilityLabel} · ${getSharedOutcomeLabel(alarm.socialSettings)}`
-    : accountabilityDescription;
+  const accountabilityCopy = sharesToCircle ? accountabilityLabel : accountabilityDescription;
 
   return (
     <AppCard elevated style={styles.card}>

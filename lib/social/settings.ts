@@ -42,7 +42,7 @@ export function getCheckpointSocialLabel(settings?: AlarmSocialSettings, circleN
     return 'Private';
   }
 
-  return circleName ? `Shared with ${circleName}` : 'Shared with circle';
+  return circleName ? `Shared with "${circleName}"` : 'Shared with circle';
 }
 
 export function getCheckpointSocialDescription(settings?: AlarmSocialSettings, circleName?: string) {

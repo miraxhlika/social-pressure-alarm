@@ -247,7 +247,20 @@ export default function RingingScreen() {
 
     try {
       await cancelAlarmNotificationAsync(alarm.notificationIds);
-      const resolvedAlarm = await resolveAlarm(alarm.id, 'confirmed');
+      const resolvedAlarm = await resolveAlarm(alarm.id, 'confirmed', {
+        scheduledFor: alarm.scheduledFor,
+      });
+
+      if (!resolvedAlarm) {
+        router.replace({
+          pathname: '/missed',
+          params: {
+            alarmId: alarm.id,
+          },
+        });
+        return;
+      }
+
       const store = await readAlarmStore();
       const successEntry = store.successHistory.find((entry) => entry.alarmId === alarm.id) ?? null;
       await trackAnalyticsEvent('checkpoint_cleared', {
@@ -299,7 +312,9 @@ export default function RingingScreen() {
 
     try {
       await cancelAlarmNotificationAsync(alarm.notificationIds);
-      const resolvedAlarm = await resolveAlarm(alarm.id, 'missed');
+      const resolvedAlarm = await resolveAlarm(alarm.id, 'missed', {
+        scheduledFor: alarm.scheduledFor,
+      });
       const store = await readAlarmStore();
       await trackAnalyticsEvent('checkpoint_missed', {
         checkpointId: alarm.id,

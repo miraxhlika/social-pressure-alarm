@@ -53,6 +53,7 @@ function mapSocialSettings(value: unknown): AlarmSocialSettings | undefined {
 function mapRemoteAlarmRow(row: RemoteAlarmRow): AlarmDefinition {
   return {
     id: row.id,
+    clientId: row.id,
     hour: row.hour,
     minute: row.minute,
     label: row.label,
@@ -67,6 +68,7 @@ function mapRemoteAlarmRow(row: RemoteAlarmRow): AlarmDefinition {
     scheduledFor: row.scheduled_for ?? undefined,
     socialSettings: mapSocialSettings(row.social_settings),
     lastOutcome: row.last_outcome ?? undefined,
+    updatedAt: row.updated_at,
   };
 }
 

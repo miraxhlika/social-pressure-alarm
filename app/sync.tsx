@@ -5,6 +5,7 @@ import { Alert, Platform, Pressable, StyleSheet, Text, View } from 'react-native
 import { AppScreen } from '@/components/ui/app-screen';
 import { Fonts, Radius, Spacing, TextPresets, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { hydrateAlarmRuntimeForCurrentUser } from '@/lib/alarms';
 import { writeScopedStorageValue } from '@/lib/storage';
 import { useSocialSession } from '@/providers/social-session-provider';
 
@@ -29,6 +30,7 @@ export default function SyncScreen() {
       } else {
         await continueWithGoogle();
       }
+      await hydrateAlarmRuntimeForCurrentUser();
       router.replace('/circles');
     } catch (error) {
       Alert.alert('Unable to enable sync', error instanceof Error ? error.message : 'Sync could not be enabled right now.');

@@ -1,4 +1,4 @@
-import { Platform } from 'react-native';
+import { Linking, Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
 
 import { Alarm } from '@/types/alarm';
@@ -153,15 +153,31 @@ export async function getNotificationPermissionState(): Promise<NotificationPerm
   return 'denied';
 }
 
+function hasUsableNotificationPermission(settings: Notifications.NotificationPermissionsStatus) {
+  return settings.granted || settings.ios?.status === Notifications.IosAuthorizationStatus.PROVISIONAL;
+}
+
+export function isNotificationPermissionEnabled(state: NotificationPermissionState) {
+  return state === 'granted' || state === 'provisional';
+}
+
+export async function openNotificationSettingsAsync() {
+  await Linking.openSettings();
+}
+
 export async function ensureNotificationPermissionsAsync() {
   const currentSettings = await Notifications.getPermissionsAsync();
 
-  if (currentSettings.granted || currentSettings.ios?.status === Notifications.IosAuthorizationStatus.PROVISIONAL) {
+  if (hasUsableNotificationPermission(currentSettings)) {
     return true;
   }
 
+  if (!currentSettings.canAskAgain) {
+    return false;
+  }
+
   const requested = await Notifications.requestPermissionsAsync();
-  return requested.granted;
+  return hasUsableNotificationPermission(requested);
 }
 
 export function getAlarmNotificationStrategyKey(
