@@ -25,16 +25,24 @@ import {
   upsertMyRemoteAlarms,
 } from '@/lib/social/alarms';
 import { getMyAccountProgressState } from '@/lib/social/progress';
-import { enqueueAlarmEvent, flushAlarmEventQueue } from '@/lib/social/queue';
 import {
+  enqueueAlarmEvent,
+  flushAlarmEventQueue,
+  migrateGuestAlarmEventQueueToScope,
+} from '@/lib/social/queue';
+import {
+  GUEST_STORAGE_SCOPE,
   getActiveStorageScope,
   readScopedStorageValue,
+  readScopedStorageValueForScope,
   removeScopedStorageValue,
   writeScopedStorageValue,
+  writeScopedStorageValueForScope,
 } from '@/lib/storage';
 
 const STORAGE_KEY = 'social-pressure-alarm/store';
 const RUNTIME_STORAGE_KEY = 'social-pressure-alarm/runtime';
+const GUEST_MIGRATION_STATE_KEY = 'social-pressure-alarm/guest-migration-state';
 
 type LegacyAlarmInput = Partial<Alarm> & {
   title?: unknown;
@@ -48,6 +56,11 @@ type AlarmRuntimeStore = {
   alarms: Record<string, AlarmRuntimeMetadata>;
   pendingUpserts: string[];
   pendingDeletes: string[];
+};
+
+type GuestMigrationState = {
+  guestFingerprint: string;
+  migratedAt: string;
 };
 
 function createDefaultStore(): AlarmStore {
@@ -78,6 +91,24 @@ type AlarmAttemptHistoryEntry = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+function normalizeGuestMigrationState(value: unknown): GuestMigrationState | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const guestFingerprint = getTrimmedString(value.guestFingerprint);
+  const migratedAt = getOptionalIsoString(value.migratedAt);
+
+  if (!guestFingerprint || !migratedAt) {
+    return null;
+  }
+
+  return {
+    guestFingerprint,
+    migratedAt,
+  };
 }
 
 function getTrimmedString(value: unknown) {
@@ -197,6 +228,7 @@ function normalizeAlarm(rawAlarm: unknown): Alarm | null {
 
   return {
     id,
+    clientId: getTrimmedString(legacyAlarm.clientId) ?? id,
     hour: getBoundedNumber(legacyAlarm.hour, 0, 23, 7),
     minute: getBoundedNumber(legacyAlarm.minute, 0, 59, 0),
     label:
@@ -212,6 +244,7 @@ function normalizeAlarm(rawAlarm: unknown): Alarm | null {
     gracePeriodSeconds: getBoundedNumber(legacyAlarm.gracePeriodSeconds, 15, 3600, 120),
     isActive: typeof legacyAlarm.isActive === 'boolean' ? legacyAlarm.isActive : true,
     createdAt: getRequiredIsoString(legacyAlarm.createdAt, new Date().toISOString()),
+    updatedAt: getOptionalIsoString(legacyAlarm.updatedAt) ?? getOptionalIsoString(legacyAlarm.createdAt),
     scheduledFor: getOptionalIsoString(legacyAlarm.scheduledFor),
     notificationIds: Array.isArray(legacyAlarm.notificationIds)
       ? legacyAlarm.notificationIds
@@ -365,6 +398,241 @@ function sortCheckpointPresets(entries: CheckpointPreset[]) {
     .slice(0, MAX_CHECKPOINT_PRESETS);
 }
 
+function normalizeTimestampKey(timestamp?: string) {
+  if (!timestamp) {
+    return undefined;
+  }
+
+  const timestampMs = new Date(timestamp).getTime();
+
+  return Number.isNaN(timestampMs) ? timestamp.trim() : new Date(timestampMs).toISOString();
+}
+
+function getAlarmOccurrenceKey(scheduledFor?: string) {
+  return normalizeTimestampKey(scheduledFor) ?? 'unscheduled';
+}
+
+export function createAlarmOutcomeIdempotencyKey(
+  alarmId: string,
+  scheduledFor: string | undefined,
+  outcome: AlarmOutcome
+) {
+  return `${alarmId}::${getAlarmOccurrenceKey(scheduledFor)}::${outcome}`;
+}
+
+function hasFailureHistoryForOccurrence(
+  failureHistory: FailureHistoryEntry[],
+  alarmId: string,
+  scheduledFor?: string
+) {
+  const occurrenceKey = getAlarmOccurrenceKey(scheduledFor);
+
+  return failureHistory.some(
+    (entry) => entry.alarmId === alarmId && getAlarmOccurrenceKey(entry.scheduledFor) === occurrenceKey
+  );
+}
+
+function hasSuccessHistoryForOccurrence(
+  successHistory: SuccessHistoryEntry[],
+  alarmId: string,
+  scheduledFor?: string
+) {
+  const occurrenceKey = getAlarmOccurrenceKey(scheduledFor);
+
+  return successHistory.some(
+    (entry) => entry.alarmId === alarmId && getAlarmOccurrenceKey(entry.scheduledFor) === occurrenceKey
+  );
+}
+
+type ResolveAlarmOutcomeInStoreOptions = {
+  resolvedAt?: string;
+  scheduledFor?: string;
+  nextScheduledFor?: string;
+  isActive?: boolean;
+};
+
+export type ResolveAlarmOutcomeInStoreResult = {
+  store: AlarmStore;
+  alarm: Alarm;
+  eventRecord: AlarmEventRecord | null;
+  didRecordOutcome: boolean;
+};
+
+export function resolveAlarmOutcomeInStore(
+  store: AlarmStore,
+  alarmId: string,
+  outcome: AlarmOutcome,
+  options: ResolveAlarmOutcomeInStoreOptions = {}
+): ResolveAlarmOutcomeInStoreResult | null {
+  const alarm = store.alarms.find((candidate) => candidate.id === alarmId) ?? null;
+
+  if (!alarm) {
+    return null;
+  }
+
+  const resolvedAt = options.resolvedAt ?? new Date().toISOString();
+  const resolvedTimestamp = new Date(resolvedAt).getTime();
+  const scheduledFor = options.scheduledFor ?? alarm.scheduledFor;
+  const scheduledTimestamp = scheduledFor ? new Date(scheduledFor).getTime() : resolvedTimestamp;
+  const nextScheduledFor = options.nextScheduledFor ?? alarm.scheduledFor;
+  const updatedAlarm: Alarm = {
+    ...alarm,
+    clientId: alarm.clientId ?? alarm.id,
+    isActive: options.isActive ?? false,
+    notificationIds: undefined,
+    notificationStrategyKey: undefined,
+    scheduledFor: nextScheduledFor,
+    lastOutcome: outcome,
+    updatedAt: resolvedAt,
+  };
+  const didRecordOutcome =
+    outcome === 'missed'
+      ? !hasFailureHistoryForOccurrence(store.failureHistory, alarm.id, scheduledFor)
+      : !hasSuccessHistoryForOccurrence(store.successHistory, alarm.id, scheduledFor);
+  const failureEntry: FailureHistoryEntry | null =
+    didRecordOutcome && outcome === 'missed'
+      ? {
+          alarmId: alarm.id,
+          label: alarm.label,
+          scheduledFor,
+          failedAt: resolvedAt,
+        }
+      : null;
+  const successEntry: SuccessHistoryEntry | null =
+    didRecordOutcome && outcome === 'confirmed'
+      ? {
+          alarmId: alarm.id,
+          label: alarm.label,
+          scheduledFor,
+          confirmedAt: resolvedAt,
+          timeToScanSeconds: Math.min(
+            alarm.gracePeriodSeconds,
+            Math.max(0, Math.round((resolvedTimestamp - scheduledTimestamp) / 1000))
+          ),
+          gracePeriodSeconds: alarm.gracePeriodSeconds,
+        }
+      : null;
+  const nextFailureHistory = failureEntry
+    ? sortFailureHistory([failureEntry, ...store.failureHistory])
+    : store.failureHistory;
+  const nextSuccessHistory = successEntry
+    ? sortSuccessHistory([successEntry, ...store.successHistory])
+    : store.successHistory;
+  const checkpointStreakStats = getCheckpointStreakStats(nextSuccessHistory, nextFailureHistory, alarm.id);
+  const nextStore: AlarmStore = {
+    ...store,
+    alarms: sortAlarms(
+      store.alarms.map((candidate) =>
+        candidate.id === updatedAlarm.id ? stripAlarmRuntimeMetadata(updatedAlarm) : candidate
+      )
+    ),
+    currentStreak: checkpointStreakStats.currentStreak,
+    longestStreak: Math.max(store.longestStreak, checkpointStreakStats.longestStreak),
+    failureHistory: nextFailureHistory,
+    successHistory: nextSuccessHistory,
+  };
+
+  if (!didRecordOutcome) {
+    return {
+      store: nextStore,
+      alarm: updatedAlarm,
+      eventRecord: null,
+      didRecordOutcome,
+    };
+  }
+
+  const weeklyStats = getWeeklyCompletionStats(nextStore, resolvedTimestamp);
+  const idempotencyKey = createAlarmOutcomeIdempotencyKey(alarm.id, scheduledFor, outcome);
+  const eventRecord: AlarmEventRecord = {
+    id: idempotencyKey,
+    clientId: createAlarmOutcomeIdempotencyKey(alarm.clientId ?? alarm.id, scheduledFor, outcome),
+    idempotencyKey,
+    alarmId: alarm.id,
+    alarmLabel: alarm.label,
+    scheduledFor,
+    outcome,
+    resolvedAt,
+    source: 'device',
+    socialSettings: alarm.socialSettings,
+    sharePayload: {
+      currentStreak: nextStore.currentStreak,
+      longestStreak: nextStore.longestStreak,
+      gracePeriodSeconds: alarm.gracePeriodSeconds,
+      timeToScanSeconds: successEntry?.timeToScanSeconds,
+      weeklyCompletionRate: weeklyStats.completionRate,
+      weeklySuccesses: weeklyStats.successes,
+      weeklyFailures: weeklyStats.failures,
+    },
+  };
+
+  return {
+    store: nextStore,
+    alarm: updatedAlarm,
+    eventRecord,
+    didRecordOutcome,
+  };
+}
+
+export type ReconcileOverdueAlarmOutcomesInStoreResult = {
+  store: AlarmStore;
+  eventRecords: AlarmEventRecord[];
+  dirtyAlarmIds: string[];
+  resolvedCount: number;
+};
+
+export function reconcileOverdueAlarmOutcomesInStore(
+  store: AlarmStore,
+  now = Date.now()
+): ReconcileOverdueAlarmOutcomesInStoreResult {
+  const resolvedAt = new Date(now).toISOString();
+  let nextStore = store;
+  const eventRecords: AlarmEventRecord[] = [];
+  const dirtyAlarmIds: string[] = [];
+  let resolvedCount = 0;
+
+  for (const alarm of store.alarms) {
+    if (!alarm.isActive || !alarm.scheduledFor) {
+      continue;
+    }
+
+    const deadlineTimestamp = getAlarmDeadlineTimestamp(alarm);
+
+    if (!deadlineTimestamp || deadlineTimestamp >= now) {
+      continue;
+    }
+
+    const nextScheduledFor =
+      alarm.repeatSchedule === 'once'
+        ? alarm.scheduledFor
+        : createNextAlarmDateForSchedule(alarm.hour, alarm.minute, alarm.repeatSchedule, new Date(now)).toISOString();
+    const resolution = resolveAlarmOutcomeInStore(nextStore, alarm.id, 'missed', {
+      resolvedAt,
+      scheduledFor: alarm.scheduledFor,
+      nextScheduledFor,
+      isActive: alarm.repeatSchedule !== 'once',
+    });
+
+    if (!resolution) {
+      continue;
+    }
+
+    nextStore = resolution.store;
+    dirtyAlarmIds.push(alarm.id);
+    resolvedCount += 1;
+
+    if (resolution.eventRecord) {
+      eventRecords.push(resolution.eventRecord);
+    }
+  }
+
+  return {
+    store: nextStore,
+    eventRecords,
+    dirtyAlarmIds: [...new Set(dirtyAlarmIds)],
+    resolvedCount,
+  };
+}
+
 function upsertCheckpointPreset(existingPresets: CheckpointPreset[], alarmLike: Pick<Alarm, 'label' | 'expectedQrPayload'>) {
   const now = new Date().toISOString();
   const matchingPreset =
@@ -402,7 +670,7 @@ function upsertCheckpointPreset(existingPresets: CheckpointPreset[], alarmLike: 
 }
 
 function stripAlarmRuntimeMetadata(alarm: Alarm): AlarmDefinition {
-  const { notificationIds: _notificationIds, ...alarmDefinition } = alarm;
+  const { notificationIds: _notificationIds, notificationStrategyKey: _notificationStrategyKey, ...alarmDefinition } = alarm;
   return alarmDefinition;
 }
 
@@ -423,19 +691,60 @@ async function writeAlarmStore(store: AlarmStore) {
   );
 }
 
+async function writeAlarmStoreForScope(scope: string, store: AlarmStore) {
+  await writeScopedStorageValueForScope(
+    STORAGE_KEY,
+    scope,
+    JSON.stringify({
+      ...store,
+      alarms: store.alarms.map(stripAlarmRuntimeMetadata),
+    })
+  );
+}
+
 async function writeRuntimeStore(runtimeStore: AlarmRuntimeStore) {
   await writeScopedStorageValue(RUNTIME_STORAGE_KEY, JSON.stringify(runtimeStore));
 }
 
+async function writeRuntimeStoreForScope(scope: string, runtimeStore: AlarmRuntimeStore) {
+  await writeScopedStorageValueForScope(RUNTIME_STORAGE_KEY, scope, JSON.stringify(runtimeStore));
+}
+
+async function readGuestMigrationStateForScope(scope: string) {
+  const scopedValue = await readScopedStorageValueForScope(GUEST_MIGRATION_STATE_KEY, scope);
+
+  if (!scopedValue.value) {
+    return null;
+  }
+
+  try {
+    return normalizeGuestMigrationState(JSON.parse(scopedValue.value));
+  } catch {
+    return null;
+  }
+}
+
+async function writeGuestMigrationStateForScope(scope: string, state: GuestMigrationState) {
+  await writeScopedStorageValueForScope(GUEST_MIGRATION_STATE_KEY, scope, JSON.stringify(state));
+}
+
 async function readPersistedAlarmStore() {
   const scopedStore = await readScopedStorageValue(STORAGE_KEY);
+  return parsePersistedAlarmStore(scopedStore.value);
+}
 
-  if (!scopedStore.value) {
+async function readPersistedAlarmStoreForScope(scope: string) {
+  const scopedStore = await readScopedStorageValueForScope(STORAGE_KEY, scope);
+  return parsePersistedAlarmStore(scopedStore.value);
+}
+
+function parsePersistedAlarmStore(rawValue: string | null) {
+  if (!rawValue) {
     return createDefaultStore();
   }
 
   try {
-    const parsed = JSON.parse(scopedStore.value) as Partial<AlarmStore>;
+    const parsed = JSON.parse(rawValue) as Partial<AlarmStore>;
     const normalizedAlarms = Array.isArray(parsed.alarms)
       ? parsed.alarms.map(normalizeAlarm).filter((alarm): alarm is Alarm => alarm !== null)
       : [];
@@ -472,13 +781,21 @@ async function readPersistedAlarmStore() {
 
 async function readPersistedRuntimeStore() {
   const scopedRuntime = await readScopedStorageValue(RUNTIME_STORAGE_KEY);
+  return parsePersistedRuntimeStore(scopedRuntime.value);
+}
 
-  if (!scopedRuntime.value) {
+async function readPersistedRuntimeStoreForScope(scope: string) {
+  const scopedRuntime = await readScopedStorageValueForScope(RUNTIME_STORAGE_KEY, scope);
+  return parsePersistedRuntimeStore(scopedRuntime.value);
+}
+
+function parsePersistedRuntimeStore(rawValue: string | null) {
+  if (!rawValue) {
     return createDefaultRuntimeStore();
   }
 
   try {
-    return normalizeRuntimeStore(JSON.parse(scopedRuntime.value));
+    return normalizeRuntimeStore(JSON.parse(rawValue));
   } catch {
     return createDefaultRuntimeStore();
   }
@@ -486,6 +803,24 @@ async function readPersistedRuntimeStore() {
 
 async function readLocalAlarmState() {
   const [store, runtimeStore] = await Promise.all([readPersistedAlarmStore(), readPersistedRuntimeStore()]);
+  return migrateAlarmRuntimeMetadata(store, runtimeStore, writeLocalAlarmState);
+}
+
+async function readLocalAlarmStateForScope(scope: string) {
+  const [store, runtimeStore] = await Promise.all([
+    readPersistedAlarmStoreForScope(scope),
+    readPersistedRuntimeStoreForScope(scope),
+  ]);
+  return migrateAlarmRuntimeMetadata(store, runtimeStore, (nextStore, nextRuntimeStore) =>
+    writeLocalAlarmStateForScope(scope, nextStore, nextRuntimeStore)
+  );
+}
+
+async function migrateAlarmRuntimeMetadata(
+  store: AlarmStore,
+  runtimeStore: AlarmRuntimeStore,
+  writeState: (store: AlarmStore, runtimeStore: AlarmRuntimeStore) => Promise<void>
+) {
   let nextRuntimeStore = runtimeStore;
   let didMigrateRuntimeMetadata = false;
 
@@ -516,7 +851,7 @@ async function readLocalAlarmState() {
   };
 
   if (didMigrateRuntimeMetadata) {
-    await Promise.all([writeAlarmStore(nextStore), writeRuntimeStore(nextRuntimeStore)]);
+    await writeState(nextStore, nextRuntimeStore);
   }
 
   return {
@@ -527,6 +862,10 @@ async function readLocalAlarmState() {
 
 async function writeLocalAlarmState(store: AlarmStore, runtimeStore: AlarmRuntimeStore) {
   await Promise.all([writeAlarmStore(store), writeRuntimeStore(runtimeStore)]);
+}
+
+async function writeLocalAlarmStateForScope(scope: string, store: AlarmStore, runtimeStore: AlarmRuntimeStore) {
+  await Promise.all([writeAlarmStoreForScope(scope, store), writeRuntimeStoreForScope(scope, runtimeStore)]);
 }
 
 function shouldSyncRemoteAlarms() {
@@ -582,6 +921,65 @@ async function flushPendingAlarmSync(store: AlarmStore, runtimeStore: AlarmRunti
   }
 
   return nextRuntimeStore;
+}
+
+async function reconcileOverdueAlarmOutcomesForState(store: AlarmStore, runtimeStore: AlarmRuntimeStore) {
+  const outcomeState = reconcileOverdueAlarmOutcomesInStore(store);
+
+  if (outcomeState.resolvedCount === 0) {
+    return {
+      store,
+      runtimeStore,
+      resolvedCount: 0,
+    };
+  }
+
+  let nextRuntimeStore = runtimeStore;
+
+  if (outcomeState.dirtyAlarmIds.length > 0 && shouldSyncRemoteAlarms()) {
+    const dirtyAlarms = outcomeState.store.alarms
+      .filter((alarm) => outcomeState.dirtyAlarmIds.includes(alarm.id))
+      .map(stripAlarmRuntimeMetadata);
+
+    try {
+      await upsertMyRemoteAlarms(dirtyAlarms);
+      nextRuntimeStore = {
+        ...nextRuntimeStore,
+        pendingUpserts: nextRuntimeStore.pendingUpserts.filter(
+          (alarmId) => !outcomeState.dirtyAlarmIds.includes(alarmId)
+        ),
+      };
+    } catch {
+      nextRuntimeStore = {
+        ...nextRuntimeStore,
+        pendingUpserts: [...new Set([...nextRuntimeStore.pendingUpserts, ...outcomeState.dirtyAlarmIds])],
+      };
+    }
+  }
+
+  for (const eventRecord of outcomeState.eventRecords) {
+    await enqueueAlarmEvent(eventRecord);
+  }
+
+  if (outcomeState.eventRecords.length > 0) {
+    void flushAlarmEventQueue();
+  }
+
+  return {
+    store: outcomeState.store,
+    runtimeStore: nextRuntimeStore,
+    resolvedCount: outcomeState.resolvedCount,
+  };
+}
+
+async function reconcileAlarmOutcomesAndSchedules(store: AlarmStore, runtimeStore: AlarmRuntimeStore) {
+  const outcomeState = await reconcileOverdueAlarmOutcomesForState(store, runtimeStore);
+
+  if (outcomeState.resolvedCount > 0) {
+    await writeLocalAlarmState(outcomeState.store, outcomeState.runtimeStore);
+  }
+
+  return reconcileAlarmSchedules(outcomeState.store, outcomeState.runtimeStore);
 }
 
 async function reconcileAlarmSchedules(store: AlarmStore, runtimeStore: AlarmRuntimeStore) {
@@ -662,6 +1060,7 @@ async function reconcileAlarmSchedules(store: AlarmStore, runtimeStore: AlarmRun
       const nextAlarm = {
         ...alarm,
         scheduledFor: scheduled.scheduledFor,
+        updatedAt: new Date(now).toISOString(),
       };
 
       nextAlarms = nextAlarms.map((candidate) => (candidate.id === alarm.id ? nextAlarm : candidate));
@@ -691,68 +1090,422 @@ async function reconcileAlarmSchedules(store: AlarmStore, runtimeStore: AlarmRun
   };
 }
 
-function applyRemoteProgressState(
-  store: AlarmStore,
-  progressState: Awaited<ReturnType<typeof getMyAccountProgressState>> | null
-) {
-  if (!progressState) {
-    return store;
-  }
+function getAlarmUpdatedTimestamp(alarm: AlarmDefinition) {
+  return new Date(alarm.updatedAt ?? alarm.scheduledFor ?? alarm.createdAt).getTime();
+}
 
-  if (progressState.successHistory.length === 0 && progressState.failureHistory.length === 0) {
-    return store;
+function getAlarmSemanticKey(alarm: AlarmDefinition) {
+  return [
+    alarm.label.trim().toLowerCase(),
+    alarm.expectedQrPayload.trim(),
+    alarm.hour,
+    alarm.minute,
+    alarm.repeatSchedule,
+  ].join('::');
+}
+
+function mergeAlarmDefinition(existing: AlarmDefinition, incoming: AlarmDefinition) {
+  if (getAlarmUpdatedTimestamp(incoming) <= getAlarmUpdatedTimestamp(existing)) {
+    return existing;
   }
 
   return {
-    ...store,
-    currentStreak: progressState.currentStreak,
-    longestStreak: progressState.longestStreak,
-    failureHistory: progressState.failureHistory,
-    successHistory: progressState.successHistory,
+    ...incoming,
+    id: existing.id,
+    clientId: existing.clientId ?? incoming.clientId ?? incoming.id,
+    createdAt: existing.createdAt,
   };
+}
+
+function mergeAlarmDefinitions(
+  remoteAlarms: AlarmDefinition[],
+  localAlarms: AlarmDefinition[],
+  guestAlarms: AlarmDefinition[]
+) {
+  const mergedAlarms = [] as AlarmDefinition[];
+  const alarmIdMap = new Map<string, string>();
+  const dirtyAlarmIds = new Set<string>();
+  let importedAlarmCount = 0;
+  let mergedAlarmCount = 0;
+
+  const upsertAlarm = (alarm: AlarmDefinition, source: 'remote' | 'local' | 'guest') => {
+    const incomingAlarm = {
+      ...alarm,
+      clientId: alarm.clientId ?? alarm.id,
+      updatedAt: alarm.updatedAt ?? alarm.createdAt,
+    };
+    const semanticKey = getAlarmSemanticKey(incomingAlarm);
+    const existingIndex = mergedAlarms.findIndex(
+      (candidate) =>
+        candidate.id === incomingAlarm.id ||
+        candidate.clientId === incomingAlarm.clientId ||
+        getAlarmSemanticKey(candidate) === semanticKey
+    );
+
+    if (existingIndex === -1) {
+      mergedAlarms.push(incomingAlarm);
+      alarmIdMap.set(alarm.id, incomingAlarm.id);
+
+      if (source !== 'remote') {
+        dirtyAlarmIds.add(incomingAlarm.id);
+      }
+
+      if (source === 'guest') {
+        importedAlarmCount += 1;
+      }
+
+      return;
+    }
+
+    const existingAlarm = mergedAlarms[existingIndex];
+    const nextAlarm = mergeAlarmDefinition(existingAlarm, incomingAlarm);
+    mergedAlarms[existingIndex] = nextAlarm;
+
+    if (source !== 'remote' && nextAlarm !== existingAlarm) {
+      dirtyAlarmIds.add(nextAlarm.id);
+    }
+
+    if (source !== 'remote') {
+      alarmIdMap.set(alarm.id, nextAlarm.id);
+    }
+
+    if (source === 'guest') {
+      mergedAlarmCount += 1;
+    }
+  };
+
+  remoteAlarms.forEach((alarm) => upsertAlarm(alarm, 'remote'));
+  localAlarms.forEach((alarm) => upsertAlarm(alarm, 'local'));
+  guestAlarms.forEach((alarm) => upsertAlarm(alarm, 'guest'));
+
+  return {
+    alarms: sortAlarms(mergedAlarms),
+    alarmIdMap,
+    dirtyAlarmIds,
+    importedAlarmCount,
+    mergedAlarmCount,
+  };
+}
+
+function mergeRuntimeStoresForMergedAlarms(
+  localRuntimeStore: AlarmRuntimeStore,
+  guestRuntimeStore: AlarmRuntimeStore,
+  alarmIdMap: Map<string, string>,
+  knownAlarmIds: Set<string>,
+  dirtyAlarmIds: Set<string>
+) {
+  const alarms = { ...localRuntimeStore.alarms };
+
+  for (const [guestAlarmId, metadata] of Object.entries(guestRuntimeStore.alarms)) {
+    const alarmId = alarmIdMap.get(guestAlarmId) ?? guestAlarmId;
+
+    if (!knownAlarmIds.has(alarmId) || alarms[alarmId]) {
+      continue;
+    }
+
+    alarms[alarmId] = metadata;
+  }
+
+  return {
+    ...localRuntimeStore,
+    alarms: Object.fromEntries(Object.entries(alarms).filter(([alarmId]) => knownAlarmIds.has(alarmId))),
+    pendingUpserts: [...new Set([...localRuntimeStore.pendingUpserts, ...dirtyAlarmIds])],
+  };
+}
+
+function getAlarmHistoryOccurrenceKey(
+  alarmId: string,
+  scheduledFor: string | undefined,
+  outcome: AlarmOutcome,
+  resolvedAt: string
+) {
+  return `${alarmId}::${normalizeTimestampKey(scheduledFor) ?? `resolved:${normalizeTimestampKey(resolvedAt) ?? 'unknown'}`}::${outcome}`;
+}
+
+function shouldPreferHistoryEntry(existingResolvedAt: string, incomingResolvedAt: string) {
+  return new Date(incomingResolvedAt).getTime() < new Date(existingResolvedAt).getTime();
+}
+
+function getFailureHistoryKey(entry: FailureHistoryEntry) {
+  return getAlarmHistoryOccurrenceKey(entry.alarmId, entry.scheduledFor, 'missed', entry.failedAt);
+}
+
+function getSuccessHistoryKey(entry: SuccessHistoryEntry) {
+  return getAlarmHistoryOccurrenceKey(entry.alarmId, entry.scheduledFor, 'confirmed', entry.confirmedAt);
+}
+
+function remapFailureHistoryEntry(entry: FailureHistoryEntry, alarmIdMap: Map<string, string>) {
+  return {
+    ...entry,
+    alarmId: alarmIdMap.get(entry.alarmId) ?? entry.alarmId,
+  };
+}
+
+function remapSuccessHistoryEntry(entry: SuccessHistoryEntry, alarmIdMap: Map<string, string>) {
+  return {
+    ...entry,
+    alarmId: alarmIdMap.get(entry.alarmId) ?? entry.alarmId,
+  };
+}
+
+function mergeProgressHistories(
+  localStore: AlarmStore,
+  guestStore: AlarmStore,
+  remoteProgress: Awaited<ReturnType<typeof getMyAccountProgressState>> | null,
+  alarmIdMap: Map<string, string>
+) {
+  const failureHistoryByKey = new Map<string, FailureHistoryEntry>();
+  const successHistoryByKey = new Map<string, SuccessHistoryEntry>();
+
+  for (const entry of [
+    ...(remoteProgress?.failureHistory ?? []),
+    ...localStore.failureHistory.map((entry) => remapFailureHistoryEntry(entry, alarmIdMap)),
+    ...guestStore.failureHistory.map((entry) => remapFailureHistoryEntry(entry, alarmIdMap)),
+  ]) {
+    const historyKey = getFailureHistoryKey(entry);
+    const existingEntry = failureHistoryByKey.get(historyKey);
+
+    if (!existingEntry || shouldPreferHistoryEntry(existingEntry.failedAt, entry.failedAt)) {
+      failureHistoryByKey.set(historyKey, entry);
+    }
+  }
+
+  for (const entry of [
+    ...(remoteProgress?.successHistory ?? []),
+    ...localStore.successHistory.map((entry) => remapSuccessHistoryEntry(entry, alarmIdMap)),
+    ...guestStore.successHistory.map((entry) => remapSuccessHistoryEntry(entry, alarmIdMap)),
+  ]) {
+    const historyKey = getSuccessHistoryKey(entry);
+    const existingEntry = successHistoryByKey.get(historyKey);
+
+    if (!existingEntry || shouldPreferHistoryEntry(existingEntry.confirmedAt, entry.confirmedAt)) {
+      successHistoryByKey.set(historyKey, entry);
+    }
+  }
+
+  const failureHistory = sortFailureHistory([...failureHistoryByKey.values()]);
+  const successHistory = sortSuccessHistory([...successHistoryByKey.values()]);
+  const attemptHistory = getAlarmAttemptHistory(successHistory, failureHistory);
+  const latestAttempt = attemptHistory[attemptHistory.length - 1];
+  const checkpointStreakStats = latestAttempt
+    ? getCheckpointStreakStats(successHistory, failureHistory, latestAttempt.alarmId)
+    : { currentStreak: 0, longestStreak: 0 };
+
+  return {
+    currentStreak: checkpointStreakStats.currentStreak,
+    longestStreak: Math.max(
+      localStore.longestStreak,
+      guestStore.longestStreak,
+      remoteProgress?.longestStreak ?? 0,
+      checkpointStreakStats.longestStreak
+    ),
+    failureHistory,
+    successHistory,
+  };
+}
+
+function mergeCheckpointPresets(localStore: AlarmStore, guestStore: AlarmStore) {
+  const presetsByKey = new Map<string, CheckpointPreset>();
+
+  for (const preset of [...localStore.checkpointPresets, ...guestStore.checkpointPresets]) {
+    const key = `${preset.label.trim().toLowerCase()}::${preset.expectedQrPayload}`;
+    const existingPreset = presetsByKey.get(key);
+
+    if (!existingPreset || new Date(preset.lastUsedAt).getTime() > new Date(existingPreset.lastUsedAt).getTime()) {
+      presetsByKey.set(key, preset);
+    }
+  }
+
+  return sortCheckpointPresets([...presetsByKey.values()]);
+}
+
+function hasMigratableGuestStoreData(store: AlarmStore) {
+  return store.alarms.length > 0 || store.failureHistory.length > 0 || store.successHistory.length > 0;
+}
+
+function getGuestStoreFingerprint(store: AlarmStore) {
+  return JSON.stringify({
+    alarms: store.alarms
+      .map((alarm) => `${alarm.id}:${alarm.updatedAt ?? alarm.createdAt}`)
+      .sort(),
+    failures: store.failureHistory.map(getFailureHistoryKey).sort(),
+    successes: store.successHistory.map(getSuccessHistoryKey).sort(),
+  });
+}
+
+async function enqueueRecentGuestHistoryForSync(
+  guestStore: AlarmStore,
+  mergedStore: AlarmStore,
+  alarmIdMap: Map<string, string>
+) {
+  let importedHistoryCount = 0;
+
+  for (const entry of guestStore.failureHistory) {
+    const alarmId = alarmIdMap.get(entry.alarmId) ?? entry.alarmId;
+    const alarm = mergedStore.alarms.find((candidate) => candidate.id === alarmId);
+    const idempotencyKey = createAlarmOutcomeIdempotencyKey(alarmId, entry.scheduledFor, 'missed');
+
+    await enqueueAlarmEvent({
+      id: idempotencyKey,
+      clientId: createAlarmOutcomeIdempotencyKey(entry.alarmId, entry.scheduledFor, 'missed'),
+      idempotencyKey,
+      alarmId,
+      alarmLabel: entry.label,
+      scheduledFor: entry.scheduledFor,
+      outcome: 'missed',
+      resolvedAt: entry.failedAt,
+      source: 'device',
+      socialSettings: alarm?.socialSettings,
+      sharePayload: {
+        currentStreak: mergedStore.currentStreak,
+        longestStreak: mergedStore.longestStreak,
+        gracePeriodSeconds: alarm?.gracePeriodSeconds ?? 120,
+        weeklyCompletionRate: 0,
+        weeklySuccesses: 0,
+        weeklyFailures: 0,
+      },
+    });
+    importedHistoryCount += 1;
+  }
+
+  for (const entry of guestStore.successHistory) {
+    const alarmId = alarmIdMap.get(entry.alarmId) ?? entry.alarmId;
+    const alarm = mergedStore.alarms.find((candidate) => candidate.id === alarmId);
+    const idempotencyKey = createAlarmOutcomeIdempotencyKey(alarmId, entry.scheduledFor, 'confirmed');
+
+    await enqueueAlarmEvent({
+      id: idempotencyKey,
+      clientId: createAlarmOutcomeIdempotencyKey(entry.alarmId, entry.scheduledFor, 'confirmed'),
+      idempotencyKey,
+      alarmId,
+      alarmLabel: entry.label,
+      scheduledFor: entry.scheduledFor,
+      outcome: 'confirmed',
+      resolvedAt: entry.confirmedAt,
+      source: 'device',
+      socialSettings: alarm?.socialSettings,
+      sharePayload: {
+        currentStreak: mergedStore.currentStreak,
+        longestStreak: mergedStore.longestStreak,
+        gracePeriodSeconds: entry.gracePeriodSeconds,
+        timeToScanSeconds: entry.timeToScanSeconds,
+        weeklyCompletionRate: 0,
+        weeklySuccesses: 0,
+        weeklyFailures: 0,
+      },
+    });
+    importedHistoryCount += 1;
+  }
+
+  return importedHistoryCount;
 }
 
 export async function hydrateAlarmRuntimeForCurrentUser() {
   const localState = await readLocalAlarmState();
 
   if (!shouldSyncRemoteAlarms()) {
-    const reconciledState = await reconcileAlarmSchedules(localState.store, localState.runtimeStore);
+    const reconciledState = await reconcileAlarmOutcomesAndSchedules(localState.store, localState.runtimeStore);
     await writeLocalAlarmState(reconciledState.store, reconciledState.runtimeStore);
     return reconciledState.store;
   }
 
+  const activeScope = await getActiveStorageScope();
   let nextRuntimeStore = await flushPendingAlarmSync(localState.store, localState.runtimeStore);
 
   try {
-    let remoteAlarms = await listMyRemoteAlarms();
+    const [remoteAlarms, remoteProgress, rawGuestState, guestMigrationState] = await Promise.all([
+      listMyRemoteAlarms(),
+      getMyAccountProgressState().catch(() => null),
+      activeScope === GUEST_STORAGE_SCOPE
+        ? Promise.resolve({
+            store: createDefaultStore(),
+            runtimeStore: createDefaultRuntimeStore(),
+          })
+        : readLocalAlarmStateForScope(GUEST_STORAGE_SCOPE),
+      activeScope === GUEST_STORAGE_SCOPE ? Promise.resolve(null) : readGuestMigrationStateForScope(activeScope),
+    ]);
+    const guestFingerprint = getGuestStoreFingerprint(rawGuestState.store);
+    const shouldMigrateGuestState =
+      activeScope !== GUEST_STORAGE_SCOPE &&
+      hasMigratableGuestStoreData(rawGuestState.store) &&
+      guestMigrationState?.guestFingerprint !== guestFingerprint;
+    const guestState = shouldMigrateGuestState
+      ? rawGuestState
+      : {
+          store: createDefaultStore(),
+          runtimeStore: createDefaultRuntimeStore(),
+        };
+    const mergedAlarmState = mergeAlarmDefinitions(
+      remoteAlarms,
+      localState.store.alarms,
+      guestState.store.alarms
+    );
+    const knownAlarmIds = new Set(mergedAlarmState.alarms.map((alarm) => alarm.id));
+    nextRuntimeStore = mergeRuntimeStoresForMergedAlarms(
+      nextRuntimeStore,
+      guestState.runtimeStore,
+      mergedAlarmState.alarmIdMap,
+      knownAlarmIds,
+      mergedAlarmState.dirtyAlarmIds
+    );
 
-    if (remoteAlarms.length === 0 && localState.store.alarms.length > 0) {
+    let syncedRemoteAlarms = remoteAlarms;
+
+    if (mergedAlarmState.dirtyAlarmIds.size > 0) {
       try {
-        remoteAlarms = await upsertMyRemoteAlarms(localState.store.alarms.map(stripAlarmRuntimeMetadata));
+        syncedRemoteAlarms = await upsertMyRemoteAlarms(
+          mergedAlarmState.alarms
+            .filter((alarm) => mergedAlarmState.dirtyAlarmIds.has(alarm.id))
+            .map(stripAlarmRuntimeMetadata)
+        );
         nextRuntimeStore = {
           ...nextRuntimeStore,
           pendingUpserts: nextRuntimeStore.pendingUpserts.filter(
-            (alarmId) => !remoteAlarms.some((alarm) => alarm.id === alarmId)
+            (alarmId) => !syncedRemoteAlarms.some((alarm) => alarm.id === alarmId)
           ),
         };
       } catch {
-        remoteAlarms = localState.store.alarms.map(stripAlarmRuntimeMetadata);
+        // Keep merged local data visible and mark account-scope writes as unsynced for retry.
       }
     }
 
-    const remoteProgress = await getMyAccountProgressState().catch(() => null);
-    const mergedStore = applyRemoteProgressState(
-      {
-        ...localState.store,
-        alarms: sortAlarms(remoteAlarms),
-      },
-      remoteProgress
+    const progressState = mergeProgressHistories(
+      localState.store,
+      guestState.store,
+      remoteProgress,
+      mergedAlarmState.alarmIdMap
     );
-    const reconciledState = await reconcileAlarmSchedules(mergedStore, nextRuntimeStore);
+    const mergedStore: AlarmStore = {
+      ...localState.store,
+      alarms: mergedAlarmState.alarms,
+      lifetimeAlarmCreations: Math.max(
+        localState.store.lifetimeAlarmCreations,
+        guestState.store.lifetimeAlarmCreations,
+        mergedAlarmState.alarms.length
+      ),
+      currentStreak: progressState.currentStreak,
+      longestStreak: progressState.longestStreak,
+      failureHistory: progressState.failureHistory,
+      successHistory: progressState.successHistory,
+      checkpointPresets: mergeCheckpointPresets(localState.store, guestState.store),
+    };
+
+    const reconciledState = await reconcileAlarmOutcomesAndSchedules(mergedStore, nextRuntimeStore);
     await writeLocalAlarmState(reconciledState.store, reconciledState.runtimeStore);
+
+    if (shouldMigrateGuestState) {
+      await migrateGuestAlarmEventQueueToScope(activeScope, mergedAlarmState.alarmIdMap);
+      await enqueueRecentGuestHistoryForSync(guestState.store, reconciledState.store, mergedAlarmState.alarmIdMap);
+      await writeGuestMigrationStateForScope(activeScope, {
+        guestFingerprint,
+        migratedAt: new Date().toISOString(),
+      });
+      void flushAlarmEventQueue();
+    }
+
     return reconciledState.store;
   } catch {
-    const reconciledState = await reconcileAlarmSchedules(localState.store, nextRuntimeStore);
+    const reconciledState = await reconcileAlarmOutcomesAndSchedules(localState.store, nextRuntimeStore);
     await writeLocalAlarmState(reconciledState.store, reconciledState.runtimeStore);
     return reconciledState.store;
   }
@@ -826,37 +1579,43 @@ export async function getAlarmById(id: string) {
 
 export async function saveNewAlarm(alarm: Alarm) {
   const { store, runtimeStore } = await readLocalAlarmState();
+  const now = new Date().toISOString();
+  const alarmToSave: Alarm = {
+    ...alarm,
+    clientId: alarm.clientId ?? alarm.id,
+    updatedAt: alarm.updatedAt ?? now,
+  };
 
   const nextStore: AlarmStore = {
     ...store,
-    alarms: sortAlarms([stripAlarmRuntimeMetadata(alarm), ...store.alarms]),
+    alarms: sortAlarms([stripAlarmRuntimeMetadata(alarmToSave), ...store.alarms]),
     lifetimeAlarmCreations: store.lifetimeAlarmCreations + 1,
-    checkpointPresets: upsertCheckpointPreset(store.checkpointPresets, alarm),
+    checkpointPresets: upsertCheckpointPreset(store.checkpointPresets, alarmToSave),
   };
   let nextRuntimeStore: AlarmRuntimeStore = {
     ...runtimeStore,
     alarms: {
       ...runtimeStore.alarms,
-      [alarm.id]: {
-        notificationIds: alarm.notificationIds,
-        scheduledFor: alarm.scheduledFor,
-        notificationStrategyKey: alarm.notificationStrategyKey,
+      [alarmToSave.id]: {
+        notificationIds: alarmToSave.notificationIds,
+        scheduledFor: alarmToSave.scheduledFor,
+        notificationStrategyKey: alarmToSave.notificationStrategyKey,
       },
     },
     pendingUpserts: shouldSyncRemoteAlarms()
-      ? [...new Set([...runtimeStore.pendingUpserts, alarm.id])]
+      ? [...new Set([...runtimeStore.pendingUpserts, alarmToSave.id])]
       : runtimeStore.pendingUpserts,
-    pendingDeletes: runtimeStore.pendingDeletes.filter((candidate) => candidate !== alarm.id),
+    pendingDeletes: runtimeStore.pendingDeletes.filter((candidate) => candidate !== alarmToSave.id),
   };
 
   await writeLocalAlarmState(nextStore, nextRuntimeStore);
 
   if (shouldSyncRemoteAlarms()) {
     try {
-      await upsertMyRemoteAlarm(stripAlarmRuntimeMetadata(alarm));
+      await upsertMyRemoteAlarm(stripAlarmRuntimeMetadata(alarmToSave));
       nextRuntimeStore = {
         ...nextRuntimeStore,
-        pendingUpserts: nextRuntimeStore.pendingUpserts.filter((candidate) => candidate !== alarm.id),
+        pendingUpserts: nextRuntimeStore.pendingUpserts.filter((candidate) => candidate !== alarmToSave.id),
       };
       await writeRuntimeStore(nextRuntimeStore);
     } catch {
@@ -869,44 +1628,50 @@ export async function saveNewAlarm(alarm: Alarm) {
 
 export async function updateAlarm(updatedAlarm: Alarm) {
   const { store, runtimeStore } = await readLocalAlarmState();
+  const now = new Date().toISOString();
+  const alarmToSave: Alarm = {
+    ...updatedAlarm,
+    clientId: updatedAlarm.clientId ?? updatedAlarm.id,
+    updatedAt: now,
+  };
 
   const nextStore: AlarmStore = {
     ...store,
     alarms: sortAlarms(
       store.alarms.map((alarm) =>
-        alarm.id === updatedAlarm.id ? stripAlarmRuntimeMetadata(updatedAlarm) : alarm
+        alarm.id === alarmToSave.id ? stripAlarmRuntimeMetadata(alarmToSave) : alarm
       )
     ),
-    checkpointPresets: upsertCheckpointPreset(store.checkpointPresets, updatedAlarm),
+    checkpointPresets: upsertCheckpointPreset(store.checkpointPresets, alarmToSave),
   };
   let nextRuntimeStore: AlarmRuntimeStore = {
     ...runtimeStore,
     alarms: {
       ...runtimeStore.alarms,
-      [updatedAlarm.id]: {
-        notificationIds: updatedAlarm.notificationIds,
-        scheduledFor: updatedAlarm.scheduledFor,
-        notificationStrategyKey: updatedAlarm.notificationStrategyKey,
+      [alarmToSave.id]: {
+        notificationIds: alarmToSave.notificationIds,
+        scheduledFor: alarmToSave.scheduledFor,
+        notificationStrategyKey: alarmToSave.notificationStrategyKey,
       },
     },
     pendingUpserts: shouldSyncRemoteAlarms()
-      ? [...new Set([...runtimeStore.pendingUpserts, updatedAlarm.id])]
+      ? [...new Set([...runtimeStore.pendingUpserts, alarmToSave.id])]
       : runtimeStore.pendingUpserts,
-    pendingDeletes: runtimeStore.pendingDeletes.filter((candidate) => candidate !== updatedAlarm.id),
+    pendingDeletes: runtimeStore.pendingDeletes.filter((candidate) => candidate !== alarmToSave.id),
   };
 
-  if (!updatedAlarm.notificationIds?.length) {
-    delete nextRuntimeStore.alarms[updatedAlarm.id];
+  if (!alarmToSave.notificationIds?.length) {
+    delete nextRuntimeStore.alarms[alarmToSave.id];
   }
 
   await writeLocalAlarmState(nextStore, nextRuntimeStore);
 
   if (shouldSyncRemoteAlarms()) {
     try {
-      await upsertMyRemoteAlarm(stripAlarmRuntimeMetadata(updatedAlarm));
+      await upsertMyRemoteAlarm(stripAlarmRuntimeMetadata(alarmToSave));
       nextRuntimeStore = {
         ...nextRuntimeStore,
-        pendingUpserts: nextRuntimeStore.pendingUpserts.filter((candidate) => candidate !== updatedAlarm.id),
+        pendingUpserts: nextRuntimeStore.pendingUpserts.filter((candidate) => candidate !== alarmToSave.id),
       };
       await writeRuntimeStore(nextRuntimeStore);
     } catch {
@@ -914,7 +1679,7 @@ export async function updateAlarm(updatedAlarm: Alarm) {
     }
   }
 
-  return updatedAlarm;
+  return alarmToSave;
 }
 
 export async function rescheduleAlarm(
@@ -1002,7 +1767,13 @@ export async function deleteAlarm(id: string) {
   return nextStore;
 }
 
-export async function resolveAlarm(id: string, outcome: AlarmOutcome) {
+export async function resolveAlarm(
+  id: string,
+  outcome: AlarmOutcome,
+  options?: {
+    scheduledFor?: string;
+  }
+) {
   const { store, runtimeStore } = await readLocalAlarmState();
   const alarm = store.alarms.find((candidate) => candidate.id === id) ?? null;
 
@@ -1010,63 +1781,22 @@ export async function resolveAlarm(id: string, outcome: AlarmOutcome) {
     return null;
   }
 
-  if (!alarm.isActive) {
-    return alarm;
+  if (options?.scheduledFor && alarm.scheduledFor !== options.scheduledFor) {
+    return null;
   }
 
-  const updatedAlarm: Alarm = {
-    ...alarm,
-    isActive: false,
-    notificationIds: undefined,
-    lastOutcome: outcome,
-  };
+  if (!alarm.isActive) {
+    return options?.scheduledFor ? null : alarm;
+  }
 
-  const resolvedAt = new Date().toISOString();
-  const resolvedTimestamp = new Date(resolvedAt).getTime();
-  const scheduledTimestamp = alarm.scheduledFor ? new Date(alarm.scheduledFor).getTime() : resolvedTimestamp;
-  const failureEntry: FailureHistoryEntry | null =
-    outcome === 'missed'
-      ? {
-          alarmId: alarm.id,
-          label: alarm.label,
-          scheduledFor: alarm.scheduledFor,
-          failedAt: resolvedAt,
-        }
-      : null;
-  const successEntry: SuccessHistoryEntry | null =
-    outcome === 'confirmed'
-      ? {
-          alarmId: alarm.id,
-          label: alarm.label,
-          scheduledFor: alarm.scheduledFor,
-          confirmedAt: resolvedAt,
-          timeToScanSeconds: Math.min(
-            alarm.gracePeriodSeconds,
-            Math.max(0, Math.round((resolvedTimestamp - scheduledTimestamp) / 1000))
-          ),
-          gracePeriodSeconds: alarm.gracePeriodSeconds,
-        }
-      : null;
-  const nextFailureHistory = failureEntry
-    ? sortFailureHistory([failureEntry, ...store.failureHistory])
-    : store.failureHistory;
-  const nextSuccessHistory = successEntry
-    ? sortSuccessHistory([successEntry, ...store.successHistory])
-    : store.successHistory;
-  const checkpointStreakStats = getCheckpointStreakStats(nextSuccessHistory, nextFailureHistory, alarm.id);
+  const resolution = resolveAlarmOutcomeInStore(store, alarm.id, outcome);
 
-  const nextStore: AlarmStore = {
-    ...store,
-    alarms: sortAlarms(
-      store.alarms.map((candidate) =>
-        candidate.id === updatedAlarm.id ? stripAlarmRuntimeMetadata(updatedAlarm) : candidate
-      )
-    ),
-    currentStreak: checkpointStreakStats.currentStreak,
-    longestStreak: Math.max(store.longestStreak, checkpointStreakStats.longestStreak),
-    failureHistory: nextFailureHistory,
-    successHistory: nextSuccessHistory,
-  };
+  if (!resolution) {
+    return null;
+  }
+
+  const updatedAlarm = resolution.alarm;
+  const nextStore = resolution.store;
   let nextRuntimeStore: AlarmRuntimeStore = {
     ...runtimeStore,
     alarms: {
@@ -1074,6 +1804,7 @@ export async function resolveAlarm(id: string, outcome: AlarmOutcome) {
       [updatedAlarm.id]: {
         notificationIds: updatedAlarm.notificationIds,
         scheduledFor: updatedAlarm.scheduledFor,
+        notificationStrategyKey: updatedAlarm.notificationStrategyKey,
       },
     },
     pendingUpserts: shouldSyncRemoteAlarms()
@@ -1084,27 +1815,6 @@ export async function resolveAlarm(id: string, outcome: AlarmOutcome) {
   if (!updatedAlarm.notificationIds?.length) {
     delete nextRuntimeStore.alarms[updatedAlarm.id];
   }
-
-  const weeklyStats = getWeeklyCompletionStats(nextStore, resolvedTimestamp);
-  const eventRecord: AlarmEventRecord = {
-    id: `${alarm.id}-${resolvedAt}`,
-    alarmId: alarm.id,
-    alarmLabel: alarm.label,
-    scheduledFor: alarm.scheduledFor,
-    outcome,
-    resolvedAt,
-    source: 'device',
-    socialSettings: alarm.socialSettings,
-    sharePayload: {
-      currentStreak: nextStore.currentStreak,
-      longestStreak: nextStore.longestStreak,
-      gracePeriodSeconds: alarm.gracePeriodSeconds,
-      timeToScanSeconds: successEntry?.timeToScanSeconds,
-      weeklyCompletionRate: weeklyStats.completionRate,
-      weeklySuccesses: weeklyStats.successes,
-      weeklyFailures: weeklyStats.failures,
-    },
-  };
 
   await writeLocalAlarmState(nextStore, nextRuntimeStore);
 
@@ -1121,8 +1831,11 @@ export async function resolveAlarm(id: string, outcome: AlarmOutcome) {
     }
   }
 
-  await enqueueAlarmEvent(eventRecord);
-  void flushAlarmEventQueue();
+  if (resolution.eventRecord) {
+    await enqueueAlarmEvent(resolution.eventRecord);
+    void flushAlarmEventQueue();
+  }
+
   return updatedAlarm;
 }
 
@@ -1190,7 +1903,7 @@ export function getAlarmPhase(alarm: Alarm, now = Date.now()) {
 
 export function getNextActionableAlarm(alarms: Alarm[], now = Date.now()) {
   return alarms
-    .filter((alarm) => alarm.isActive && alarm.scheduledFor && now >= new Date(alarm.scheduledFor).getTime())
+    .filter((alarm) => alarm.isActive && alarm.scheduledFor && getAlarmPhase(alarm, now) === 'ringing')
     .sort((left, right) => {
       const leftTime = left.scheduledFor ? new Date(left.scheduledFor).getTime() : 0;
       const rightTime = right.scheduledFor ? new Date(right.scheduledFor).getTime() : 0;

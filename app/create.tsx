@@ -3,7 +3,7 @@ import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/dat
 import { BarcodeScanningResult, CameraView, useCameraPermissions } from 'expo-camera';
 import { type Href, useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
 import { type ComponentProps, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, AppState, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { AppButton } from '@/components/ui/app-button';
 import { AppInput } from '@/components/ui/app-input';
@@ -30,6 +30,9 @@ import {
 import {
   cancelAlarmNotificationAsync,
   ensureNotificationPermissionsAsync,
+  getNotificationPermissionState,
+  NotificationPermissionState,
+  openNotificationSettingsAsync,
   scheduleAlarmNotificationAsync,
 } from '@/lib/notifications';
 import { markOnboardingCompleted } from '@/lib/onboarding';
@@ -240,7 +243,9 @@ export default function CreateAlarmScreen() {
   const [isLoadingSocialCircles, setIsLoadingSocialCircles] = useState(false);
   const [socialCirclesError, setSocialCirclesError] = useState('');
   const [errors, setErrors] = useState<FormErrors>({});
-  const [permission, requestPermission] = useCameraPermissions();
+  const [permission, requestPermission, getPermission] = useCameraPermissions();
+  const [notificationPermissionState, setNotificationPermissionState] =
+    useState<NotificationPermissionState>('undetermined');
   const scrollViewRef = useRef<ScrollView | null>(null);
   const scannerTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastScannedPayloadRef = useRef<{ payload: string; purpose: ScannerPurpose; scannedAt: number } | null>(null);
@@ -263,7 +268,10 @@ export default function CreateAlarmScreen() {
       : 'Link a code before saving this checkpoint.';
   } else if (shouldSaveFromDetailsStep) {
     footerButtonLabel = isSaving ? 'Saving...' : isEditMode ? 'Save Changes' : 'Save Checkpoint';
-    footerHelperCopy = 'Code linked. You can save or tap Link Code to retest.';
+    footerHelperCopy =
+      notificationPermissionState === 'denied'
+        ? 'Notifications are blocked in Settings. Re-enable them before saving.'
+        : 'Code linked. You can save or tap Link Code to retest.';
   }
   const formattedTime = useMemo(
     () =>
@@ -273,6 +281,34 @@ export default function CreateAlarmScreen() {
       }),
     [time]
   );
+
+  const refreshNotificationPermission = useCallback(async () => {
+    const nextPermissionState = await getNotificationPermissionState().catch(
+      () => 'undetermined' as NotificationPermissionState
+    );
+    setNotificationPermissionState(nextPermissionState);
+    return nextPermissionState;
+  }, []);
+
+  const refreshCameraPermission = useCallback(async () => {
+    await getPermission().catch(() => null);
+  }, [getPermission]);
+
+  useEffect(() => {
+    void refreshNotificationPermission();
+    void refreshCameraPermission();
+
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        void refreshNotificationPermission();
+        void refreshCameraPermission();
+      }
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [refreshCameraPermission, refreshNotificationPermission]);
   const shouldShowCameraFallback = Boolean(
     scannerMessage &&
       !isScannerVisible &&
@@ -490,17 +526,22 @@ export default function CreateAlarmScreen() {
     setScannerMessage('');
 
     if (!permission?.granted) {
+      if (permission?.canAskAgain === false) {
+        setScannerMessage('Camera access is blocked. Open Settings to scan proof codes for this checkpoint.');
+        return;
+      }
+
       const response = await requestPermission();
 
       if (!response.granted) {
-        setScannerMessage('Camera access is required to scan a proof code into this checkpoint.');
+        setScannerMessage('Camera access is required to scan proof codes for this checkpoint.');
         return;
       }
     }
 
     setIsScannerEnabled(true);
     setIsScannerVisible(true);
-  }, [permission?.granted, requestPermission]);
+  }, [permission?.canAskAgain, permission?.granted, requestPermission]);
 
   const handleOpenLinkCodeStep = useCallback(() => {
     setActiveStep(2);
@@ -569,21 +610,26 @@ export default function CreateAlarmScreen() {
     setScannerMessage('Scan the saved QR code or barcode once to verify it matches this checkpoint.');
 
     if (!permission?.granted) {
+      if (permission?.canAskAgain === false) {
+        setScannerMessage('Camera access is blocked. Open Settings to test this proof code.');
+        return;
+      }
+
       const response = await requestPermission();
 
       if (!response.granted) {
-        setScannerMessage('Camera access is required to test this proof code.');
+        setScannerMessage('Camera access is required to scan and test this proof code.');
         return;
       }
     }
 
     setIsScannerEnabled(true);
     setIsScannerVisible(true);
-  }, [expectedQrPayload, permission?.granted, requestPermission]);
+  }, [expectedQrPayload, permission?.canAskAgain, permission?.granted, requestPermission]);
 
   const handleCameraFallbackAction = useCallback(async () => {
     if (permission?.canAskAgain === false) {
-      await Linking.openSettings();
+      await Linking.openSettings().catch(() => null);
       return;
     }
 
@@ -749,9 +795,15 @@ export default function CreateAlarmScreen() {
 
     try {
       const hasNotificationPermission = await ensureNotificationPermissionsAsync();
+      const nextNotificationPermissionState = await getNotificationPermissionState().catch(
+        () => (hasNotificationPermission ? 'granted' : 'denied') as NotificationPermissionState
+      );
+      setNotificationPermissionState(nextNotificationPermissionState);
 
       if (!hasNotificationPermission) {
-        alertNotificationPermission();
+        alertNotificationPermission(() => {
+          void openNotificationSettingsAsync().catch(() => null);
+        });
         return;
       }
 
@@ -1763,10 +1815,20 @@ function createQrCells(payload: string) {
   });
 }
 
-function alertNotificationPermission() {
+function alertNotificationPermission(onOpenSettings: () => void) {
   Alert.alert(
-    'Notification permission needed',
-    'Notifications are required so the checkpoint can go live on time.'
+    'Turn notifications back on',
+    'Checkpoints need notifications to go live at the right time. Enable notifications in Settings, then return here to save this checkpoint.',
+    [
+      {
+        text: 'Not now',
+        style: 'cancel',
+      },
+      {
+        text: 'Open Settings',
+        onPress: onOpenSettings,
+      },
+    ]
   );
 }
 

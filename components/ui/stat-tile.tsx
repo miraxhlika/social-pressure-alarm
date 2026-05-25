@@ -130,9 +130,14 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-start',
     gap: 4,
     minWidth: 0,
+    paddingTop: 3,
   },
   label: {
     flexShrink: 1,
+    fontFamily: Fonts.sans,
+    fontSize: 11,
+    lineHeight: 22,
+    paddingVertical: 2,
   },
   value: {
     fontFamily: Fonts.rounded,
@@ -145,9 +150,11 @@ const styles = StyleSheet.create({
   },
   helper: {
     ...TextPresets.body,
-    fontSize: 14,
     flexShrink: 1,
-    lineHeight: 20,
+    fontFamily: Fonts.sans,
+    fontSize: 14,
+    lineHeight: 24,
+    paddingVertical: 2,
   },
   progressTrack: {
     borderRadius: Radius.pill,

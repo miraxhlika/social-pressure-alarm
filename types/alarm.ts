@@ -38,6 +38,8 @@ export type AlarmEventRecord = {
   outcome: AlarmOutcome;
   resolvedAt: string;
   source: 'device';
+  clientId?: string;
+  idempotencyKey?: string;
   socialSettings?: AlarmSocialSettings;
   sharePayload: AlarmEventSharePayload;
 };
@@ -74,6 +76,7 @@ export type CheckpointPreset = {
 
 export type AlarmDefinition = {
   id: string;
+  clientId?: string;
   hour: number;
   minute: number;
   label: string;
@@ -86,6 +89,7 @@ export type AlarmDefinition = {
   gracePeriodSeconds: number;
   isActive: boolean;
   createdAt: string;
+  updatedAt?: string;
   scheduledFor?: string;
   socialSettings?: AlarmSocialSettings;
   lastOutcome?: AlarmOutcome;

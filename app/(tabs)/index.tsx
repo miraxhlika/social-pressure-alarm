@@ -192,12 +192,67 @@ function getTodayMisses(failureHistory: FailureHistoryEntry[]) {
   return failureHistory.filter((entry) => isSameLocalDay(entry.failedAt));
 }
 
+function normalizeTimelineTimestampKey(timestamp?: string) {
+  if (!timestamp) {
+    return undefined;
+  }
+
+  const timestampMs = new Date(timestamp).getTime();
+
+  return Number.isNaN(timestampMs) ? timestamp.trim() : new Date(timestampMs).toISOString();
+}
+
+function getTimelineOccurrenceKey(
+  alarmId: string,
+  scheduledFor: string | undefined,
+  outcome: 'confirmed' | 'missed',
+  resolvedAt: string
+) {
+  return `${alarmId}::${normalizeTimelineTimestampKey(scheduledFor) ?? `resolved:${normalizeTimelineTimestampKey(resolvedAt) ?? 'unknown'}`}::${outcome}`;
+}
+
+function shouldPreferTimelineEntry(existingResolvedAt: string, incomingResolvedAt: string) {
+  return new Date(incomingResolvedAt).getTime() < new Date(existingResolvedAt).getTime();
+}
+
+function getUniqueTodayClears(successHistory: SuccessHistoryEntry[]) {
+  const entriesByKey = new Map<string, SuccessHistoryEntry>();
+
+  for (const entry of getTodayClears(successHistory)) {
+    const key = getTimelineOccurrenceKey(entry.alarmId, entry.scheduledFor, 'confirmed', entry.confirmedAt);
+    const existingEntry = entriesByKey.get(key);
+
+    if (!existingEntry || shouldPreferTimelineEntry(existingEntry.confirmedAt, entry.confirmedAt)) {
+      entriesByKey.set(key, entry);
+    }
+  }
+
+  return [...entriesByKey.values()];
+}
+
+function getUniqueTodayMisses(failureHistory: FailureHistoryEntry[]) {
+  const entriesByKey = new Map<string, FailureHistoryEntry>();
+
+  for (const entry of getTodayMisses(failureHistory)) {
+    const key = getTimelineOccurrenceKey(entry.alarmId, entry.scheduledFor, 'missed', entry.failedAt);
+    const existingEntry = entriesByKey.get(key);
+
+    if (!existingEntry || shouldPreferTimelineEntry(existingEntry.failedAt, entry.failedAt)) {
+      entriesByKey.set(key, entry);
+    }
+  }
+
+  return [...entriesByKey.values()];
+}
+
 function getTodayTimeline(successHistory: SuccessHistoryEntry[], failureHistory: FailureHistoryEntry[], alarms: Alarm[]) {
+  const todayClears = getUniqueTodayClears(successHistory);
+  const todayMisses = getUniqueTodayMisses(failureHistory);
   const resolvedAlarmIds = new Set([
-    ...getTodayClears(successHistory).map((entry) => entry.alarmId),
-    ...getTodayMisses(failureHistory).map((entry) => entry.alarmId),
+    ...todayClears.map((entry) => entry.alarmId),
+    ...todayMisses.map((entry) => entry.alarmId),
   ]);
-  const clearedItems = getTodayClears(successHistory).map<TimelineItem>((entry) => ({
+  const clearedItems = todayClears.map<TimelineItem>((entry) => ({
     id: `success-${entry.alarmId}-${entry.confirmedAt}`,
     title: entry.label,
     detail: `Checked in · ${entry.timeToScanSeconds}s`,
@@ -206,7 +261,7 @@ function getTodayTimeline(successHistory: SuccessHistoryEntry[], failureHistory:
     sortAt: new Date(entry.scheduledFor ?? entry.confirmedAt).getTime(),
     timeLabel: formatTimelineTime(entry.scheduledFor ?? entry.confirmedAt),
   }));
-  const missedItems = getTodayMisses(failureHistory).map<TimelineItem>((entry) => ({
+  const missedItems = todayMisses.map<TimelineItem>((entry) => ({
     id: `miss-${entry.alarmId}-${entry.failedAt}`,
     title: entry.label,
     detail: 'Missed',
@@ -398,8 +453,8 @@ export default function TodayScreen() {
   const latestOutcome = getLatestOutcome(state.latestSuccess, state.latestFailure);
   const weeklyReliability = getWeeklyReliabilityCopy(state.progressSummary);
   const currentRun = getCurrentRunCopy(state.progressSummary, state.currentStreak);
-  const todayClears = useMemo(() => getTodayClears(state.successHistory), [state.successHistory]);
-  const todayMisses = useMemo(() => getTodayMisses(state.failureHistory), [state.failureHistory]);
+  const todayClears = useMemo(() => getUniqueTodayClears(state.successHistory), [state.successHistory]);
+  const todayMisses = useMemo(() => getUniqueTodayMisses(state.failureHistory), [state.failureHistory]);
   const todayTimeline = useMemo(
     () => getTodayTimeline(state.successHistory, state.failureHistory, state.alarms),
     [state.alarms, state.failureHistory, state.successHistory]

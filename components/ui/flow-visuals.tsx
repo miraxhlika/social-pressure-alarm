@@ -28,21 +28,25 @@ function getToneColor(tone: FlowVisualTone, colors: ReturnType<typeof getAppColo
 export function FlowInfoLine({
   icon,
   label,
+  multilineValue = false,
   value,
 }: {
   icon: keyof typeof Ionicons.glyphMap;
   label: string;
+  multilineValue?: boolean;
   value: string;
 }) {
   const colors = getAppColors(useColorScheme());
 
   return (
-    <View style={[styles.infoLine, { borderColor: colors.line }]}>
-      <View style={styles.infoLineLabel}>
+    <View style={[styles.infoLine, multilineValue && styles.infoLineMultiline, { borderColor: colors.line }]}>
+      <View style={[styles.infoLineLabel, multilineValue && styles.infoLineLabelMultiline]}>
         <Ionicons color={colors.muted} name={icon} size={14} />
         <Text style={[styles.infoLabel, { color: colors.textSoft }]}>{label}</Text>
       </View>
-      <Text numberOfLines={1} style={[styles.infoValue, { color: colors.text }]}>
+      <Text
+        numberOfLines={multilineValue ? undefined : 1}
+        style={[styles.infoValue, multilineValue && styles.infoValueMultiline, { color: colors.text }]}>
         {value}
       </Text>
     </View>
@@ -293,12 +297,18 @@ const styles = StyleSheet.create({
     minHeight: 32,
     paddingVertical: 7,
   },
+  infoLineMultiline: {
+    alignItems: 'flex-start',
+  },
   infoLineLabel: {
     alignItems: 'center',
     flexDirection: 'row',
     flexShrink: 1,
     gap: 7,
     minWidth: 0,
+  },
+  infoLineLabelMultiline: {
+    paddingTop: 1,
   },
   infoLabel: {
     ...TextPresets.body,
@@ -313,6 +323,9 @@ const styles = StyleSheet.create({
     lineHeight: 15,
     maxWidth: '55%',
     textAlign: 'right',
+  },
+  infoValueMultiline: {
+    maxWidth: '62%',
   },
   progressTrack: {
     borderRadius: Radius.pill,

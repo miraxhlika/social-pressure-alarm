@@ -1,9 +1,12 @@
 import { getSocialSession, getSupabaseClient } from '@/lib/social/client';
 import { hasSocialBackendConfig } from '@/lib/social/config';
 import {
+  GUEST_STORAGE_SCOPE,
   readScopedStorageValue,
+  readScopedStorageValueForScope,
   removeScopedStorageValue,
   writeScopedStorageValue,
+  writeScopedStorageValueForScope,
 } from '@/lib/storage';
 import { SocialQueueSummary, SocialRuntimeSnapshot } from '@/lib/social/types';
 import {
@@ -69,6 +72,10 @@ function normalizeOutcome(value: unknown): AlarmOutcome | null {
   return value === 'confirmed' || value === 'missed' ? value : null;
 }
 
+function getAlarmOutcomeIdempotencyKey(alarmId: string, scheduledFor: string | undefined, outcome: AlarmOutcome) {
+  return `${alarmId}::${scheduledFor ?? 'unscheduled'}::${outcome}`;
+}
+
 function normalizeQueuedAlarmEvent(value: unknown): QueuedAlarmEvent | null {
   if (!isRecord(value)) {
     return null;
@@ -121,6 +128,8 @@ function normalizeQueuedAlarmEvent(value: unknown): QueuedAlarmEvent | null {
     outcome,
     resolvedAt,
     source: 'device',
+    clientId: getTrimmedString(value.clientId) ?? id,
+    idempotencyKey: getTrimmedString(value.idempotencyKey) ?? id,
     socialSettings: normalizeSocialSettings(value.socialSettings),
     sharePayload: {
       currentStreak,
@@ -154,8 +163,15 @@ function normalizeSocialSyncMeta(value: unknown): SocialSyncMeta {
 
 async function readAlarmEventQueueStorage() {
   const scopedQueue = await readScopedStorageValue(ALARM_EVENT_QUEUE_KEY);
-  const rawValue = scopedQueue.value;
+  return parseAlarmEventQueueStorage(scopedQueue.value);
+}
 
+async function readAlarmEventQueueStorageForScope(scope: string) {
+  const scopedQueue = await readScopedStorageValueForScope(ALARM_EVENT_QUEUE_KEY, scope);
+  return parseAlarmEventQueueStorage(scopedQueue.value);
+}
+
+function parseAlarmEventQueueStorage(rawValue: string | null) {
   if (!rawValue) {
     return [] as QueuedAlarmEvent[];
   }
@@ -174,6 +190,10 @@ async function readAlarmEventQueueStorage() {
 
 async function writeAlarmEventQueueStorage(queue: QueuedAlarmEvent[]) {
   await writeScopedStorageValue(ALARM_EVENT_QUEUE_KEY, JSON.stringify(queue));
+}
+
+async function writeAlarmEventQueueStorageForScope(scope: string, queue: QueuedAlarmEvent[]) {
+  await writeScopedStorageValueForScope(ALARM_EVENT_QUEUE_KEY, scope, JSON.stringify(queue));
 }
 
 async function readSocialSyncMetaStorage() {
@@ -196,8 +216,10 @@ async function writeSocialSyncMetaStorage(meta: SocialSyncMeta) {
 }
 
 function mapQueuedAlarmEventForSync(event: QueuedAlarmEvent, userId: string) {
+  const idempotencyKey = event.idempotencyKey ?? event.clientId ?? event.id;
+
   return {
-    id: event.id,
+    id: idempotencyKey,
     user_id: userId,
     alarm_id: event.alarmId,
     alarm_label: event.alarmLabel,
@@ -208,7 +230,11 @@ function mapQueuedAlarmEventForSync(event: QueuedAlarmEvent, userId: string) {
     circle_id: event.socialSettings?.circleId ?? null,
     share_successes: event.socialSettings?.shareSuccesses ?? false,
     share_misses: event.socialSettings?.shareMisses ?? false,
-    metadata: event.sharePayload,
+    metadata: {
+      ...event.sharePayload,
+      clientId: event.clientId ?? event.id,
+      idempotencyKey,
+    },
   };
 }
 
@@ -223,6 +249,7 @@ function shouldCreateProofShare(event: QueuedAlarmEvent) {
 async function upsertProofShareForEvent(event: QueuedAlarmEvent, userId: string) {
   const client = getSupabaseClient();
   const circleId = event.socialSettings?.circleId;
+  const alarmEventId = event.idempotencyKey ?? event.clientId ?? event.id;
 
   if (!client || !circleId || !shouldCreateProofShare(event)) {
     return;
@@ -230,7 +257,7 @@ async function upsertProofShareForEvent(event: QueuedAlarmEvent, userId: string)
 
   const { error } = await client.from('proof_shares').upsert(
     {
-      alarm_event_id: event.id,
+      alarm_event_id: alarmEventId,
       user_id: userId,
       circle_id: circleId,
       payload: {
@@ -255,12 +282,16 @@ async function upsertProofShareForEvent(event: QueuedAlarmEvent, userId: string)
 
 export async function enqueueAlarmEvent(event: AlarmEventRecord) {
   const queue = await readAlarmEventQueueStorage();
+  const idempotencyKey = event.idempotencyKey ?? event.clientId ?? event.id;
   const nextQueue: QueuedAlarmEvent[] = [
     {
       ...event,
+      id: idempotencyKey,
+      clientId: event.clientId ?? event.id,
+      idempotencyKey,
       attempts: 0,
     },
-    ...queue.filter((queuedEvent) => queuedEvent.id !== event.id),
+    ...queue.filter((queuedEvent) => (queuedEvent.idempotencyKey ?? queuedEvent.id) !== idempotencyKey),
   ];
 
   await writeAlarmEventQueueStorage(nextQueue);
@@ -270,6 +301,57 @@ export async function enqueueAlarmEvent(event: AlarmEventRecord) {
 
 export async function readAlarmEventQueue() {
   return readAlarmEventQueueStorage();
+}
+
+export async function migrateGuestAlarmEventQueueToScope(
+  targetScope: string,
+  alarmIdMap: Map<string, string>
+) {
+  if (targetScope === GUEST_STORAGE_SCOPE) {
+    return {
+      importedCount: 0,
+    };
+  }
+
+  const [guestQueue, targetQueue] = await Promise.all([
+    readAlarmEventQueueStorageForScope(GUEST_STORAGE_SCOPE),
+    readAlarmEventQueueStorageForScope(targetScope),
+  ]);
+
+  if (guestQueue.length === 0) {
+    return {
+      importedCount: 0,
+    };
+  }
+
+  const existingKeys = new Set(targetQueue.map((event) => event.idempotencyKey ?? event.id));
+  const importedEvents = guestQueue
+    .map((event) => {
+      const alarmId = alarmIdMap.get(event.alarmId) ?? event.alarmId;
+      const idempotencyKey = getAlarmOutcomeIdempotencyKey(alarmId, event.scheduledFor, event.outcome);
+
+      return {
+        ...event,
+        id: idempotencyKey,
+        alarmId,
+        clientId: event.clientId ?? event.id,
+        idempotencyKey,
+        lastSyncError: event.lastSyncError,
+      };
+    })
+    .filter((event) => !existingKeys.has(event.idempotencyKey ?? event.id));
+
+  if (importedEvents.length === 0) {
+    return {
+      importedCount: 0,
+    };
+  }
+
+  await writeAlarmEventQueueStorageForScope(targetScope, [...importedEvents, ...targetQueue]);
+
+  return {
+    importedCount: importedEvents.length,
+  };
 }
 
 export async function getSocialQueueSummary(): Promise<SocialQueueSummary> {

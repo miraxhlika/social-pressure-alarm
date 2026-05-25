@@ -707,7 +707,7 @@ export default function CirclesScreen() {
 const styles = StyleSheet.create({
   screenContent: {
     gap: 10,
-    paddingBottom: 150,
+    paddingBottom: Spacing.lg,
     paddingHorizontal: Spacing.lg,
     paddingTop: 2,
   },

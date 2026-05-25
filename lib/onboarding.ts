@@ -3,15 +3,20 @@ import { readScopedStorageValue, writeScopedStorageValue } from '@/lib/storage';
 const ONBOARDING_STORAGE_KEY = 'social-pressure-alarm/onboarding';
 
 export type OnboardingStatus = 'pending' | 'active' | 'completed' | 'skipped';
+export type OnboardingStep = 'welcome' | 'how' | 'permissions';
 
 export type OnboardingState = {
   status: OnboardingStatus;
+  currentStep: OnboardingStep;
+  returnToPermissionsAfterSettings: boolean;
   updatedAt: string | null;
 };
 
 function createDefaultOnboardingState(): OnboardingState {
   return {
     status: 'pending',
+    currentStep: 'welcome',
+    returnToPermissionsAfterSettings: false,
     updatedAt: null,
   };
 }
@@ -22,6 +27,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function normalizeOnboardingStatus(value: unknown): OnboardingStatus {
   return value === 'active' || value === 'completed' || value === 'skipped' ? value : 'pending';
+}
+
+function normalizeOnboardingStep(value: unknown): OnboardingStep {
+  if (value === 'welcome' || value === 'how' || value === 'permissions') {
+    return value;
+  }
+
+  return 'welcome';
+}
+
+function normalizeBoolean(value: unknown) {
+  return value === true;
 }
 
 function normalizeOptionalIsoString(value: unknown) {
@@ -46,8 +63,12 @@ export async function readOnboardingState() {
       return createDefaultOnboardingState();
     }
 
+    const status = normalizeOnboardingStatus(parsed.status);
+
     return {
-      status: normalizeOnboardingStatus(parsed.status),
+      status,
+      currentStep: normalizeOnboardingStep(parsed.currentStep),
+      returnToPermissionsAfterSettings: normalizeBoolean(parsed.returnToPermissionsAfterSettings),
       updatedAt: normalizeOptionalIsoString(parsed.updatedAt),
     };
   } catch {
@@ -55,9 +76,15 @@ export async function readOnboardingState() {
   }
 }
 
-export async function writeOnboardingState(status: OnboardingStatus) {
+export async function writeOnboardingState(
+  status: OnboardingStatus,
+  currentStep?: OnboardingStep,
+  options?: { returnToPermissionsAfterSettings?: boolean }
+) {
   const nextState: OnboardingState = {
     status,
+    currentStep: currentStep ?? normalizeOnboardingStep(null),
+    returnToPermissionsAfterSettings: options?.returnToPermissionsAfterSettings ?? false,
     updatedAt: new Date().toISOString(),
   };
 
@@ -66,8 +93,12 @@ export async function writeOnboardingState(status: OnboardingStatus) {
   return nextState;
 }
 
-export async function markOnboardingActive() {
-  return writeOnboardingState('active');
+export async function markOnboardingActive(currentStep: OnboardingStep = 'welcome') {
+  return writeOnboardingState('active', currentStep);
+}
+
+export async function markOnboardingReturningFromSettings() {
+  return writeOnboardingState('active', 'permissions', { returnToPermissionsAfterSettings: true });
 }
 
 export async function markOnboardingCompleted() {

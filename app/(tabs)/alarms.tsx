@@ -24,11 +24,13 @@ import {
 import { getPrimaryAlarm } from '@/lib/dashboard';
 import { cancelAlarmNotificationAsync } from '@/lib/notifications';
 import { getProgressSummary, ProgressSummary } from '@/lib/progress';
+import { listMySocialCircles } from '@/lib/social/circles';
 import { resetSocialSyncState } from '@/lib/social/queue';
 import { Alarm } from '@/types/alarm';
 
 type AlarmScreenState = {
   alarms: Alarm[];
+  circleNamesById: Record<string, string>;
   progressSummary: ProgressSummary | null;
 };
 
@@ -40,6 +42,7 @@ export default function AlarmsScreen() {
   const [isLoading, setIsLoading] = useState(true);
   const [state, setState] = useState<AlarmScreenState>({
     alarms: [],
+    circleNamesById: {},
     progressSummary: null,
   });
 
@@ -54,10 +57,13 @@ export default function AlarmsScreen() {
     try {
       await hydrateAlarmRuntimeForCurrentUser().catch(() => null);
       const store = await readAlarmStore();
+      const hasSharedCheckpoints = store.alarms.some((alarm) => alarm.socialSettings?.circleId);
+      const circles = hasSharedCheckpoints ? await listMySocialCircles().catch(() => []) : [];
 
       if (loadAlarmsRequestRef.current === requestId) {
         setState({
           alarms: store.alarms,
+          circleNamesById: Object.fromEntries(circles.map((circle) => [circle.id, circle.name])),
           progressSummary: getProgressSummary(store),
         });
       }
@@ -258,6 +264,7 @@ export default function AlarmsScreen() {
               <AlarmCard
                 key={alarm.id}
                 alarm={alarm}
+                circleName={alarm.socialSettings?.circleId ? state.circleNamesById[alarm.socialSettings.circleId] : undefined}
                 onDelete={handleDeleteAlarm}
                 onDetails={handleOpenDetails}
                 onEdit={handleEditAlarm}
@@ -278,7 +285,7 @@ export default function AlarmsScreen() {
 const styles = StyleSheet.create({
   screenContent: {
     gap: 10,
-    paddingBottom: 150,
+    paddingBottom: Spacing.lg,
     paddingHorizontal: Spacing.lg,
     paddingTop: 2,
   },

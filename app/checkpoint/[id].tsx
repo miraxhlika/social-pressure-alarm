@@ -353,6 +353,7 @@ export default function CheckpointDetailsScreen() {
         <FlowInfoLine
           icon="people-outline"
           label="Accountability"
+          multilineValue
           value={getCheckpointSocialDescription(alarm.socialSettings)}
         />
       </FlowPanel>
@@ -383,7 +384,7 @@ export default function CheckpointDetailsScreen() {
       <FlowPanel style={styles.notesPanel}>
         <FlowSectionLabel>NOTES</FlowSectionLabel>
         <Text style={[styles.notesText, { color: colors.textSoft }]}>
-          {alarm.notes || 'Scan before every workout to stay consistent and build momentum.'}
+          {alarm.notes || 'No notes added.'}
         </Text>
       </FlowPanel>
 

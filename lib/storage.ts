@@ -15,39 +15,49 @@ export async function getActiveStorageScope() {
 
 export async function readScopedStorageValue(baseKey: string) {
   const scope = await getActiveStorageScope();
-  const scopedKey = getScopedStorageKey(baseKey, scope);
-  const scopedValue = await AsyncStorage.getItem(scopedKey);
+  const scopedValue = await readScopedStorageValueForScope(baseKey, scope);
 
-  if (scopedValue !== null) {
-    return {
-      scope,
-      storageKey: scopedKey,
-      value: scopedValue,
-    };
+  if (scopedValue.value !== null) {
+    return scopedValue;
   }
 
   const legacyValue = await AsyncStorage.getItem(baseKey);
 
   if (legacyValue === null) {
-    return {
-      scope,
-      storageKey: scopedKey,
-      value: null,
-    };
+    return scopedValue;
   }
 
-  await AsyncStorage.setItem(scopedKey, legacyValue);
+  await AsyncStorage.setItem(scopedValue.storageKey, legacyValue);
   await AsyncStorage.removeItem(baseKey);
 
   return {
     scope,
-    storageKey: scopedKey,
+    storageKey: scopedValue.storageKey,
     value: legacyValue,
   };
 }
 
 export async function writeScopedStorageValue(baseKey: string, value: string) {
   const scope = await getActiveStorageScope();
+  return writeScopedStorageValueForScope(baseKey, scope, value);
+}
+
+export async function removeScopedStorageValue(baseKey: string) {
+  const scope = await getActiveStorageScope();
+  return removeScopedStorageValueForScope(baseKey, scope);
+}
+
+export async function readScopedStorageValueForScope(baseKey: string, scope: string) {
+  const storageKey = getScopedStorageKey(baseKey, scope);
+
+  return {
+    scope,
+    storageKey,
+    value: await AsyncStorage.getItem(storageKey),
+  };
+}
+
+export async function writeScopedStorageValueForScope(baseKey: string, scope: string, value: string) {
   const storageKey = getScopedStorageKey(baseKey, scope);
   await AsyncStorage.setItem(storageKey, value);
 
@@ -57,8 +67,7 @@ export async function writeScopedStorageValue(baseKey: string, value: string) {
   };
 }
 
-export async function removeScopedStorageValue(baseKey: string) {
-  const scope = await getActiveStorageScope();
+export async function removeScopedStorageValueForScope(baseKey: string, scope: string) {
   const storageKey = getScopedStorageKey(baseKey, scope);
   await AsyncStorage.removeItem(storageKey);
 

@@ -2,8 +2,13 @@ import { Ionicons } from '@expo/vector-icons';
 import { useCameraPermissions } from 'expo-camera';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
-import { ReactNode, useEffect, useRef, useState } from 'react';
+import { StatusBar } from 'expo-status-bar';
+import { ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
+  AppState,
+  Linking,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -18,11 +23,18 @@ import { trackAnalyticsEvent } from '@/lib/analytics';
 import {
   ensureNotificationPermissionsAsync,
   getNotificationPermissionState,
+  isNotificationPermissionEnabled,
   NotificationPermissionState,
+  openNotificationSettingsAsync,
 } from '@/lib/notifications';
-import { markOnboardingActive, markOnboardingCompleted, readOnboardingState } from '@/lib/onboarding';
+import {
+  markOnboardingActive,
+  markOnboardingCompleted,
+  markOnboardingReturningFromSettings,
+  OnboardingStep,
+  readOnboardingState,
+} from '@/lib/onboarding';
 
-type OnboardingStep = 'welcome' | 'how' | 'permissions';
 type CameraPermissionState = 'granted' | 'denied' | 'undetermined';
 
 const STEPS: OnboardingStep[] = ['welcome', 'how', 'permissions'];
@@ -77,13 +89,67 @@ export default function OnboardingScreen() {
   const { width } = useWindowDimensions();
   const pagerRef = useRef<ScrollView | null>(null);
   const onboardingTrackedRef = useRef(false);
+  const activeStepRef = useRef<OnboardingStep>('welcome');
+  const programmaticScrollTargetRef = useRef<OnboardingStep | null>(null);
+  const programmaticScrollClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [activeStep, setActiveStep] = useState<OnboardingStep>('welcome');
+  const [isOnboardingReady, setIsOnboardingReady] = useState(false);
   const [notificationState, setNotificationState] = useState<NotificationPermissionState>('undetermined');
-  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+  const [cameraPermission, requestCameraPermission, getCameraPermission] = useCameraPermissions();
   const cameraState: CameraPermissionState = cameraPermission?.granted
     ? 'granted'
     : cameraPermission?.canAskAgain === false
       ? 'denied'
       : 'undetermined';
+
+  const refreshNotificationPermission = useCallback(async () => {
+    const permissionState = await getNotificationPermissionState().catch(
+      () => 'undetermined' as NotificationPermissionState
+    );
+    setNotificationState(permissionState);
+    return permissionState;
+  }, []);
+
+  const refreshCameraPermission = useCallback(async () => {
+    const permissionState = await getCameraPermission().catch(() => null);
+    return permissionState?.granted
+      ? 'granted'
+      : permissionState?.canAskAgain === false
+        ? 'denied'
+        : 'undetermined';
+  }, [getCameraPermission]);
+
+  const scrollPagerToStep = useCallback(
+    (step: OnboardingStep, animated: boolean) => {
+      pagerRef.current?.scrollTo({ animated, x: getStepIndex(step) * width });
+    },
+    [width]
+  );
+
+  const restorePagerPosition = useCallback(() => {
+    if (!isOnboardingReady) {
+      return;
+    }
+
+    const step = activeStepRef.current;
+    scrollPagerToStep(step, false);
+    requestAnimationFrame(() => scrollPagerToStep(step, false));
+  }, [isOnboardingReady, scrollPagerToStep]);
+
+  const clearProgrammaticScrollTarget = useCallback(() => {
+    if (programmaticScrollClearTimerRef.current) {
+      clearTimeout(programmaticScrollClearTimerRef.current);
+      programmaticScrollClearTimerRef.current = null;
+    }
+
+    programmaticScrollTargetRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    activeStepRef.current = activeStep;
+  }, [activeStep]);
+
+  useEffect(() => clearProgrammaticScrollTarget, [clearProgrammaticScrollTarget]);
 
   useEffect(() => {
     let isMounted = true;
@@ -98,14 +164,31 @@ export default function OnboardingScreen() {
         return;
       }
 
-      setNotificationState(permissionState);
+      const restoredStep =
+        onboardingState.status === 'active' && onboardingState.returnToPermissionsAfterSettings
+          ? 'permissions'
+          : onboardingState.currentStep;
 
-      if (onboardingTrackedRef.current || onboardingState.status === 'completed') {
+      activeStepRef.current = restoredStep;
+      setActiveStep(restoredStep);
+      setNotificationState(permissionState);
+      setIsOnboardingReady(true);
+
+      if (onboardingState.returnToPermissionsAfterSettings) {
+        await markOnboardingActive(restoredStep);
+      }
+
+      if (
+        onboardingTrackedRef.current ||
+        onboardingState.status === 'active' ||
+        onboardingState.status === 'completed' ||
+        onboardingState.status === 'skipped'
+      ) {
         return;
       }
 
       onboardingTrackedRef.current = true;
-      await markOnboardingActive();
+      await markOnboardingActive(restoredStep);
       await trackAnalyticsEvent('onboarding_started', { source: 'app_launch' });
     };
 
@@ -116,9 +199,60 @@ export default function OnboardingScreen() {
     };
   }, []);
 
-  const scrollToStep = (step: OnboardingStep) => {
-    pagerRef.current?.scrollTo({ animated: true, x: getStepIndex(step) * width });
-  };
+  useLayoutEffect(() => {
+    restorePagerPosition();
+  }, [restorePagerPosition]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        void refreshNotificationPermission();
+        void refreshCameraPermission();
+      }
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [refreshCameraPermission, refreshNotificationPermission]);
+
+  const persistOnboardingStep = useCallback((step: OnboardingStep) => {
+    activeStepRef.current = step;
+    setActiveStep(step);
+    void markOnboardingActive(step);
+  }, []);
+
+  const navigateToStep = useCallback((step: OnboardingStep) => {
+    clearProgrammaticScrollTarget();
+    programmaticScrollTargetRef.current = step;
+    programmaticScrollClearTimerRef.current = setTimeout(() => {
+      if (programmaticScrollTargetRef.current === step) {
+        programmaticScrollTargetRef.current = null;
+      }
+    }, 1000);
+    persistOnboardingStep(step);
+    scrollPagerToStep(step, true);
+  }, [clearProgrammaticScrollTarget, persistOnboardingStep, scrollPagerToStep]);
+
+  const handlePagerScrollEnd = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      const nextIndex = Math.max(0, Math.min(STEPS.length - 1, Math.round(event.nativeEvent.contentOffset.x / width)));
+      const nextStep = STEPS[nextIndex];
+
+      if (programmaticScrollTargetRef.current) {
+        if (nextStep === programmaticScrollTargetRef.current) {
+          clearProgrammaticScrollTarget();
+        }
+
+        return;
+      }
+
+      if (nextStep && nextStep !== activeStepRef.current) {
+        persistOnboardingStep(nextStep);
+      }
+    },
+    [clearProgrammaticScrollTarget, persistOnboardingStep, width]
+  );
 
   const handleContinueLocally = async () => {
     await markOnboardingCompleted();
@@ -141,6 +275,14 @@ export default function OnboardingScreen() {
   };
 
   const handleRequestNotifications = async () => {
+    const currentState = await refreshNotificationPermission();
+
+    if (currentState === 'denied') {
+      await markOnboardingReturningFromSettings();
+      await openNotificationSettingsAsync().catch(() => null);
+      return;
+    }
+
     const granted = await ensureNotificationPermissionsAsync().catch(() => false);
     const nextState = granted
       ? await getNotificationPermissionState().catch(() => 'granted' as NotificationPermissionState)
@@ -148,24 +290,47 @@ export default function OnboardingScreen() {
     setNotificationState(nextState);
   };
 
+  const handleRequestCamera = async () => {
+    const currentState = await refreshCameraPermission();
+
+    if (currentState === 'denied') {
+      await markOnboardingReturningFromSettings();
+      await Linking.openSettings().catch(() => null);
+      return;
+    }
+
+    await requestCameraPermission();
+  };
+
+  if (!isOnboardingReady) {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <StatusBar style="dark" />
+      </SafeAreaView>
+    );
+  }
+
   return (
     <SafeAreaView style={styles.safeArea}>
+      <StatusBar style="dark" />
       <ScrollView
         bounces={false}
         contentContainerStyle={styles.pagerContent}
         horizontal
         keyboardShouldPersistTaps="handled"
+        onLayout={restorePagerPosition}
+        onMomentumScrollEnd={handlePagerScrollEnd}
         pagingEnabled
         ref={pagerRef}
         showsHorizontalScrollIndicator={false}>
-        <WelcomeStep width={width} onNext={() => scrollToStep('how')} />
-        <HowItWorksStep width={width} onSelectStep={scrollToStep} />
+        <WelcomeStep width={width} onNext={() => navigateToStep('how')} />
+        <HowItWorksStep width={width} onNext={() => navigateToStep('permissions')} />
         <PermissionsStep
           cameraState={cameraState}
           notificationState={notificationState}
           onContinueLocally={() => void handleContinueLocally()}
           onOptionalSignIn={() => void handleOptionalSignIn()}
-          onRequestCamera={() => void requestCameraPermission()}
+          onRequestCamera={() => void handleRequestCamera()}
           onRequestNotifications={() => void handleRequestNotifications()}
           width={width}
         />
@@ -205,10 +370,10 @@ function WelcomeStep({ onNext, width }: { onNext: () => void; width: number }) {
 }
 
 function HowItWorksStep({
-  onSelectStep,
+  onNext,
   width,
 }: {
-  onSelectStep: (step: OnboardingStep) => void;
+  onNext: () => void;
   width: number;
 }) {
   return (
@@ -245,7 +410,10 @@ function HowItWorksStep({
         </View>
       </View>
 
-      <PaginationDots onSelectStep={onSelectStep} />
+      <View style={styles.actions}>
+        <OnboardingButton icon="chevron-forward" label="Continue" onPress={onNext} />
+        <PaginationDots activeStep="how" />
+      </View>
     </View>
   );
 }
@@ -267,7 +435,7 @@ function PermissionsStep({
   onRequestNotifications: () => void;
   width: number;
 }) {
-  const isNotificationEnabled = notificationState === 'granted' || notificationState === 'provisional';
+  const isNotificationEnabled = isNotificationPermissionEnabled(notificationState);
   const isCameraEnabled = cameraState === 'granted';
   const canCompleteOnboarding = isNotificationEnabled && isCameraEnabled;
   const notificationBadge = isNotificationEnabled ? 'Enabled' : notificationState === 'denied' ? 'Denied' : 'Required';
@@ -290,6 +458,7 @@ function PermissionsStep({
       <View style={styles.permissionList}>
         <PermissionRow
           badge={notificationBadge}
+          badgeTone={notificationState === 'denied' ? 'danger' : isNotificationEnabled ? 'success' : 'warning'}
           description={
             notificationState === 'denied'
               ? 'Notifications are required for checkpoint reminders. Enable them in system settings to continue.'
@@ -303,6 +472,7 @@ function PermissionsStep({
         />
         <PermissionRow
           badge={cameraBadge}
+          badgeTone={cameraState === 'denied' ? 'danger' : isCameraEnabled ? 'success' : 'warning'}
           description={
             cameraState === 'denied'
               ? 'Camera access is required for scans. Enable it in system settings to continue.'
@@ -371,12 +541,14 @@ function Header({
 
 function PermissionRow({
   badge,
+  badgeTone,
   description,
   icon,
   onPress,
   title,
 }: {
   badge: string;
+  badgeTone: 'success' | 'warning' | 'danger';
   description: string;
   icon: keyof typeof Ionicons.glyphMap;
   onPress?: () => void;
@@ -393,14 +565,16 @@ function PermissionRow({
       </View>
       <View style={styles.rowCopy}>
         <View style={styles.permissionTitleRow}>
-          <Text style={styles.rowTitle}>{title}</Text>
-          <View style={styles.badge}>
-            <Text style={styles.badgeText}>{badge}</Text>
+          <Text numberOfLines={1} style={styles.rowTitle}>
+            {title}
+          </Text>
+          <View style={[styles.badge, styles[`${badgeTone}Badge`]]}>
+            <Text style={[styles.badgeText, styles[`${badgeTone}BadgeText`]]}>{badge}</Text>
           </View>
         </View>
         <Text style={styles.rowDescription}>{description}</Text>
       </View>
-      <Ionicons color={palette.muted} name="chevron-forward" size={18} />
+      {onPress ? <Ionicons color={palette.muted} name="chevron-forward" size={18} /> : null}
     </Pressable>
   );
 }
@@ -445,20 +619,15 @@ function OnboardingButton({
   );
 }
 
-function PaginationDots({
-  onSelectStep,
-}: {
-  onSelectStep: (step: OnboardingStep) => void;
-}) {
+function PaginationDots({ activeStep }: { activeStep: OnboardingStep }) {
+  const activeStepIndex = getStepIndex(activeStep);
+
   return (
-    <View accessibilityLabel="How it works detail 1 of 3" style={styles.dots}>
+    <View accessibilityLabel={`Onboarding step ${activeStepIndex + 1} of ${STEPS.length}`} style={styles.dots}>
       {STEPS.map((step, index) => (
-        <Pressable
-          accessibilityRole="button"
-          hitSlop={10}
+        <View
           key={step}
-          onPress={() => onSelectStep(step)}
-          style={[styles.dot, index === 0 ? styles.dotActive : null]}
+          style={[styles.dot, index === activeStepIndex ? styles.dotActive : null]}
         />
       ))}
     </View>
@@ -900,6 +1069,7 @@ const styles = StyleSheet.create({
   },
   rowTitle: {
     color: palette.ink,
+    flex: 1,
     flexShrink: 1,
     fontFamily: Fonts.rounded,
     fontSize: 15,
@@ -1027,7 +1197,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     flexDirection: 'row',
     gap: Spacing.md,
-    minHeight: 87,
+    minHeight: 94,
     padding: Spacing.md,
   },
   permissionIcon: {
@@ -1042,20 +1212,35 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flexDirection: 'row',
     gap: Spacing.sm,
-    justifyContent: 'space-between',
   },
   badge: {
-    backgroundColor: palette.greenSoft,
     borderRadius: Radius.pill,
     paddingHorizontal: 8,
     paddingVertical: 4,
   },
   badgeText: {
-    color: palette.green,
     fontFamily: Fonts.rounded,
     fontSize: 10,
     fontWeight: '800',
     lineHeight: 13,
+  },
+  successBadge: {
+    backgroundColor: palette.greenSoft,
+  },
+  successBadgeText: {
+    color: palette.green,
+  },
+  warningBadge: {
+    backgroundColor: palette.goldSoft,
+  },
+  warningBadgeText: {
+    color: '#8D6A25',
+  },
+  dangerBadge: {
+    backgroundColor: '#FCE8E8',
+  },
+  dangerBadgeText: {
+    color: '#B42318',
   },
   localCard: {
     alignItems: 'center',
