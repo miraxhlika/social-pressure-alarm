@@ -13,6 +13,7 @@ import { readScopedStorageValue, writeScopedStorageValue } from '@/lib/storage';
 const ALARM_CHANNEL_ID = 'social-pressure-alarm';
 const NOTIFICATION_PREFERENCES_STORAGE_KEY = 'social-pressure-alarm/notification-preferences';
 const WEEKLY_REVIEW_NOTIFICATION_STORAGE_KEY = 'social-pressure-alarm/weekly-review-notification';
+const CHECKPOINT_NOTIFICATION_ID_PREFIX = 'checkpoint';
 
 export type NotificationPreferences = {
   urgencyRemindersEnabled: boolean;
@@ -23,7 +24,7 @@ export type NotificationPreferences = {
 export type NotificationPermissionState = 'granted' | 'provisional' | 'denied' | 'undetermined';
 
 export const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
-  urgencyRemindersEnabled: true,
+  urgencyRemindersEnabled: false,
   eveningReadinessRemindersEnabled: false,
   weeklyReviewRemindersEnabled: false,
 };
@@ -115,6 +116,26 @@ function getNextWeeklyReviewDate() {
   return reminderDate;
 }
 
+function getCheckpointNotificationId(alarmId: string, scheduledFor: Date, kind: 'primary' | 'urgency' | 'readiness') {
+  return [CHECKPOINT_NOTIFICATION_ID_PREFIX, alarmId, scheduledFor.toISOString(), kind].join(':');
+}
+
+function getNotificationAlarmId(notification: Notifications.NotificationRequest) {
+  const alarmId = notification.content.data?.alarmId;
+  return typeof alarmId === 'string' ? alarmId : null;
+}
+
+async function cancelScheduledNotificationsForAlarmAsync(alarmId: string, preservedNotificationIds: string[] = []) {
+  const preservedNotificationIdSet = new Set(preservedNotificationIds);
+  const scheduledNotifications = await Notifications.getAllScheduledNotificationsAsync();
+  const matchingNotificationIds = scheduledNotifications
+    .filter((notification) => getNotificationAlarmId(notification) === alarmId)
+    .filter((notification) => !preservedNotificationIdSet.has(notification.identifier))
+    .map((notification) => notification.identifier);
+
+  await cancelAlarmNotificationAsync(matchingNotificationIds);
+}
+
 export async function readNotificationPreferences() {
   const storedValue = await readScopedStorageValue(NOTIFICATION_PREFERENCES_STORAGE_KEY);
 
@@ -186,7 +207,7 @@ export function getAlarmNotificationStrategyKey(
   scheduledFor: Date
 ) {
   return [
-    'core:1',
+    'core:2',
     `urgency:${preferences.urgencyRemindersEnabled && getUrgencyReminderDelaySeconds(alarm.gracePeriodSeconds) ? 1 : 0}`,
     `readiness:${
       preferences.eveningReadinessRemindersEnabled && shouldScheduleEveningReadinessReminder(alarm, scheduledFor) ? 1 : 0
@@ -211,13 +232,16 @@ export async function scheduleAlarmNotificationAsync(
   );
   const strategyKey = getAlarmNotificationStrategyKey(alarm, preferences, scheduledFor);
 
+  const primaryNotificationIdentifier = getCheckpointNotificationId(alarm.id, scheduledFor, 'primary');
   const primaryNotificationId = await Notifications.scheduleNotificationAsync({
+    identifier: primaryNotificationIdentifier,
     content: {
       title: `${triggerContent.title} · ${formatAlarmTime(alarm.hour, alarm.minute)}`,
       body: triggerContent.body,
       sound: 'default',
       data: {
         alarmId: alarm.id,
+        kind: 'primary',
       },
     },
     trigger: {
@@ -242,13 +266,16 @@ export async function scheduleAlarmNotificationAsync(
       secondsRemaining
     );
 
+    const reminderNotificationIdentifier = getCheckpointNotificationId(alarm.id, scheduledFor, 'urgency');
     const reminderNotificationId = await Notifications.scheduleNotificationAsync({
+      identifier: reminderNotificationIdentifier,
       content: {
         title: reminderContent.title,
         body: reminderContent.body,
         sound: 'default',
         data: {
           alarmId: alarm.id,
+          kind: 'urgency',
         },
       },
       trigger: {
@@ -266,7 +293,9 @@ export async function scheduleAlarmNotificationAsync(
 
     if (readinessDate.getTime() > Date.now()) {
       const readinessContent = getCheckpointReadinessNotificationCopy(alarm.useCaseType, alarm.label);
+      const readinessNotificationIdentifier = getCheckpointNotificationId(alarm.id, scheduledFor, 'readiness');
       const readinessNotificationId = await Notifications.scheduleNotificationAsync({
+        identifier: readinessNotificationIdentifier,
         content: {
           title: readinessContent.title,
           body: readinessContent.body,
@@ -286,6 +315,8 @@ export async function scheduleAlarmNotificationAsync(
       notificationIds.push(readinessNotificationId);
     }
   }
+
+  await cancelScheduledNotificationsForAlarmAsync(alarm.id, notificationIds).catch(() => null);
 
   return {
     notificationIds,
