@@ -1,6 +1,8 @@
-# Social Pressure Alarm
+# Checkpoint Alarm
 
-Expo + Supabase mobile app for alarms, circles, and profile sync.
+Alarms you clear with real-world proof.
+
+Expo + Supabase mobile app for proof-code alarms, checkpoints, circles, and profile sync.
 
 ## Local setup
 
