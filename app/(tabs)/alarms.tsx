@@ -208,9 +208,6 @@ export default function AlarmsScreen() {
         )
       }>
       <FlowTopBar
-        rightAccessibilityLabel="Create checkpoint"
-        rightIcon="add"
-        onRightPress={handleCreateAlarmPress}
         subtitle="Reusable proof setups"
         title="Checkpoints"
       />

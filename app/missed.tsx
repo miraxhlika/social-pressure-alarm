@@ -226,7 +226,7 @@ export default function MissedScreen() {
       <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
         <FlowTopBar
           leftAccessibilityLabel="Go back"
-          leftIcon="chevron-back"
+          leftLabel="Back"
           onLeftPress={() => router.back()}
           title="Missed Checkpoint"
         />
@@ -245,11 +245,8 @@ export default function MissedScreen() {
     <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
       <FlowTopBar
         leftAccessibilityLabel="Back to today"
-        leftIcon="chevron-back"
+        leftLabel="Back"
         onLeftPress={() => router.replace('/')}
-        rightAccessibilityLabel="Open checkpoint details"
-        rightIcon="ellipsis-vertical"
-        onRightPress={() => router.push(`/checkpoint/${state.alarm?.id}`)}
         title="Missed Checkpoint"
       />
 

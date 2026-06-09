@@ -1,9 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
+import { usePreventRemove } from '@react-navigation/native';
 import { BarcodeScanningResult, CameraView, useCameraPermissions } from 'expo-camera';
-import { type Href, useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
-import { type ComponentProps, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, AppState, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { type Href, useLocalSearchParams, useRouter } from 'expo-router';
+import { type ComponentProps, type RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, AppState, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { AppButton } from '@/components/ui/app-button';
 import { AppInput } from '@/components/ui/app-input';
@@ -195,7 +196,6 @@ function buildSavedCodeId(payload: string) {
 
 export default function CreateAlarmScreen() {
   const router = useRouter();
-  const navigation = useNavigation();
   const params = useLocalSearchParams<{
     alarmId?: string;
     mode?: string;
@@ -247,8 +247,10 @@ export default function CreateAlarmScreen() {
   const [notificationPermissionState, setNotificationPermissionState] =
     useState<NotificationPermissionState>('undetermined');
   const scrollViewRef = useRef<ScrollView | null>(null);
+  const nameInputRef = useRef<TextInput | null>(null);
   const scannerTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastScannedPayloadRef = useRef<{ payload: string; purpose: ScannerPurpose; scannedAt: number } | null>(null);
+  const [nameFocusRequest, setNameFocusRequest] = useState(0);
   const isEditMode = params.mode === 'edit' && typeof params.alarmId === 'string';
   const isReuseMode = params.mode === 'reuse' && typeof params.alarmId === 'string';
   const isOnboardingConversion = params.onboardingMode === 'convert_demo';
@@ -475,9 +477,27 @@ export default function CreateAlarmScreen() {
     return () => cancelAnimationFrame(frame);
   }, [activeStep]);
 
+  useEffect(() => {
+    if (nameFocusRequest === 0 || activeStep !== 1 || expandedField !== 'name') {
+      return;
+    }
+
+    const frame = requestAnimationFrame(() => {
+      nameInputRef.current?.focus();
+    });
+
+    return () => cancelAnimationFrame(frame);
+  }, [activeStep, expandedField, nameFocusRequest]);
+
   const toggleField = (field: NonNullable<ExpandedField>) => {
     setExpandedField((currentField) => (currentField === field ? null : field));
   };
+
+  const focusNameField = useCallback(() => {
+    setActiveStep(1);
+    setExpandedField('name');
+    setNameFocusRequest((currentRequest) => currentRequest + 1);
+  }, []);
 
   const validateDetailsStep = useCallback(() => {
     const nextErrors: FormErrors = {};
@@ -507,16 +527,7 @@ export default function CreateAlarmScreen() {
     setIsScannerVisible(false);
   }, []);
 
-  useEffect(() => {
-    if (activeStep !== 2) {
-      return undefined;
-    }
-
-    return navigation.addListener('beforeRemove', (event) => {
-      event.preventDefault();
-      handleReturnToDetailsStep();
-    });
-  }, [activeStep, handleReturnToDetailsStep, navigation]);
+  usePreventRemove(activeStep === 2, handleReturnToDetailsStep);
 
   const handleOpenScanner = useCallback(async (mode: Extract<LinkMode, 'scanQr' | 'scanBarcode'>) => {
     setLinkMode(mode);
@@ -566,11 +577,14 @@ export default function CreateAlarmScreen() {
 
   const handleContinueToLinkCode = useCallback(() => {
     if (!validateDetailsStep()) {
+      if (!label.trim()) {
+        focusNameField();
+      }
       return;
     }
 
     handleOpenLinkCodeStep();
-  }, [handleOpenLinkCodeStep, validateDetailsStep]);
+  }, [focusNameField, handleOpenLinkCodeStep, label, validateDetailsStep]);
 
   const handleOpenSavedCodes = useCallback(() => {
     setLinkMode('saved');
@@ -782,6 +796,9 @@ export default function CreateAlarmScreen() {
       if (nextErrors.label || nextErrors.gracePeriodSeconds) {
         setActiveStep(1);
       }
+      if (nextErrors.label) {
+        focusNameField();
+      }
       return;
     }
 
@@ -889,6 +906,7 @@ export default function CreateAlarmScreen() {
     }
   }, [
     expectedQrPayload,
+    focusNameField,
     gracePeriodSeconds,
     isEditMode,
     isOnboardingConversion,
@@ -931,7 +949,7 @@ export default function CreateAlarmScreen() {
       scrollRef={scrollViewRef}>
       <FlowTopBar
         leftAccessibilityLabel={activeStep === 1 ? 'Close create checkpoint' : 'Back to create checkpoint'}
-        leftIcon="chevron-back"
+        leftLabel={activeStep === 1 ? 'Close' : 'Back'}
         onLeftPress={activeStep === 1 ? handleCancel : handleReturnToDetailsStep}
         subtitle={activeStep === 1 ? 'Define what to prove, when, and where.' : 'Link the exact code that proves it.'}
         title={activeStep === 1 ? (isEditMode ? 'Edit Checkpoint' : 'Create Checkpoint') : 'Link QR / Barcode'}
@@ -946,10 +964,11 @@ export default function CreateAlarmScreen() {
           gracePeriodSeconds={gracePeriodSeconds}
           gracePreviewSeconds={gracePreviewSeconds}
           label={label}
+          nameInputRef={nameInputRef}
           proofCodeVerifiedAt={proofCodeVerifiedAt}
           hasLinkedProofCode={hasLinkedProofCode}
           notes={notes}
-          onExpectedCodePress={handleOpenLinkCodeStep}
+          onExpectedCodePress={handleContinueToLinkCode}
           onFieldToggle={toggleField}
           onGracePeriodChange={(nextValue) => {
             setGracePeriodSeconds(nextValue);
@@ -1034,6 +1053,7 @@ function CreateDetailsStep({
   gracePreviewSeconds,
   hasLinkedProofCode,
   label,
+  nameInputRef,
   notes,
   onExpectedCodePress,
   onFieldToggle,
@@ -1071,6 +1091,7 @@ function CreateDetailsStep({
   gracePreviewSeconds: number;
   hasLinkedProofCode: boolean;
   label: string;
+  nameInputRef: RefObject<TextInput | null>;
   notes: string;
   onExpectedCodePress: () => void;
   onFieldToggle: (field: NonNullable<ExpandedField>) => void;
@@ -1131,6 +1152,7 @@ function CreateDetailsStep({
           label="Name"
           onChangeText={onLabelChange}
           placeholder={selectedTemplate.defaultLabel || 'Morning Medication'}
+          ref={nameInputRef}
           value={label}
         />
       </CreateFieldRow>

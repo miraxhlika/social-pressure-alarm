@@ -1,6 +1,6 @@
-import { PropsWithChildren, ReactNode, RefObject } from 'react';
-import { KeyboardAvoidingView, Platform, ScrollView, ScrollViewProps, StyleProp, StyleSheet, View, ViewStyle } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { PropsWithChildren, ReactNode, RefObject, useEffect, useRef } from 'react';
+import { Animated, Easing, Keyboard, Platform, ScrollView, ScrollViewProps, StyleProp, StyleSheet, View, ViewStyle } from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Spacing, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
@@ -28,7 +28,40 @@ export function AppScreen({
   backgroundColor,
 }: AppScreenProps) {
   const colors = getAppColors(useColorScheme());
+  const insets = useSafeAreaInsets();
+  const footerKeyboardInset = useRef(new Animated.Value(0)).current;
   const resolvedBackground = backgroundColor ?? colors.canvas;
+  const { style: scrollStyle, ...restScrollProps } = scrollProps ?? {};
+
+  useEffect(() => {
+    if (!keyboardAware) {
+      return;
+    }
+
+    const keyboardShowEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const keyboardHideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const showSubscription = Keyboard.addListener(keyboardShowEvent, (event) => {
+      Animated.timing(footerKeyboardInset, {
+        duration: event.duration ?? 260,
+        easing: Easing.out(Easing.cubic),
+        toValue: Math.max(0, event.endCoordinates.height - insets.bottom),
+        useNativeDriver: false,
+      }).start();
+    });
+    const hideSubscription = Keyboard.addListener(keyboardHideEvent, (event) => {
+      Animated.timing(footerKeyboardInset, {
+        duration: event.duration ?? 220,
+        easing: Easing.inOut(Easing.cubic),
+        toValue: 0,
+        useNativeDriver: false,
+      }).start();
+    });
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, [footerKeyboardInset, insets.bottom, keyboardAware]);
 
   const content = scroll ? (
     <ScrollView
@@ -37,24 +70,29 @@ export function AppScreen({
       keyboardShouldPersistTaps="handled"
       ref={scrollRef}
       showsVerticalScrollIndicator={false}
-      {...scrollProps}>
+      style={[styles.flex, scrollStyle]}
+      {...restScrollProps}>
       {children}
     </ScrollView>
   ) : (
     <View style={[styles.content, styles.staticContent, contentStyle]}>{children}</View>
   );
 
+  const footerElement = footer ? (
+    <Animated.View style={[styles.footer, keyboardAware ? { marginBottom: footerKeyboardInset } : null]}>
+      {footer}
+    </Animated.View>
+  ) : null;
+
   const body = keyboardAware ? (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      style={styles.flex}>
+    <View style={styles.flex}>
       {content}
-      {footer ? <View style={styles.footer}>{footer}</View> : null}
-    </KeyboardAvoidingView>
+      {footerElement}
+    </View>
   ) : (
     <>
       {content}
-      {footer ? <View style={styles.footer}>{footer}</View> : null}
+      {footerElement}
     </>
   );
 

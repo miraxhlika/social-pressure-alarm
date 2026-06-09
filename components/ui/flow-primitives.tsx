@@ -12,8 +12,8 @@ type FlowTone = 'default' | 'primary' | 'success' | 'danger' | 'warning' | 'mute
 type FlowTopBarProps = {
   title: string;
   subtitle?: string;
-  leftIcon?: IconName;
-  rightIcon?: IconName;
+  leftLabel?: string;
+  rightLabel?: string;
   onLeftPress?: () => void;
   onRightPress?: () => void;
   leftAccessibilityLabel?: string;
@@ -23,39 +23,47 @@ type FlowTopBarProps = {
 export function FlowTopBar({
   title,
   subtitle,
-  leftIcon = 'menu-outline',
-  rightIcon,
+  leftLabel,
+  rightLabel,
   onLeftPress,
   onRightPress,
-  leftAccessibilityLabel = 'Open menu',
-  rightAccessibilityLabel = 'Open action',
+  leftAccessibilityLabel,
+  rightAccessibilityLabel,
 }: FlowTopBarProps) {
   const colors = getAppColors(useColorScheme());
+  const leftActionLabel = leftAccessibilityLabel ?? leftLabel;
+  const rightActionLabel = rightAccessibilityLabel ?? rightLabel;
 
   return (
     <View style={styles.topBar}>
-      <Pressable
-        accessibilityLabel={leftAccessibilityLabel}
-        accessibilityRole="button"
-        disabled={!onLeftPress}
-        onPress={onLeftPress}
-        style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}>
-        <Ionicons color={colors.text} name={leftIcon} size={22} />
-      </Pressable>
+      <View style={styles.topBarActionSlot}>
+        {leftLabel && onLeftPress ? (
+          <Pressable
+            accessibilityLabel={leftActionLabel}
+            accessibilityRole="button"
+            onPress={onLeftPress}
+            style={({ pressed }) => [styles.topBarAction, pressed && styles.pressed]}>
+            <Text style={[styles.topBarActionText, { color: colors.text }]}>{leftLabel}</Text>
+          </Pressable>
+        ) : null}
+      </View>
 
       <View style={styles.topBarCopy}>
         <Text style={[styles.topBarTitle, { color: colors.text }]}>{title}</Text>
         {subtitle ? <Text style={[styles.topBarSubtitle, { color: colors.textSoft }]}>{subtitle}</Text> : null}
       </View>
 
-      <Pressable
-        accessibilityLabel={rightAccessibilityLabel}
-        accessibilityRole="button"
-        disabled={!rightIcon || !onRightPress}
-        onPress={onRightPress}
-        style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}>
-        {rightIcon ? <Ionicons color={colors.text} name={rightIcon} size={21} /> : <View style={styles.iconPlaceholder} />}
-      </Pressable>
+      <View style={[styles.topBarActionSlot, styles.topBarActionSlotEnd]}>
+        {rightLabel && onRightPress ? (
+          <Pressable
+            accessibilityLabel={rightActionLabel}
+            accessibilityRole="button"
+            onPress={onRightPress}
+            style={({ pressed }) => [styles.topBarAction, pressed && styles.pressed]}>
+            <Text style={[styles.topBarActionText, { color: colors.text }]}>{rightLabel}</Text>
+          </Pressable>
+        ) : null}
+      </View>
     </View>
   );
 }
@@ -262,16 +270,24 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     minHeight: 44,
   },
-  iconButton: {
+  topBarActionSlot: {
     alignItems: 'center',
-    borderRadius: Radius.pill,
-    height: 36,
     justifyContent: 'center',
-    width: 36,
+    minWidth: 64,
   },
-  iconPlaceholder: {
-    height: 21,
-    width: 21,
+  topBarActionSlotEnd: {
+    alignItems: 'flex-end',
+  },
+  topBarAction: {
+    borderRadius: Radius.pill,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  topBarActionText: {
+    ...TextPresets.label,
+    fontFamily: Fonts.rounded,
+    fontSize: 13,
+    lineHeight: 17,
   },
   topBarCopy: {
     alignItems: 'center',

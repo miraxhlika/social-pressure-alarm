@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
+import * as SystemUI from 'expo-system-ui';
 import 'react-native-reanimated';
 
 import { getAppColors } from '@/constants/theme';
@@ -34,6 +35,10 @@ export default function RootLayout() {
 
   useAlarmRuntime();
   useSocialRuntime();
+
+  useEffect(() => {
+    void SystemUI.setBackgroundColorAsync(colors.canvas);
+  }, [colors.canvas]);
 
   useEffect(() => {
     let isMounted = true;
@@ -82,6 +87,7 @@ export default function RootLayout() {
         <Stack
           screenOptions={{
             animation: 'fade_from_bottom',
+            headerBackButtonMenuEnabled: false,
             headerShown: false,
             contentStyle: {
               backgroundColor: colors.canvas,
