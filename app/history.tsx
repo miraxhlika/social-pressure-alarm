@@ -363,7 +363,7 @@ export default function HistoryScreen() {
       <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
         <FlowTopBar
           leftAccessibilityLabel="Go back"
-          leftIcon="chevron-back"
+          leftLabel="Back"
           onLeftPress={() => router.back()}
           title="History & Analytics"
         />
@@ -382,7 +382,7 @@ export default function HistoryScreen() {
     <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
       <FlowTopBar
         leftAccessibilityLabel="Go back"
-        leftIcon="chevron-back"
+        leftLabel="Back"
         onLeftPress={() => router.back()}
         title="History & Analytics"
       />

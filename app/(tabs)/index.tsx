@@ -495,9 +495,6 @@ export default function TodayScreen() {
         )
       }>
       <FlowTopBar
-        onRightPress={() => router.push('/account')}
-        rightAccessibilityLabel="Open settings"
-        rightIcon="notifications-outline"
         subtitle={formatTodayTitleDate()}
         title="Today"
       />

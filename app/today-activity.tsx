@@ -128,7 +128,7 @@ export default function TodayActivityScreen() {
     <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
       <FlowTopBar
         leftAccessibilityLabel="Go back"
-        leftIcon="chevron-back"
+        leftLabel="Back"
         onLeftPress={() => router.back()}
         title="Today's Activity"
       />

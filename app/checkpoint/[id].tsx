@@ -290,7 +290,7 @@ export default function CheckpointDetailsScreen() {
       <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
         <FlowTopBar
           leftAccessibilityLabel="Go back"
-          leftIcon="chevron-back"
+          leftLabel="Back"
           onLeftPress={() => router.back()}
           title="Checkpoint Details"
         />
@@ -309,11 +309,8 @@ export default function CheckpointDetailsScreen() {
     <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
       <FlowTopBar
         leftAccessibilityLabel="Go back"
-        leftIcon="chevron-back"
+        leftLabel="Back"
         onLeftPress={() => router.back()}
-        rightAccessibilityLabel="More checkpoint actions"
-        rightIcon="ellipsis-vertical"
-        onRightPress={() => handleEdit()}
         title="Checkpoint Details"
       />
 
