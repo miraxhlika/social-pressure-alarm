@@ -28,6 +28,7 @@ import {
   syncNotificationStrategyAsync,
   syncWeeklyReviewReminderAsync,
 } from '@/lib/notifications';
+import { registerSignedInDevicePushToken } from '@/lib/social/push';
 import { resetSocialSyncState } from '@/lib/social/queue';
 import { getActiveStorageScope } from '@/lib/storage';
 import { useSocialSession } from '@/providers/social-session-provider';
@@ -445,6 +446,9 @@ export default function AccountScreen() {
       const granted = await ensureNotificationPermissionsAsync();
       const nextPermissionState = await getNotificationPermissionState();
       setNotificationPermissionState(nextPermissionState);
+      if (granted) {
+        void registerSignedInDevicePushToken().catch(() => null);
+      }
       setReminderFeedback({
         tone: granted ? 'success' : 'warning',
         message: granted
@@ -587,6 +591,7 @@ export default function AccountScreen() {
       }
 
       await syncNotificationStrategyAsync(reminderPreferences);
+      void registerSignedInDevicePushToken().catch(() => null);
       setNotificationPermissionState(await getNotificationPermissionState());
       setReminderFeedback({
         tone: 'success',
@@ -689,7 +694,7 @@ export default function AccountScreen() {
                   />
                   <PreferenceSwitch
                     label="Missed-checkpoint alerts"
-                    description="Alerts when you miss a scheduled checkpoint."
+                    description="Alerts when circle members miss a checkpoint they chose to share."
                     value={allowMissedAlarmAlerts}
                     onValueChange={(value) => {
                       setAllowMissedAlarmAlerts(value);

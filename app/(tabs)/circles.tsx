@@ -41,6 +41,7 @@ import {
   listMySocialCircles,
 } from '@/lib/social/circles';
 import { listVisibleSocialFeed } from '@/lib/social/feed';
+import { sendCircleNudge } from '@/lib/social/push';
 import { getSocialQueueSummary } from '@/lib/social/queue';
 import { SocialCircleSummary, SocialFeedItem } from '@/lib/social/types';
 import { useSocialSession } from '@/providers/social-session-provider';
@@ -64,6 +65,7 @@ type CircleActivityItem = {
   person: string;
   checkpointLabel: string;
   resolvedAt: string;
+  canSendNudge: boolean;
 };
 
 function formatActivityTime(timestamp: string) {
@@ -137,6 +139,7 @@ function buildCircleActivityFeed(
       person: 'You',
       checkpointLabel: event.alarmLabel,
       resolvedAt: event.resolvedAt,
+      canSendNudge: false,
     }));
   const queuedIds = new Set(queuedItems.map((item) => item.id));
   const deliveredItems: CircleActivityItem[] = remoteItems
@@ -151,6 +154,7 @@ function buildCircleActivityFeed(
       person: item.isOwnEvent ? 'You' : item.actorDisplayName,
       checkpointLabel: item.alarmLabel,
       resolvedAt: item.resolvedAt,
+      canSendNudge: item.outcome === 'missed' && !item.isOwnEvent,
     }));
 
   return [...queuedItems, ...deliveredItems]
@@ -181,6 +185,8 @@ export default function CirclesScreen() {
   const [isCircleSheetVisible, setIsCircleSheetVisible] = useState(false);
   const [circleSheetMode, setCircleSheetMode] = useState<'create' | 'join'>('create');
   const [copiedCircleId, setCopiedCircleId] = useState<string | null>(null);
+  const [nudgingEventId, setNudgingEventId] = useState<string | null>(null);
+  const [nudgedEventIds, setNudgedEventIds] = useState<Set<string>>(() => new Set());
   const circleSheetAnimation = useRef(new Animated.Value(0)).current;
   const circleSheetKeyboardOffset = useRef(new Animated.Value(0)).current;
   const copyFeedbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -393,6 +399,31 @@ export default function CirclesScreen() {
     }
   };
 
+  const handleSendNudge = async (item: CircleActivityItem) => {
+    if (!item.canSendNudge) {
+      return;
+    }
+
+    setNudgingEventId(item.id);
+
+    try {
+      const result = await sendCircleNudge(item.id);
+      setNudgedEventIds((currentIds) => {
+        const nextIds = new Set(currentIds);
+        nextIds.add(item.id);
+        return nextIds;
+      });
+      Alert.alert(
+        result.duplicate ? 'Nudge already sent' : 'Nudge sent',
+        `${item.person} will get a short check-in.`
+      );
+    } catch (error) {
+      Alert.alert('Unable to send nudge', getErrorMessage(error, 'The nudge could not be sent right now.'));
+    } finally {
+      setNudgingEventId(null);
+    }
+  };
+
   const circleSheetTranslateY = circleSheetAnimation.interpolate({
     inputRange: [0, 1],
     outputRange: [96, 0],
@@ -546,25 +577,42 @@ export default function CirclesScreen() {
                 />
               ) : activityItems.length > 0 ? (
                 <View style={styles.activityList}>
-                  {activityItems.map((item) => (
-                    <View key={item.id} style={styles.activityItem}>
-                      <FlowIconBadge
-                        icon={item.outcome === 'confirmed' ? 'checkmark' : 'alert'}
-                        size="small"
-                        tone={item.outcome === 'confirmed' ? 'success' : 'danger'}
-                      />
-                      <View style={styles.activityCopy}>
-                        <Text style={[styles.activityTitle, { color: colors.text }]}>
-                          {item.person} {item.outcome === 'confirmed' ? 'cleared' : 'missed'} {item.checkpointLabel}
-                        </Text>
-                        <Text style={[styles.activityMeta, { color: colors.textSoft }]}>
-                          {item.circleName} · {formatActivityTime(item.resolvedAt)}
-                          {item.isPending ? ' · Pending sync' : ''}
-                        </Text>
-                        <Text style={[styles.activityContext, { color: colors.muted }]}>{item.context}</Text>
+                  {activityItems.map((item) => {
+                    const hasNudged = nudgedEventIds.has(item.id);
+                    const isNudging = nudgingEventId === item.id;
+
+                    return (
+                      <View key={item.id} style={styles.activityItem}>
+                        <FlowIconBadge
+                          icon={item.outcome === 'confirmed' ? 'checkmark' : 'alert'}
+                          size="small"
+                          tone={item.outcome === 'confirmed' ? 'success' : 'danger'}
+                        />
+                        <View style={styles.activityCopy}>
+                          <Text style={[styles.activityTitle, { color: colors.text }]}>
+                            {item.person} {item.outcome === 'confirmed' ? 'cleared' : 'missed'} {item.checkpointLabel}
+                          </Text>
+                          <Text style={[styles.activityMeta, { color: colors.textSoft }]}>
+                            {item.circleName} · {formatActivityTime(item.resolvedAt)}
+                            {item.isPending ? ' · Pending sync' : ''}
+                          </Text>
+                          <Text style={[styles.activityContext, { color: colors.muted }]}>{item.context}</Text>
+                          {item.canSendNudge ? (
+                            <AppButton
+                              disabled={isNudging || hasNudged}
+                              label={hasNudged ? 'Nudge sent' : isNudging ? 'Sending...' : 'Send nudge'}
+                              onPress={() => {
+                                void handleSendNudge(item);
+                              }}
+                              size="compact"
+                              style={styles.nudgeAction}
+                              variant={hasNudged ? 'secondary' : 'ghost'}
+                            />
+                          ) : null}
+                        </View>
                       </View>
-                    </View>
-                  ))}
+                    );
+                  })}
                 </View>
               ) : (
                 <Text style={[TextPresets.body, styles.emptyActivityText, { color: colors.textSoft }]}>
@@ -802,6 +850,13 @@ const styles = StyleSheet.create({
     ...TextPresets.body,
     fontSize: 11,
     lineHeight: 15,
+  },
+  nudgeAction: {
+    alignSelf: 'flex-start',
+    marginTop: Spacing.xs,
+    minHeight: 34,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: 8,
   },
   emptyActivityText: {
     fontSize: 13,

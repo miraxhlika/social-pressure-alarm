@@ -1,5 +1,6 @@
 import { getSocialSession, getSupabaseClient } from '@/lib/social/client';
 import { hasSocialBackendConfig } from '@/lib/social/config';
+import { sendMissedCheckpointAlertForEvent } from '@/lib/social/push';
 import {
   GUEST_STORAGE_SCOPE,
   readScopedStorageValue,
@@ -443,6 +444,10 @@ export async function flushAlarmEventQueue(): Promise<FlushAlarmEventQueueResult
       }
 
       await upsertProofShareForEvent(event, session.user.id);
+
+      if (event.outcome === 'missed' && event.socialSettings?.shareMisses) {
+        void sendMissedCheckpointAlertForEvent(event.idempotencyKey ?? event.clientId ?? event.id).catch(() => null);
+      }
 
       deliveredCount += 1;
     } catch (error) {

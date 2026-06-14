@@ -11,6 +11,7 @@ import {
 import { readScopedStorageValue, writeScopedStorageValue } from '@/lib/storage';
 
 const ALARM_CHANNEL_ID = 'social-pressure-alarm';
+const SOCIAL_PUSH_CHANNEL_ID = 'social-pressure-social-alerts';
 const NOTIFICATION_PREFERENCES_STORAGE_KEY = 'social-pressure-alarm/notification-preferences';
 const WEEKLY_REVIEW_NOTIFICATION_STORAGE_KEY = 'social-pressure-alarm/weekly-review-notification';
 const CHECKPOINT_NOTIFICATION_ID_PREFIX = 'checkpoint';
@@ -48,6 +49,13 @@ export async function configureNotificationsAsync() {
     importance: Notifications.AndroidImportance.MAX,
     sound: 'default',
     vibrationPattern: [0, 300, 200, 300],
+    lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+  });
+  await Notifications.setNotificationChannelAsync(SOCIAL_PUSH_CHANNEL_ID, {
+    name: 'Circle alerts',
+    importance: Notifications.AndroidImportance.HIGH,
+    sound: 'default',
+    vibrationPattern: [0, 250, 200, 250],
     lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
   });
 }

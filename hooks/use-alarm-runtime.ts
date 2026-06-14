@@ -27,6 +27,26 @@ function getAlarmIdFromNotification(
   return typeof alarmId === 'string' ? alarmId : null;
 }
 
+function isCircleNotification(
+  notification:
+    | Notifications.Notification
+    | Notifications.NotificationResponse
+    | null
+    | undefined
+) {
+  if (!notification) {
+    return false;
+  }
+
+  const payload =
+    'notification' in notification
+      ? notification.notification.request.content.data
+      : notification.request.content.data;
+  const kind = payload?.kind;
+
+  return kind === 'circle-missed-checkpoint' || kind === 'circle-nudge';
+}
+
 export function useAlarmRuntime() {
   const router = useRouter();
 
@@ -81,6 +101,12 @@ export function useAlarmRuntime() {
 
       if (alarmId) {
         void routeToAlarmIfStillActive(alarmId, true);
+        return;
+      }
+
+      if (isCircleNotification(response)) {
+        router.replace('/circles');
+        void Notifications.clearLastNotificationResponseAsync().catch(() => null);
       }
     });
 
@@ -97,6 +123,12 @@ export function useAlarmRuntime() {
 
       if (alarmId) {
         void routeToAlarmIfStillActive(alarmId, true);
+        return;
+      }
+
+      if (isCircleNotification(response)) {
+        router.replace('/circles');
+        void Notifications.clearLastNotificationResponseAsync().catch(() => null);
       }
     });
 
