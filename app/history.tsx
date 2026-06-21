@@ -353,7 +353,11 @@ export default function HistoryScreen() {
   if (isLoading) {
     return (
       <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
-        <LoadingBlock title="Loading history" description="Building your clears, misses, and weekly review." />
+        <LoadingBlock
+          description="Building your clears, misses, and weekly review."
+          layout="analytics"
+          title="Loading history"
+        />
       </AppScreen>
     );
   }

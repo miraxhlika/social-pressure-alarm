@@ -119,7 +119,11 @@ export default function TodayActivityScreen() {
   if (isLoading) {
     return (
       <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
-        <LoadingBlock title="Loading today" description="Collecting today’s clears and misses." />
+        <LoadingBlock
+          description="Collecting today’s clears and misses."
+          layout="list"
+          title="Loading today"
+        />
       </AppScreen>
     );
   }

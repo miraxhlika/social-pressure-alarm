@@ -25,6 +25,28 @@ type JoinedCircleRpcRow = CircleRow & {
   member_count: number;
 };
 
+type CircleMemberCountRow = {
+  circle_id: string;
+};
+
+type ListMySocialCirclesOptions = {
+  force?: boolean;
+  maxAgeMs?: number;
+};
+
+export const SOCIAL_CIRCLES_CACHE_MAX_AGE_MS = 60_000;
+
+let circlesCache: {
+  circles: SocialCircleSummary[];
+  updatedAt: number;
+  userId: string;
+} | null = null;
+let circlesRequest: {
+  promise: Promise<SocialCircleSummary[]>;
+  userId: string;
+} | null = null;
+let circlesCacheVersion = 0;
+
 function getTrimmedString(value: unknown) {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -76,6 +98,50 @@ async function getCircleMemberCount(circleId: string) {
   return count ?? 0;
 }
 
+async function getCircleMemberCounts(circleIds: string[]) {
+  const countsByCircleId = new Map(circleIds.map((circleId) => [circleId, 0]));
+
+  if (circleIds.length === 0) {
+    return countsByCircleId;
+  }
+
+  const client = getSupabaseClient();
+
+  if (!client) {
+    throw new Error('Supabase is not configured for this app.');
+  }
+
+  const { data, error } = await client
+    .from('circle_memberships')
+    .select('circle_id')
+    .in('circle_id', circleIds);
+
+  if (error) {
+    const fallbackCounts = await Promise.all(circleIds.map((circleId) => getCircleMemberCount(circleId)));
+    return new Map(circleIds.map((circleId, index) => [circleId, fallbackCounts[index] ?? 0]));
+  }
+
+  for (const row of (data ?? []) as CircleMemberCountRow[]) {
+    countsByCircleId.set(row.circle_id, (countsByCircleId.get(row.circle_id) ?? 0) + 1);
+  }
+
+  return countsByCircleId;
+}
+
+export function getCachedMySocialCircles(userId?: string) {
+  if (!circlesCache || (userId && circlesCache.userId !== userId)) {
+    return null;
+  }
+
+  return circlesCache.circles;
+}
+
+export function clearMySocialCirclesCache() {
+  circlesCacheVersion += 1;
+  circlesCache = null;
+  circlesRequest = null;
+}
+
 export function buildCircleInviteUrl(inviteCode: string) {
   return Linking.createURL('/circles', {
     scheme: 'socialpressurealarm',
@@ -85,37 +151,76 @@ export function buildCircleInviteUrl(inviteCode: string) {
   });
 }
 
-export async function listMySocialCircles() {
+export async function listMySocialCircles(options: ListMySocialCirclesOptions = {}) {
   const client = getSupabaseClient();
   const user = await getRequiredSessionUser();
+  const maxAgeMs = options.maxAgeMs ?? 0;
 
   if (!client) {
     throw new Error('Supabase is not configured for this app.');
   }
 
-  const { data, error } = await client
-    .from('circle_memberships')
-    .select(
-      'circle_id, role, notifications_enabled, circles!inner(id, name, description, invite_code, created_at, updated_at)'
-    )
-    .eq('user_id', user.id)
-    .order('joined_at', { ascending: true });
+  if (!options.force && maxAgeMs > 0 && circlesCache?.userId === user.id) {
+    const cacheAgeMs = Date.now() - circlesCache.updatedAt;
 
-  if (error) {
-    throw error;
+    if (cacheAgeMs < maxAgeMs) {
+      return circlesCache.circles;
+    }
   }
 
-  const memberships = ((data ?? []) as CircleMembershipRow[]).filter(
-    (membership) => membership.circles && !Array.isArray(membership.circles)
-  );
+  if (!options.force && circlesRequest?.userId === user.id) {
+    return circlesRequest.promise;
+  }
 
-  const memberCounts = await Promise.all(
-    memberships.map((membership) => getCircleMemberCount(membership.circle_id))
-  );
+  const requestVersion = circlesCacheVersion;
+  const request = (async () => {
+    const { data, error } = await client
+      .from('circle_memberships')
+      .select(
+        'circle_id, role, notifications_enabled, circles!inner(id, name, description, invite_code, created_at, updated_at)'
+      )
+      .eq('user_id', user.id)
+      .order('joined_at', { ascending: true });
 
-  return memberships.map((membership, index) =>
-    mapCircleSummary(membership.circles as CircleRow, membership, memberCounts[index] ?? 0)
-  );
+    if (error) {
+      throw error;
+    }
+
+    const memberships = ((data ?? []) as CircleMembershipRow[]).filter(
+      (membership) => membership.circles && !Array.isArray(membership.circles)
+    );
+    const memberCounts = await getCircleMemberCounts(memberships.map((membership) => membership.circle_id));
+
+    return memberships.map((membership) =>
+      mapCircleSummary(
+        membership.circles as CircleRow,
+        membership,
+        memberCounts.get(membership.circle_id) ?? 0
+      )
+    );
+  })();
+  circlesRequest = {
+    promise: request,
+    userId: user.id,
+  };
+
+  try {
+    const circles = await request;
+
+    if (requestVersion === circlesCacheVersion) {
+      circlesCache = {
+        circles,
+        updatedAt: Date.now(),
+        userId: user.id,
+      };
+    }
+
+    return circles;
+  } finally {
+    if (circlesRequest?.promise === request) {
+      circlesRequest = null;
+    }
+  }
 }
 
 export async function createSocialCircle(input: CreateSocialCircleInput) {
@@ -157,6 +262,7 @@ export async function createSocialCircle(input: CreateSocialCircleInput) {
     throw membershipError;
   }
 
+  clearMySocialCirclesCache();
   return mapCircleSummary(circle, { role: 'owner', notifications_enabled: true }, 1);
 }
 
@@ -185,6 +291,7 @@ export async function joinSocialCircleWithInviteCode(rawInviteCode: string) {
   }
 
   const typedJoinedCircle = joinedCircle as JoinedCircleRpcRow;
+  clearMySocialCirclesCache();
 
   return mapCircleSummary(
     typedJoinedCircle,

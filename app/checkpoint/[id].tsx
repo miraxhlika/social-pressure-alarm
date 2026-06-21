@@ -280,7 +280,11 @@ export default function CheckpointDetailsScreen() {
   if (isLoading) {
     return (
       <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
-        <LoadingBlock title="Loading checkpoint" description="Fetching schedule, proof setup, and history." />
+        <LoadingBlock
+          description="Fetching schedule, proof setup, and history."
+          layout="detail"
+          title="Loading checkpoint"
+        />
       </AppScreen>
     );
   }

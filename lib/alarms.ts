@@ -35,7 +35,7 @@ import {
   getActiveStorageScope,
   readScopedStorageValue,
   readScopedStorageValueForScope,
-  removeScopedStorageValue,
+  removeScopedStorageValueForScope,
   writeScopedStorageValue,
   writeScopedStorageValueForScope,
 } from '@/lib/storage';
@@ -43,6 +43,22 @@ import {
 const STORAGE_KEY = 'social-pressure-alarm/store';
 const RUNTIME_STORAGE_KEY = 'social-pressure-alarm/runtime';
 const GUEST_MIGRATION_STATE_KEY = 'social-pressure-alarm/guest-migration-state';
+export const ALARM_RUNTIME_CACHE_MAX_AGE_MS = 45_000;
+
+type HydrateAlarmRuntimeOptions = {
+  force?: boolean;
+  maxAgeMs?: number;
+};
+
+let hydratedAlarmStoreCache: {
+  scope: string;
+  store: AlarmStore;
+  updatedAt: number;
+} | null = null;
+let hydrateAlarmRuntimeRequest: {
+  promise: Promise<AlarmStore>;
+  scope: string;
+} | null = null;
 
 type LegacyAlarmInput = Partial<Alarm> & {
   title?: unknown;
@@ -861,7 +877,13 @@ async function migrateAlarmRuntimeMetadata(
 }
 
 async function writeLocalAlarmState(store: AlarmStore, runtimeStore: AlarmRuntimeStore) {
-  await Promise.all([writeAlarmStore(store), writeRuntimeStore(runtimeStore)]);
+  const scope = await getActiveStorageScope();
+  await writeLocalAlarmStateForScope(scope, store, runtimeStore);
+  hydratedAlarmStoreCache = {
+    scope,
+    store,
+    updatedAt: Date.now(),
+  };
 }
 
 async function writeLocalAlarmStateForScope(scope: string, store: AlarmStore, runtimeStore: AlarmRuntimeStore) {
@@ -1400,7 +1422,7 @@ async function enqueueRecentGuestHistoryForSync(
   return importedHistoryCount;
 }
 
-export async function hydrateAlarmRuntimeForCurrentUser() {
+async function hydrateAlarmRuntimeForCurrentUserUncached() {
   const localState = await readLocalAlarmState();
 
   if (!shouldSyncRemoteAlarms()) {
@@ -1511,6 +1533,42 @@ export async function hydrateAlarmRuntimeForCurrentUser() {
   }
 }
 
+export async function hydrateAlarmRuntimeForCurrentUser(options: HydrateAlarmRuntimeOptions = {}) {
+  const maxAgeMs = options.maxAgeMs ?? 0;
+  const activeScope = await getActiveStorageScope();
+
+  if (!options.force && maxAgeMs > 0 && hydratedAlarmStoreCache?.scope === activeScope) {
+    const cacheAgeMs = Date.now() - hydratedAlarmStoreCache.updatedAt;
+
+    if (cacheAgeMs < maxAgeMs) {
+      return hydratedAlarmStoreCache.store;
+    }
+  }
+
+  if (!options.force && hydrateAlarmRuntimeRequest?.scope === activeScope) {
+    return hydrateAlarmRuntimeRequest.promise;
+  }
+
+  const nextPromise = hydrateAlarmRuntimeForCurrentUserUncached();
+  hydrateAlarmRuntimeRequest = {
+    promise: nextPromise,
+    scope: activeScope,
+  };
+
+  try {
+    return await nextPromise;
+  } finally {
+    if (hydrateAlarmRuntimeRequest?.promise === nextPromise) {
+      hydrateAlarmRuntimeRequest = null;
+    }
+  }
+}
+
+export async function readLocalAlarmStore(): Promise<AlarmStore> {
+  const localState = await readLocalAlarmState();
+  return localState.store;
+}
+
 export async function readAlarmStore(): Promise<AlarmStore> {
   const localState = await readLocalAlarmState();
 
@@ -1533,7 +1591,20 @@ export async function getAlarms() {
 }
 
 export async function resetAlarmStore() {
-  await Promise.all([removeScopedStorageValue(STORAGE_KEY), removeScopedStorageValue(RUNTIME_STORAGE_KEY)]);
+  const activeScope = await getActiveStorageScope();
+  const defaultStore = createDefaultStore();
+
+  hydrateAlarmRuntimeRequest = null;
+  hydratedAlarmStoreCache = {
+    scope: activeScope,
+    store: defaultStore,
+    updatedAt: Date.now(),
+  };
+
+  await Promise.all([
+    removeScopedStorageValueForScope(STORAGE_KEY, activeScope),
+    removeScopedStorageValueForScope(RUNTIME_STORAGE_KEY, activeScope),
+  ]);
 
   if (shouldSyncRemoteAlarms()) {
     try {
@@ -1543,7 +1614,7 @@ export async function resetAlarmStore() {
     }
   }
 
-  return createDefaultStore();
+  return defaultStore;
 }
 
 export async function clearUnusedCheckpointPresets() {

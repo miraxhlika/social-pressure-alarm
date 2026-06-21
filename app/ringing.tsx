@@ -115,6 +115,7 @@ export default function RingingScreen() {
   const hasRequestedPermissionRef = useRef(false);
   const retryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastScannedPayloadRef = useRef<{ payload: string; scannedAt: number } | null>(null);
+  const validScanInFlightRef = useRef(false);
   const criticalHapticFiredRef = useRef(false);
   const glowPulse = useRef(new Animated.Value(0)).current;
   const framePulse = useRef(new Animated.Value(0)).current;
@@ -177,6 +178,7 @@ export default function RingingScreen() {
     hasRequestedPermissionRef.current = false;
     criticalHapticFiredRef.current = false;
     lastScannedPayloadRef.current = null;
+    validScanInFlightRef.current = false;
     setScanEnabled(true);
     setScanError('');
     setIsScannerVisible(false);
@@ -291,6 +293,7 @@ export default function RingingScreen() {
       });
     } catch (error) {
       hasResolvedRef.current = false;
+      validScanInFlightRef.current = false;
       setScanEnabled(true);
 
       const errorMessage =
@@ -453,13 +456,14 @@ export default function RingingScreen() {
         return;
       }
 
+      validScanInFlightRef.current = true;
       await handleScanSuccess();
     },
     [alarm, errorFlash, handleScanSuccess, isSubmitting, liveCopy.wrongCodeDescription, scanEnabled]
   );
 
   useEffect(() => {
-    if (alarm && remainingSeconds === 0 && !isSubmitting) {
+    if (alarm && remainingSeconds === 0 && !isSubmitting && !validScanInFlightRef.current) {
       void handleMissedAlarm();
     }
   }, [alarm, handleMissedAlarm, isSubmitting, remainingSeconds]);

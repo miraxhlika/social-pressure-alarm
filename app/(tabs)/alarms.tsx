@@ -14,17 +14,17 @@ import { Spacing, TextPresets, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { trackAnalyticsEvent } from '@/lib/analytics';
 import {
+  ALARM_RUNTIME_CACHE_MAX_AGE_MS,
   deleteAlarm,
   formatAlarmTime,
   hydrateAlarmRuntimeForCurrentUser,
-  readAlarmStore,
   rescheduleAlarm,
   resetAlarmStore,
 } from '@/lib/alarms';
 import { getPrimaryAlarm } from '@/lib/dashboard';
 import { cancelAlarmNotificationAsync } from '@/lib/notifications';
 import { getProgressSummary, ProgressSummary } from '@/lib/progress';
-import { listMySocialCircles } from '@/lib/social/circles';
+import { SOCIAL_CIRCLES_CACHE_MAX_AGE_MS, listMySocialCircles } from '@/lib/social/circles';
 import { resetSocialSyncState } from '@/lib/social/queue';
 import { Alarm } from '@/types/alarm';
 
@@ -55,10 +55,11 @@ export default function AlarmsScreen() {
     }
 
     try {
-      await hydrateAlarmRuntimeForCurrentUser().catch(() => null);
-      const store = await readAlarmStore();
+      const store = await hydrateAlarmRuntimeForCurrentUser({ maxAgeMs: ALARM_RUNTIME_CACHE_MAX_AGE_MS });
       const hasSharedCheckpoints = store.alarms.some((alarm) => alarm.socialSettings?.circleId);
-      const circles = hasSharedCheckpoints ? await listMySocialCircles().catch(() => []) : [];
+      const circles = hasSharedCheckpoints
+        ? await listMySocialCircles({ maxAgeMs: SOCIAL_CIRCLES_CACHE_MAX_AGE_MS }).catch(() => [])
+        : [];
 
       if (loadAlarmsRequestRef.current === requestId) {
         setState({
@@ -215,6 +216,7 @@ export default function AlarmsScreen() {
       {isLoading ? (
         <LoadingBlock
           description="Loading your saved checkpoints."
+          layout="list"
           style={styles.loadingBlock}
           title="Loading checkpoints"
         />

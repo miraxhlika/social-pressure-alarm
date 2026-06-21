@@ -3,7 +3,7 @@ import { AppState } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import { useRouter } from 'expo-router';
 
-import { getAlarmPhase, getAlarms, getNextActionableAlarm, hydrateAlarmRuntimeForCurrentUser } from '@/lib/alarms';
+import { getAlarmPhase, getNextActionableAlarm, hydrateAlarmRuntimeForCurrentUser } from '@/lib/alarms';
 import { configureNotificationsAsync, syncWeeklyReviewReminderAsync } from '@/lib/notifications';
 import { getSupabaseClient } from '@/lib/social/client';
 
@@ -78,12 +78,11 @@ export function useAlarmRuntime() {
     };
 
     const hydrateAndCheckForDueAlarms = async () => {
-      await hydrateAlarmRuntimeForCurrentUser();
+      const store = await hydrateAlarmRuntimeForCurrentUser();
       await syncWeeklyReviewReminderAsync(undefined, {
         requestPermissions: false,
       }).catch(() => null);
-      const alarms = await getAlarms();
-      const dueAlarm = getNextActionableAlarm(alarms);
+      const dueAlarm = getNextActionableAlarm(store.alarms);
 
       if (dueAlarm) {
         // Managed Expo cannot force a full-screen alarm takeover when the app is killed,
