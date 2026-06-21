@@ -39,7 +39,7 @@ export default function SyncScreen() {
 
   const handleKeepLocalOnly = async () => {
     await writeScopedStorageValue(SYNC_CHOICE_STORAGE_KEY, 'local-only');
-    router.replace('/circles');
+    router.replace('/');
   };
 
   return (
@@ -72,16 +72,6 @@ export default function SyncScreen() {
         <BenefitRow icon="shield-checkmark-outline" text="Secure backup of your data" />
         <BenefitRow icon="cloud-outline" text="Access your data on other devices" />
         <BenefitRow icon="swap-horizontal-outline" text="Seamless experience when you switch" />
-      </View>
-
-      <View style={[styles.privacyCard, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
-        <View style={[styles.privacyIcon, { backgroundColor: colors.panelMuted }]}>
-          <Ionicons color={colors.text} name="lock-closed-outline" size={22} />
-        </View>
-        <View style={styles.privacyCopy}>
-          <Text style={[styles.cardTitle, { color: colors.text }]}>Privacy First</Text>
-          <Text style={[styles.smallText, { color: colors.textSoft }]}>Your data is encrypted end-to-end. We can&apos;t read it.</Text>
-        </View>
       </View>
 
       <View style={styles.actions}>
@@ -272,30 +262,6 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 14,
     lineHeight: 20,
-  },
-  privacyCard: {
-    alignItems: 'center',
-    borderRadius: Radius.lg,
-    borderWidth: 1,
-    flexDirection: 'row',
-    gap: Spacing.md,
-    padding: Spacing.lg,
-  },
-  privacyIcon: {
-    alignItems: 'center',
-    borderRadius: Radius.md,
-    height: 42,
-    justifyContent: 'center',
-    width: 42,
-  },
-  privacyCopy: {
-    flex: 1,
-    gap: 2,
-  },
-  smallText: {
-    ...TextPresets.body,
-    fontSize: 13,
-    lineHeight: 18,
   },
   actions: {
     gap: Spacing.sm,

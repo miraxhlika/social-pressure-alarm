@@ -252,6 +252,7 @@ export default function SuccessScreen() {
       <AppScreen backgroundColor="#FFFCF7">
         <LoadingBlock
           description={isSetupComplete ? 'Preparing your first real checkpoint.' : 'Saving this clear to your progress.'}
+          layout="hero"
           title={isSetupComplete ? 'Finishing setup' : 'Saving the win'}
           tone={isSetupComplete ? 'primary' : 'success'}
         />

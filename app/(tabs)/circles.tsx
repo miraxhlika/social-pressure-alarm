@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import {
-  ActivityIndicator,
   Alert,
   Animated,
   Easing,
@@ -29,6 +28,7 @@ import {
   FlowTopBar,
 } from '@/components/ui/flow-primitives';
 import { LoadingBlock } from '@/components/ui/loading-block';
+import { SkeletonRefreshPill } from '@/components/ui/skeleton';
 import { StateCard } from '@/components/ui/state-card';
 import { StatusPill } from '@/components/ui/status-pill';
 import { Radius, Spacing, TextPresets, getAppColors } from '@/constants/theme';
@@ -38,6 +38,7 @@ import {
   buildCircleInviteUrl,
   createSocialCircle,
   joinSocialCircleWithInviteCode,
+  SOCIAL_CIRCLES_CACHE_MAX_AGE_MS,
   listMySocialCircles,
 } from '@/lib/social/circles';
 import { listVisibleSocialFeed } from '@/lib/social/feed';
@@ -46,6 +47,8 @@ import { getSocialQueueSummary } from '@/lib/social/queue';
 import { SocialCircleSummary, SocialFeedItem } from '@/lib/social/types';
 import { useSocialSession } from '@/providers/social-session-provider';
 import { QueuedAlarmEvent } from '@/types/alarm';
+
+type AppColors = ReturnType<typeof getAppColors>;
 
 function getErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
@@ -59,13 +62,19 @@ type CircleActivityItem = {
   id: string;
   circleId: string;
   circleName: string;
-  context: string;
   isPending: boolean;
   outcome: 'confirmed' | 'missed';
   person: string;
   checkpointLabel: string;
   resolvedAt: string;
   canSendNudge: boolean;
+};
+
+type CircleActivityGroup = {
+  circleId: string;
+  circleName: string;
+  latestResolvedAt: string;
+  items: CircleActivityItem[];
 };
 
 function formatActivityTime(timestamp: string) {
@@ -96,21 +105,42 @@ function formatActivityTime(timestamp: string) {
   return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
-function formatFeedContext(item: Pick<SocialFeedItem, 'outcome' | 'sharePayload'>) {
-  const streakCopy = `${item.sharePayload.currentStreak}-clear streak`;
+function formatActivityGroupCount(count: number) {
+  return `${count} update${count === 1 ? '' : 's'}`;
+}
 
-  if (item.outcome === 'confirmed') {
-    const scanCopy =
-      typeof item.sharePayload.timeToScanSeconds === 'number'
-        ? `${item.sharePayload.timeToScanSeconds}s to clear`
-        : 'Cleared on time';
+function getActivityTimestamp(timestamp: string) {
+  const timestampMs = new Date(timestamp).getTime();
+  return Number.isNaN(timestampMs) ? 0 : timestampMs;
+}
 
-    return `${scanCopy} · ${streakCopy}`;
+function groupCircleActivityItems(items: CircleActivityItem[]) {
+  const groupsByCircle = new Map<string, CircleActivityGroup>();
+
+  for (const item of items) {
+    const groupKey = item.circleId || item.circleName;
+    const existingGroup = groupsByCircle.get(groupKey);
+
+    if (!existingGroup) {
+      groupsByCircle.set(groupKey, {
+        circleId: groupKey,
+        circleName: item.circleName,
+        latestResolvedAt: item.resolvedAt,
+        items: [item],
+      });
+      continue;
+    }
+
+    existingGroup.items.push(item);
+
+    if (getActivityTimestamp(item.resolvedAt) > getActivityTimestamp(existingGroup.latestResolvedAt)) {
+      existingGroup.latestResolvedAt = item.resolvedAt;
+    }
   }
 
-  return item.sharePayload.currentStreak > 0
-    ? `${streakCopy} before this miss`
-    : 'Miss recorded';
+  return [...groupsByCircle.values()].sort(
+    (left, right) => getActivityTimestamp(right.latestResolvedAt) - getActivityTimestamp(left.latestResolvedAt)
+  );
 }
 
 function shouldShowQueuedEvent(event: QueuedAlarmEvent) {
@@ -133,7 +163,6 @@ function buildCircleActivityFeed(
       id: event.id,
       circleId: event.socialSettings?.circleId ?? '',
       circleName: circleNameById.get(event.socialSettings?.circleId ?? '') ?? 'Accountability circle',
-      context: formatFeedContext(event),
       isPending: true,
       outcome: event.outcome,
       person: 'You',
@@ -148,7 +177,6 @@ function buildCircleActivityFeed(
       id: item.id,
       circleId: item.circleId,
       circleName: item.circleName,
-      context: formatFeedContext(item),
       isPending: false,
       outcome: item.outcome,
       person: item.isOwnEvent ? 'You' : item.actorDisplayName,
@@ -165,13 +193,21 @@ function buildCircleActivityFeed(
 const COPY_FEEDBACK_MS = 2200;
 const SHEET_OPEN_DURATION_MS = 300;
 const SHEET_CLOSE_DURATION_MS = 220;
+const CIRCLES_SCREEN_REFRESH_MAX_AGE_MS = 60_000;
+
+type LoadCirclesOptions = {
+  force?: boolean;
+  showRefreshing?: boolean;
+};
 
 export default function CirclesScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ inviteCode?: string }>();
   const colors = getAppColors(useColorScheme());
-  const { configured, isLoading, isProfileComplete, user } = useSocialSession();
+  const { configured, isLoading, isProfileComplete, isProfileLoading, user } = useSocialSession();
   const loadCirclesRequestRef = useRef(0);
+  const lastLoadedUserRef = useRef<string | null>(null);
+  const lastLoadedAtRef = useRef(0);
   const [circles, setCircles] = useState<SocialCircleSummary[]>([]);
   const [activityItems, setActivityItems] = useState<CircleActivityItem[]>([]);
   const [circleName, setCircleName] = useState('');
@@ -191,25 +227,56 @@ export default function CirclesScreen() {
   const circleSheetKeyboardOffset = useRef(new Animated.Value(0)).current;
   const copyFeedbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const loadCircles = useCallback(async () => {
+  const loadCircles = useCallback(async (options: LoadCirclesOptions = {}) => {
     const requestId = loadCirclesRequestRef.current + 1;
     loadCirclesRequestRef.current = requestId;
 
-    if (!configured || !user?.id || !isProfileComplete) {
+    if (!configured || !user?.id) {
       setCircles([]);
       setActivityItems([]);
       setHasLoadedCircles(false);
       setIsRefreshing(false);
       setLoadError('');
+      lastLoadedUserRef.current = null;
+      lastLoadedAtRef.current = 0;
       return;
     }
 
-    setIsRefreshing(true);
+    if (!isProfileComplete) {
+      if (lastLoadedUserRef.current !== user.id && !isProfileLoading) {
+        setCircles([]);
+        setActivityItems([]);
+        setHasLoadedCircles(false);
+      }
+
+      setIsRefreshing(false);
+      setLoadError('');
+      return;
+    }
+
+    const hasRecentScreenData =
+      hasLoadedCircles &&
+      lastLoadedUserRef.current === user.id &&
+      Date.now() - lastLoadedAtRef.current < CIRCLES_SCREEN_REFRESH_MAX_AGE_MS;
+
+    if (!options.force && hasRecentScreenData) {
+      return;
+    }
+
+    const shouldShowRefreshing = options.showRefreshing ?? !hasLoadedCircles;
+
+    if (shouldShowRefreshing) {
+      setIsRefreshing(true);
+    }
+
     setLoadError('');
 
     try {
-      const nextCircles = await listMySocialCircles();
-      const [nextFeed, queueSummary] = await Promise.all([
+      const [nextCircles, nextFeed, queueSummary] = await Promise.all([
+        listMySocialCircles({
+          force: options.force,
+          maxAgeMs: SOCIAL_CIRCLES_CACHE_MAX_AGE_MS,
+        }),
         listVisibleSocialFeed({ limitCount: 12 }).catch(() => []),
         getSocialQueueSummary().catch(() => ({ queuedEvents: [] })),
       ]);
@@ -218,6 +285,8 @@ export default function CirclesScreen() {
         setCircles(nextCircles);
         setActivityItems(buildCircleActivityFeed(nextFeed, queueSummary.queuedEvents, nextCircles));
         setHasLoadedCircles(true);
+        lastLoadedUserRef.current = user.id;
+        lastLoadedAtRef.current = Date.now();
       }
     } catch (error) {
       if (loadCirclesRequestRef.current === requestId) {
@@ -229,7 +298,7 @@ export default function CirclesScreen() {
         setIsRefreshing(false);
       }
     }
-  }, [configured, isProfileComplete, user?.id]);
+  }, [configured, hasLoadedCircles, isProfileComplete, isProfileLoading, user?.id]);
 
   useEffect(() => {
     if (typeof params.inviteCode === 'string' && params.inviteCode.trim()) {
@@ -332,7 +401,7 @@ export default function CirclesScreen() {
         const withoutCreatedCircle = currentCircles.filter((circle) => circle.id !== createdCircle.id);
         return [...withoutCreatedCircle, createdCircle].sort((left, right) => left.name.localeCompare(right.name));
       });
-      await loadCircles();
+      await loadCircles({ force: true });
       closeCircleSheet();
     } catch (error) {
       Alert.alert('Unable to create circle', getErrorMessage(error, 'The circle could not be created right now.'));
@@ -359,7 +428,7 @@ export default function CirclesScreen() {
         const withoutJoinedCircle = currentCircles.filter((circle) => circle.id !== joinedCircle.id);
         return [...withoutJoinedCircle, joinedCircle].sort((left, right) => left.name.localeCompare(right.name));
       });
-      await loadCircles();
+      await loadCircles({ force: true });
       closeCircleSheet();
     } catch (error) {
       Alert.alert('Unable to join circle', getErrorMessage(error, 'The invite code could not be used right now.'));
@@ -432,6 +501,8 @@ export default function CirclesScreen() {
     inputRange: [0, 1],
     outputRange: [0.98, 1],
   });
+  const activityGroups = useMemo(() => groupCircleActivityItems(activityItems), [activityItems]);
+  const shouldGroupActivityByCircle = circles.length > 1;
 
   return (
     <AppScreen
@@ -454,13 +525,13 @@ export default function CirclesScreen() {
 
       {!configured ? (
         <StateCard
-          actionLabel="Open account"
-          description="Add the backend values first so circles can load."
-          onAction={() => router.push('/account')}
-          title="Circles are unavailable"
+          actionLabel="Go to Today"
+          description="Local checkpoints still work on this device. Circles are optional and are not available in this build yet."
+          onAction={() => router.push('/')}
+          title="Circles are optional"
         />
       ) : isLoading ? (
-        <LoadingBlock description="Loading your account session for circles." title="Loading circles" />
+        <LoadingBlock description="Loading your account session for circles." layout="list" title="Loading circles" />
       ) : !user ? (
         <EmptyState
           actionLabel="Go to account"
@@ -471,6 +542,8 @@ export default function CirclesScreen() {
           title="Sign in first"
           tone="primary"
         />
+      ) : isProfileLoading ? (
+        <LoadingBlock description="Checking your profile before loading circles." layout="compact" title="Loading circles" />
       ) : !isProfileComplete ? (
         <StateCard
           actionLabel="Complete profile"
@@ -485,7 +558,7 @@ export default function CirclesScreen() {
               actionLabel="Retry"
               description={loadError}
               onAction={() => {
-                void loadCircles();
+                void loadCircles({ force: true, showRefreshing: true });
               }}
               title="Could not refresh circles"
               tone="danger"
@@ -493,7 +566,7 @@ export default function CirclesScreen() {
           ) : null}
 
           {!loadError && !hasLoadedCircles && isRefreshing ? (
-            <LoadingBlock description="Pulling in your circles and recent activity." title="Loading circles" />
+            <LoadingBlock description="Pulling in your circles and recent activity." layout="list" title="Loading circles" />
           ) : null}
 
           {!loadError && hasLoadedCircles && circles.length === 0 ? (
@@ -513,7 +586,7 @@ export default function CirclesScreen() {
               <View style={styles.compactSectionHeader}>
                 <FlowSectionLabel>YOUR CIRCLES</FlowSectionLabel>
                 <View style={styles.sectionHeaderActions}>
-                  {isRefreshing ? <ActivityIndicator color={colors.primary} /> : <Text style={[styles.sectionCount, { color: colors.textSoft }]}>{circles.length} total</Text>}
+                  {isRefreshing ? <SkeletonRefreshPill width={48} /> : <Text style={[styles.sectionCount, { color: colors.textSoft }]}>{circles.length} total</Text>}
                 </View>
               </View>
 
@@ -566,53 +639,63 @@ export default function CirclesScreen() {
             <FlowPanel>
               <View style={styles.compactSectionHeader}>
                 <FlowSectionLabel>ACTIVITY</FlowSectionLabel>
-                {isRefreshing ? <ActivityIndicator color={colors.primary} /> : null}
+                {isRefreshing ? <SkeletonRefreshPill width={58} /> : null}
               </View>
 
               {isRefreshing && activityItems.length === 0 ? (
                 <LoadingBlock
                   description="Checking for shared clears and misses."
+                  layout="compact"
                   title="Loading activity"
                   variant="inline"
                 />
               ) : activityItems.length > 0 ? (
                 <View style={styles.activityList}>
-                  {activityItems.map((item) => {
-                    const hasNudged = nudgedEventIds.has(item.id);
-                    const isNudging = nudgingEventId === item.id;
-
-                    return (
-                      <View key={item.id} style={styles.activityItem}>
-                        <FlowIconBadge
-                          icon={item.outcome === 'confirmed' ? 'checkmark' : 'alert'}
-                          size="small"
-                          tone={item.outcome === 'confirmed' ? 'success' : 'danger'}
-                        />
-                        <View style={styles.activityCopy}>
-                          <Text style={[styles.activityTitle, { color: colors.text }]}>
-                            {item.person} {item.outcome === 'confirmed' ? 'cleared' : 'missed'} {item.checkpointLabel}
-                          </Text>
-                          <Text style={[styles.activityMeta, { color: colors.textSoft }]}>
-                            {item.circleName} · {formatActivityTime(item.resolvedAt)}
-                            {item.isPending ? ' · Pending sync' : ''}
-                          </Text>
-                          <Text style={[styles.activityContext, { color: colors.muted }]}>{item.context}</Text>
-                          {item.canSendNudge ? (
-                            <AppButton
-                              disabled={isNudging || hasNudged}
-                              label={hasNudged ? 'Nudge sent' : isNudging ? 'Sending...' : 'Send nudge'}
-                              onPress={() => {
-                                void handleSendNudge(item);
-                              }}
-                              size="compact"
-                              style={styles.nudgeAction}
-                              variant={hasNudged ? 'secondary' : 'ghost'}
-                            />
+                  {shouldGroupActivityByCircle
+                    ? activityGroups.map((group, index) => (
+                        <View key={group.circleId} style={styles.activityGroup}>
+                          <View style={styles.activityGroupSection}>
+                            <View style={styles.activityGroupHeader}>
+                              <View style={styles.activityGroupTitleWrap}>
+                                <Text style={[styles.activityGroupTitle, { color: colors.text }]}>{group.circleName}</Text>
+                                <Text style={[styles.activityGroupMeta, { color: colors.textSoft }]}>
+                                  Latest {formatActivityTime(group.latestResolvedAt)}
+                                </Text>
+                              </View>
+                              <Text style={[styles.activityGroupCount, { color: colors.muted }]}>
+                                {formatActivityGroupCount(group.items.length)}
+                              </Text>
+                            </View>
+                            <View style={styles.activityGroupItems}>
+                              {group.items.map((item) => (
+                                <CircleActivityRow
+                                  colors={colors}
+                                  hasNudged={nudgedEventIds.has(item.id)}
+                                  isNudging={nudgingEventId === item.id}
+                                  item={item}
+                                  key={item.id}
+                                  onSendNudge={handleSendNudge}
+                                  showCircleName={false}
+                                />
+                              ))}
+                            </View>
+                          </View>
+                          {index < activityGroups.length - 1 ? (
+                            <View style={[styles.activityGroupDivider, { backgroundColor: colors.line }]} />
                           ) : null}
                         </View>
-                      </View>
-                    );
-                  })}
+                      ))
+                    : activityItems.map((item) => (
+                        <CircleActivityRow
+                          colors={colors}
+                          hasNudged={nudgedEventIds.has(item.id)}
+                          isNudging={nudgingEventId === item.id}
+                          item={item}
+                          key={item.id}
+                          onSendNudge={handleSendNudge}
+                          showCircleName
+                        />
+                      ))}
                 </View>
               ) : (
                 <Text style={[TextPresets.body, styles.emptyActivityText, { color: colors.textSoft }]}>
@@ -752,6 +835,58 @@ export default function CirclesScreen() {
   );
 }
 
+function CircleActivityRow({
+  colors,
+  hasNudged,
+  isNudging,
+  item,
+  onSendNudge,
+  showCircleName,
+}: {
+  colors: AppColors;
+  hasNudged: boolean;
+  isNudging: boolean;
+  item: CircleActivityItem;
+  onSendNudge: (item: CircleActivityItem) => void;
+  showCircleName: boolean;
+}) {
+  return (
+    <View style={styles.activityItem}>
+      <FlowIconBadge
+        icon={item.outcome === 'confirmed' ? 'checkmark' : 'alert'}
+        size="small"
+        tone={item.outcome === 'confirmed' ? 'success' : 'danger'}
+      />
+      <View style={styles.activityCopy}>
+        <Text style={styles.activityTitle}>
+          <Text style={[styles.activityPerson, { color: colors.primary }]}>{item.person}</Text>
+          <Text style={[styles.activityAction, { color: colors.textSoft }]}>
+            {item.outcome === 'confirmed' ? ' cleared ' : ' missed '}
+          </Text>
+          <Text style={[styles.activityCheckpoint, { color: colors.text }]}>{item.checkpointLabel}</Text>
+        </Text>
+        <Text style={[styles.activityMeta, { color: colors.textSoft }]}>
+          {showCircleName ? `${item.circleName} · ` : ''}
+          {formatActivityTime(item.resolvedAt)}
+          {item.isPending ? ' · Pending sync' : ''}
+        </Text>
+        {item.canSendNudge ? (
+          <AppButton
+            disabled={isNudging || hasNudged}
+            label={hasNudged ? 'Nudge sent' : isNudging ? 'Sending...' : 'Send nudge'}
+            onPress={() => {
+              onSendNudge(item);
+            }}
+            size="compact"
+            style={styles.nudgeAction}
+            variant={hasNudged ? 'secondary' : 'ghost'}
+          />
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   screenContent: {
     gap: 10,
@@ -824,16 +959,55 @@ const styles = StyleSheet.create({
     borderColor: 'transparent',
   },
   activityList: {
+    gap: Spacing.lg,
+  },
+  activityGroup: {
+    gap: Spacing.lg,
+  },
+  activityGroupSection: {
     gap: Spacing.md,
+  },
+  activityGroupHeader: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    gap: Spacing.md,
+    justifyContent: 'space-between',
+  },
+  activityGroupTitleWrap: {
+    flex: 1,
+    gap: 2,
+    minWidth: 0,
+  },
+  activityGroupTitle: {
+    ...TextPresets.label,
+    fontSize: 14,
+    lineHeight: 19,
+  },
+  activityGroupMeta: {
+    ...TextPresets.body,
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  activityGroupCount: {
+    ...TextPresets.eyebrow,
+    fontSize: 10,
+    lineHeight: 14,
+  },
+  activityGroupItems: {
+    gap: Spacing.lg,
+  },
+  activityGroupDivider: {
+    height: 1,
   },
   activityItem: {
     alignItems: 'flex-start',
     flexDirection: 'row',
-    gap: Spacing.sm,
+    gap: Spacing.md,
+    paddingVertical: 2,
   },
   activityCopy: {
     flex: 1,
-    gap: 2,
+    gap: 4,
     minWidth: 0,
   },
   activityTitle: {
@@ -841,15 +1015,19 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 19,
   },
+  activityPerson: {
+    fontWeight: '800',
+  },
+  activityAction: {
+    fontWeight: '600',
+  },
+  activityCheckpoint: {
+    fontWeight: '800',
+  },
   activityMeta: {
     ...TextPresets.body,
     fontSize: 12,
     lineHeight: 16,
-  },
-  activityContext: {
-    ...TextPresets.body,
-    fontSize: 11,
-    lineHeight: 15,
   },
   nudgeAction: {
     alignSelf: 'flex-start',

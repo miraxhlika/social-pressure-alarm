@@ -634,14 +634,14 @@ export default function AccountScreen() {
           <View style={styles.settingsDetailSlot}>
             <AppCard tone="canvas" variant="inline" style={styles.settingsDetailCard}>
               {configured && isLoading ? (
-                <LoadingBlock description="Checking your profile." title="Loading account" />
+                <LoadingBlock description="Checking your profile." layout="compact" title="Loading account" />
               ) : !configured || !user ? (
                 <SettingsPanelHeader
                   title="Your data stays on your device"
                   description="Sync and circles are optional."
                 />
               ) : isProfileLoading && !profile ? (
-                <LoadingBlock description="Loading profile details." title="Loading profile" />
+                <LoadingBlock description="Loading profile details." layout="compact" title="Loading profile" />
               ) : profileError && !profile ? (
                 <StateCard
                   actionLabel="Try again"

@@ -213,6 +213,7 @@ export default function MissedScreen() {
       <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
         <LoadingBlock
           description="Loading the missed checkpoint and recovery options."
+          layout="detail"
           style={styles.loadingBlock}
           title="Preparing recovery"
           tone="canvas"

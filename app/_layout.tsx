@@ -9,7 +9,7 @@ import { getAppColors } from '@/constants/theme';
 import { useAlarmRuntime } from '@/hooks/use-alarm-runtime';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useSocialRuntime } from '@/hooks/use-social-runtime';
-import { readAlarmStore } from '@/lib/alarms';
+import { readLocalAlarmStore } from '@/lib/alarms';
 import { markOnboardingCompleted, readOnboardingState } from '@/lib/onboarding';
 import { SocialSessionProvider } from '@/providers/social-session-provider';
 
@@ -45,7 +45,7 @@ export default function RootLayout() {
 
     const syncOnboardingGate = async () => {
       try {
-        const [onboardingState, store] = await Promise.all([readOnboardingState(), readAlarmStore()]);
+        const [onboardingState, store] = await Promise.all([readOnboardingState(), readLocalAlarmStore()]);
         const hasExistingUsage =
           store.alarms.length > 0 ||
           store.lifetimeAlarmCreations > 0 ||

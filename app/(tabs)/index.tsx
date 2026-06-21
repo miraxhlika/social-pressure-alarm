@@ -17,7 +17,12 @@ import {
 import { LoadingBlock } from '@/components/ui/loading-block';
 import { Fonts, Radius, Spacing, TextPresets, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { formatAlarmTime, formatScheduledFor, hydrateAlarmRuntimeForCurrentUser, readAlarmStore } from '@/lib/alarms';
+import {
+  ALARM_RUNTIME_CACHE_MAX_AGE_MS,
+  formatAlarmTime,
+  formatScheduledFor,
+  hydrateAlarmRuntimeForCurrentUser,
+} from '@/lib/alarms';
 import {
   formatSocialTimestamp,
   getAlarmPhaseLabel,
@@ -26,7 +31,7 @@ import {
   getSocialStatusTone,
 } from '@/lib/dashboard';
 import { ProgressSummary, getProgressSummary } from '@/lib/progress';
-import { listMySocialCircles } from '@/lib/social/circles';
+import { SOCIAL_CIRCLES_CACHE_MAX_AGE_MS, listMySocialCircles } from '@/lib/social/circles';
 import { getSocialRuntimeSnapshot } from '@/lib/social/queue';
 import { SocialRuntimeSnapshot } from '@/lib/social/types';
 import { useSocialSession } from '@/providers/social-session-provider';
@@ -411,12 +416,12 @@ export default function TodayScreen() {
     }
 
     try {
-      await hydrateAlarmRuntimeForCurrentUser().catch(() => null);
-
       const [store, socialRuntime, circles] = await Promise.all([
-        readAlarmStore(),
+        hydrateAlarmRuntimeForCurrentUser({ maxAgeMs: ALARM_RUNTIME_CACHE_MAX_AGE_MS }),
         getSocialRuntimeSnapshot(),
-        shouldLoadCircles ? listMySocialCircles().catch(() => []) : Promise.resolve([]),
+        shouldLoadCircles
+          ? listMySocialCircles({ maxAgeMs: SOCIAL_CIRCLES_CACHE_MAX_AGE_MS }).catch(() => [])
+          : Promise.resolve([]),
       ]);
 
       if (loadHomeRequestRef.current === requestId) {
@@ -502,6 +507,7 @@ export default function TodayScreen() {
       {isLoading ? (
         <LoadingBlock
           description="Checking your next checkpoint and latest proof."
+          layout="hero"
           style={styles.loadingHero}
           title="Loading today"
           tone="canvas"

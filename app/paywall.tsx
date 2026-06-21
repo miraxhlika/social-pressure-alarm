@@ -77,6 +77,7 @@ export default function PaywallScreen() {
       {isLoading ? (
         <LoadingBlock
           description="Checking your saved checkpoints and current usage."
+          layout="detail"
           title="Loading limit details"
           tone="canvas"
         />

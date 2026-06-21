@@ -1,12 +1,52 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Tabs } from 'expo-router';
+import { useEffect, useRef } from 'react';
 
 import { HapticTab } from '@/components/haptic-tab';
 import { Radius, Shadows, TextPresets, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { ALARM_RUNTIME_CACHE_MAX_AGE_MS, hydrateAlarmRuntimeForCurrentUser } from '@/lib/alarms';
+import { SOCIAL_CIRCLES_CACHE_MAX_AGE_MS, listMySocialCircles } from '@/lib/social/circles';
+import { listVisibleSocialFeed } from '@/lib/social/feed';
+import { getSocialQueueSummary } from '@/lib/social/queue';
+import { useSocialSession } from '@/providers/social-session-provider';
 
 export default function TabLayout() {
   const colors = getAppColors(useColorScheme());
+  const { configured, isLoading, isProfileComplete, user } = useSocialSession();
+  const prefetchedAlarmKeyRef = useRef<string | null>(null);
+  const prefetchedCircleKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const userKey = user?.id ?? 'guest';
+    const shouldPrefetchAlarms = !isLoading && prefetchedAlarmKeyRef.current !== userKey;
+    const shouldPrefetchCircles =
+      configured && !isLoading && Boolean(user?.id) && isProfileComplete && prefetchedCircleKeyRef.current !== userKey;
+
+    if (!shouldPrefetchAlarms && !shouldPrefetchCircles) {
+      return;
+    }
+
+    const prefetchTimeout = setTimeout(() => {
+      if (shouldPrefetchAlarms) {
+        prefetchedAlarmKeyRef.current = userKey;
+        void hydrateAlarmRuntimeForCurrentUser({ maxAgeMs: ALARM_RUNTIME_CACHE_MAX_AGE_MS }).catch(() => null);
+      }
+
+      if (shouldPrefetchCircles) {
+        prefetchedCircleKeyRef.current = userKey;
+        void Promise.all([
+          listMySocialCircles({ maxAgeMs: SOCIAL_CIRCLES_CACHE_MAX_AGE_MS }).catch(() => []),
+          listVisibleSocialFeed({ limitCount: 12 }).catch(() => []),
+          getSocialQueueSummary().catch(() => ({ queuedEvents: [] })),
+        ]);
+      }
+    }, 350);
+
+    return () => {
+      clearTimeout(prefetchTimeout);
+    };
+  }, [configured, isLoading, isProfileComplete, user?.id]);
 
   return (
     <Tabs

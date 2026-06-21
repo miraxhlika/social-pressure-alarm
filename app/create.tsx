@@ -18,6 +18,7 @@ import {
   FlowSectionLabel,
   FlowTopBar,
 } from '@/components/ui/flow-primitives';
+import { SkeletonTextStack } from '@/components/ui/skeleton';
 import { Fonts, Radius, Spacing, TextPresets, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { trackAnalyticsEvent } from '@/lib/analytics';
@@ -132,7 +133,7 @@ function getRepeatLabel(repeatSchedule: RepeatSchedule) {
     case 'weekdays':
       return 'Weekdays';
     default:
-      return 'None';
+      return 'Once';
   }
 }
 
@@ -1612,7 +1613,9 @@ function AccountabilityEditor({
           </Text>
         </FlowPanel>
       ) : sessionState.isLoading ? (
-        <Text style={[TextPresets.body, styles.smallBody, { color: colors.textSoft }]}>Loading circles...</Text>
+        <FlowPanel tone="muted">
+          <SkeletonTextStack lines={2} widths={['64%', '42%']} />
+        </FlowPanel>
       ) : !sessionState.signedIn ? (
         <FlowPanel tone="muted">
           <Text style={[TextPresets.label, { color: colors.text }]}>Sign in to share</Text>
