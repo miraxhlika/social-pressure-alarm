@@ -14,7 +14,10 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.miraxhlika.socialpressurealarm",
       "backgroundColor": "#FEF4E8",
-      "appleTeamId": "2U2TF6G3Z8"
+      "appleTeamId": "2U2TF6G3Z8",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -24,7 +27,8 @@
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "permissions": [
-        "android.permission.CAMERA"
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
       ],
       "package": "com.miraxhlika.socialpressurealarm"
     },
@@ -59,6 +63,13 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "8d5c0a01-cbff-4dd5-ba3f-8cb404180421"
+      }
+    },
+    "owner": "miraxhlika"
   }
 }
