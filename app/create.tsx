@@ -32,6 +32,8 @@ import {
 } from '@/lib/alarms';
 import {
   CHECKPOINT_TEMPLATES,
+  FIRST_CHECKPOINT_TEMPLATES,
+  FIRST_RUN_GRACE_SECONDS,
   formatGracePeriodLabel,
   getCheckpointTemplate,
   getCheckpointTemplateDefaults,
@@ -97,6 +99,8 @@ type FormErrors = {
   gracePeriodSeconds?: string;
 };
 
+type CreateStep = 0 | 1 | 2;
+
 const REPEAT_OPTIONS: { value: RepeatSchedule; label: string; help: string }[] = [
   { value: 'once', label: 'One-time', help: 'Runs once' },
   { value: 'daily', label: 'Daily', help: 'Every day' },
@@ -104,16 +108,59 @@ const REPEAT_OPTIONS: { value: RepeatSchedule; label: string; help: string }[] =
 ];
 
 const GRACE_PRESET_OPTIONS = [
-  { value: 45, label: '45 sec', help: 'Very close' },
-  { value: 90, label: '90 sec', help: 'Short walk' },
-  { value: 120, label: '2 min', help: 'Balanced' },
-  { value: 180, label: '3 min', help: 'Forgiving' },
+  { value: 120, label: '2 min', help: 'Nearby' },
+  { value: 300, label: '5 min', help: 'Short walk' },
+  { value: 600, label: '10 min', help: 'Balanced' },
+  { value: 900, label: '15 min', help: 'Forgiving' },
 ] as const;
+
+function getFirstRunUseCaseIcon(id: UseCaseType): keyof typeof Ionicons.glyphMap {
+  switch (id) {
+    case 'wake_up':
+      return 'sunny-outline';
+    case 'leave_home':
+      return 'exit-outline';
+    case 'study_start':
+      return 'book-outline';
+    case 'workout':
+      return 'barbell-outline';
+    default:
+      return 'flag-outline';
+  }
+}
 
 function createInitialTime() {
   const now = new Date();
   now.setHours(now.getHours() + 1, 0, 0, 0);
   return now;
+}
+
+function createFirstRunTime(useCaseType: UseCaseType = 'custom') {
+  const nextTime = new Date();
+
+  switch (useCaseType) {
+    case 'wake_up':
+      nextTime.setHours(7, 0, 0, 0);
+      break;
+    case 'leave_home':
+      nextTime.setHours(8, 0, 0, 0);
+      break;
+    case 'study_start':
+    case 'deep_work':
+      nextTime.setHours(9, 0, 0, 0);
+      break;
+    case 'workout':
+      nextTime.setHours(18, 0, 0, 0);
+      break;
+    case 'medication':
+      nextTime.setHours(9, 0, 0, 0);
+      break;
+    default:
+      nextTime.setHours(nextTime.getHours() + 1, 0, 0, 0);
+      break;
+  }
+
+  return nextTime;
 }
 
 function normalizeRepeatScheduleParam(value: string | undefined, fallback: RepeatSchedule) {
@@ -244,7 +291,7 @@ export default function CreateAlarmScreen() {
   const [scannerPurpose, setScannerPurpose] = useState<ScannerPurpose>('link');
   const [scannerMessage, setScannerMessage] = useState('');
   const [isScannerEnabled, setIsScannerEnabled] = useState(true);
-  const [activeStep, setActiveStep] = useState<1 | 2>(1);
+  const [activeStep, setActiveStep] = useState<CreateStep>(1);
   const [expandedField, setExpandedField] = useState<ExpandedField>(null);
   const [sourceAlarm, setSourceAlarm] = useState<Alarm | null>(null);
   const [savedCodePresets, setSavedCodePresets] = useState<CheckpointPreset[]>([]);
@@ -257,6 +304,7 @@ export default function CreateAlarmScreen() {
   const [isLoadingSocialCircles, setIsLoadingSocialCircles] = useState(false);
   const [socialCirclesError, setSocialCirclesError] = useState('');
   const [errors, setErrors] = useState<FormErrors>({});
+  const [isFirstCheckpoint, setIsFirstCheckpoint] = useState(false);
   const [permission, requestPermission, getPermission] = useCameraPermissions();
   const [notificationPermissionState, setNotificationPermissionState] =
     useState<NotificationPermissionState>('undetermined');
@@ -275,21 +323,46 @@ export default function CreateAlarmScreen() {
   const parsedGracePeriod = Number.parseInt(gracePeriodSeconds, 10);
   const gracePreviewSeconds = Number.isFinite(parsedGracePeriod) ? Math.max(parsedGracePeriod, 0) : 0;
   const hasLinkedProofCode = expectedQrPayload.trim().length > 0;
-  const shouldSaveFromDetailsStep = activeStep === 1 && hasLinkedProofCode;
+  const requiresProofVerification = isOnboardingConversion || isFirstCheckpoint;
+  const hasVerifiedProofCode = Boolean(proofCodeVerifiedAt);
+  const canSaveLinkedProof = hasLinkedProofCode && (!requiresProofVerification || hasVerifiedProofCode);
+  const shouldSaveFromDetailsStep = activeStep === 1 && canSaveLinkedProof;
   let footerButtonLabel = 'Link proof code';
   let footerHelperCopy = '';
 
-  if (activeStep === 2) {
-    footerButtonLabel = hasLinkedProofCode ? (isSaving ? 'Saving...' : isEditMode ? 'Save Changes' : 'Save Checkpoint') : 'Link a Code';
-    footerHelperCopy = hasLinkedProofCode
-      ? 'Code linked. Save now or run an optional test scan first.'
-      : 'Link a code before saving this checkpoint.';
+  if (activeStep === 0) {
+    footerButtonLabel = 'Choose a starting point';
+    footerHelperCopy = 'Pick the commitment you want to prove with a real place or object.';
+  } else if (activeStep === 2) {
+    if (!hasLinkedProofCode) {
+      footerButtonLabel = 'Link a Code';
+      footerHelperCopy = 'Scan a QR code or barcode at the real place or object.';
+    } else if (requiresProofVerification && !hasVerifiedProofCode) {
+      footerButtonLabel = 'Run test scan';
+      footerHelperCopy = 'Test the code once so your first live clear is reliable.';
+    } else {
+      footerButtonLabel = isSaving
+        ? isOnboardingConversion
+          ? 'Starting practice...'
+          : 'Saving...'
+        : isEditMode
+          ? 'Save Changes'
+          : isOnboardingConversion
+            ? 'Start practice clear'
+            : 'Save Checkpoint';
+      footerHelperCopy = isOnboardingConversion
+        ? 'You will clear this checkpoint once now, then keep the daily schedule.'
+        : 'Code linked and verified. Save when you are ready.';
+    }
   } else if (shouldSaveFromDetailsStep) {
     footerButtonLabel = isSaving ? 'Saving...' : isEditMode ? 'Save Changes' : 'Save Checkpoint';
     footerHelperCopy =
       notificationPermissionState === 'denied'
         ? 'Notifications are blocked in Settings. Re-enable them before saving.'
-        : 'Code linked. You can save or tap Link Code to retest.';
+        : 'Reminders open the app so you can scan. Keep notifications on.';
+  } else if (activeStep === 1 && hasLinkedProofCode && requiresProofVerification && !hasVerifiedProofCode) {
+    footerButtonLabel = 'Finish proof setup';
+    footerHelperCopy = 'A quick test scan is required before your first checkpoint can go live.';
   }
   const formattedTime = useMemo(
     () =>
@@ -411,17 +484,20 @@ export default function CreateAlarmScreen() {
         maxAgeMs: ALARM_RUNTIME_CACHE_MAX_AGE_MS,
       }).catch(() => readAlarmStore());
       setSavedCodePresets(store.checkpointPresets);
+      setIsFirstCheckpoint(store.lifetimeAlarmCreations === 0 && store.successHistory.length === 0);
       setErrors({});
-      setActiveStep(1);
 
       if (!params.alarmId || (!isEditMode && !isReuseMode)) {
         const prefilledTemplate = getCheckpointTemplateDefaults(params.prefillUseCaseType);
         const prefilledGracePeriod = Number.parseInt(params.prefillGracePeriodSeconds ?? '', 10);
+        const shouldGuideFirstRun = isOnboardingConversion || store.lifetimeAlarmCreations === 0;
+        const hasPrefillUseCase =
+          typeof params.prefillUseCaseType === 'string' && params.prefillUseCaseType.length > 0;
 
         setSourceAlarm(null);
         setUseCaseType(prefilledTemplate.useCaseType);
         setLabel(typeof params.prefillLabel === 'string' ? params.prefillLabel : prefilledTemplate.label);
-        setPlaceObject('');
+        setPlaceObject(prefilledTemplate.label);
         setNotes('');
         setExpectedQrPayload('');
         setLinkMode('scanQr');
@@ -433,12 +509,16 @@ export default function CreateAlarmScreen() {
         setGracePeriodSeconds(
           Number.isFinite(prefilledGracePeriod) && prefilledGracePeriod >= 15
             ? String(prefilledGracePeriod)
-            : String(prefilledTemplate.gracePeriodSeconds)
+            : String(shouldGuideFirstRun ? FIRST_RUN_GRACE_SECONDS : prefilledTemplate.gracePeriodSeconds)
         );
+        setTime(shouldGuideFirstRun ? createFirstRunTime(prefilledTemplate.useCaseType) : createInitialTime());
+        setActiveStep(shouldGuideFirstRun && !hasPrefillUseCase ? 0 : 1);
+        setExpandedField(shouldGuideFirstRun ? 'schedule' : null);
         return;
       }
 
       const alarm = store.alarms.find((candidate) => candidate.id === params.alarmId) ?? null;
+      setActiveStep(1);
 
       if (!alarm) {
         setSourceAlarm(null);
@@ -483,6 +563,7 @@ export default function CreateAlarmScreen() {
     void loadFormData();
   }, [
     isEditMode,
+    isOnboardingConversion,
     isReuseMode,
     applySocialSettingsToForm,
     params.alarmId,
@@ -530,6 +611,23 @@ export default function CreateAlarmScreen() {
     setNameFocusRequest((currentRequest) => currentRequest + 1);
   }, []);
 
+  const handleSelectFirstUseCase = useCallback(async (nextUseCaseType: UseCaseType) => {
+    const defaults = getCheckpointTemplateDefaults(nextUseCaseType);
+    setUseCaseType(defaults.useCaseType);
+    setLabel(defaults.label);
+    setPlaceObject(defaults.label);
+    setRepeatSchedule(defaults.repeatSchedule === 'once' ? 'daily' : defaults.repeatSchedule);
+    setGracePeriodSeconds(String(FIRST_RUN_GRACE_SECONDS));
+    setTime(createFirstRunTime(defaults.useCaseType));
+    setErrors({});
+    setActiveStep(1);
+    setExpandedField('schedule');
+    await trackAnalyticsEvent('use_case_selected', {
+      source: 'onboarding',
+      useCaseType: defaults.useCaseType,
+    });
+  }, []);
+
   const validateDetailsStep = useCallback(() => {
     const nextErrors: FormErrors = {};
 
@@ -557,6 +655,21 @@ export default function CreateAlarmScreen() {
     setExpandedField(null);
     setIsScannerVisible(false);
   }, []);
+
+  const handleReturnFromDetailsStep = useCallback(() => {
+    if (isOnboardingConversion || isFirstCheckpoint) {
+      setActiveStep(0);
+      setExpandedField(null);
+      return;
+    }
+
+    if (router.canGoBack()) {
+      router.back();
+      return;
+    }
+
+    router.replace(returnTo);
+  }, [isFirstCheckpoint, isOnboardingConversion, returnTo, router]);
 
   // Only intercept an actual attempt to leave an unfinished link-code step.
   // Once saving starts, the success redirect must be allowed to remove this screen.
@@ -813,6 +926,8 @@ export default function CreateAlarmScreen() {
 
     if (!trimmedExpectedQrPayload) {
       nextErrors.expectedQrPayload = 'Scan or choose the exact code this checkpoint should accept.';
+    } else if (requiresProofVerification && !proofCodeVerifiedAt) {
+      nextErrors.expectedQrPayload = 'Run a test scan before saving your first checkpoint.';
     }
 
     if (Number.isNaN(gracePeriod) || gracePeriod < 15) {
@@ -824,6 +939,8 @@ export default function CreateAlarmScreen() {
       setErrors(nextErrors);
       if (nextErrors.label || nextErrors.gracePeriodSeconds) {
         setActiveStep(1);
+      } else if (nextErrors.expectedQrPayload) {
+        setActiveStep(2);
       }
       if (nextErrors.label) {
         focusNameField();
@@ -884,7 +1001,17 @@ export default function CreateAlarmScreen() {
         lastOutcome: undefined,
       };
 
-      const scheduled = await scheduleAlarmNotificationAsync(baseAlarm);
+      // A practice clear is already happening in the foreground, so it does not
+      // need (and must not create) a local notification with a past trigger.
+      // Its immediate scheduledFor makes the alarm live; a successful clear
+      // schedules the first real recurring notification in RingingScreen.
+      const scheduled = isOnboardingConversion
+        ? {
+            notificationIds: [] as string[],
+            scheduledFor: new Date().toISOString(),
+            strategyKey: undefined,
+          }
+        : await scheduleAlarmNotificationAsync(baseAlarm);
       scheduledNotificationIds = scheduled.notificationIds;
 
       if (isEditMode && sourceAlarm?.notificationIds) {
@@ -893,6 +1020,7 @@ export default function CreateAlarmScreen() {
 
       const nextAlarm: Alarm = {
         ...baseAlarm,
+        isPracticeRun: isOnboardingConversion,
         notificationIds: scheduled.notificationIds,
         scheduledFor: scheduled.scheduledFor,
         notificationStrategyKey: scheduled.strategyKey,
@@ -902,6 +1030,11 @@ export default function CreateAlarmScreen() {
         await updateAlarm(nextAlarm);
       } else {
         await saveNewAlarm(nextAlarm);
+        if (isOnboardingConversion) {
+          await trackAnalyticsEvent('demo_checkpoint_created', {
+            useCaseType,
+          });
+        }
         await trackAnalyticsEvent('recurring_checkpoint_saved', {
           checkpointId: nextAlarm.id,
           useCaseType,
@@ -916,12 +1049,9 @@ export default function CreateAlarmScreen() {
       if (isOnboardingConversion && !isEditMode) {
         await markOnboardingCompleted();
         router.replace({
-          pathname: '/success',
+          pathname: '/ringing',
           params: {
             alarmId: nextAlarm.id,
-            label: nextAlarm.label,
-            mode: 'setup_complete',
-            promptSecondCheckpoint: store.lifetimeAlarmCreations === 0 ? '1' : '0',
           },
         });
         return;
@@ -957,7 +1087,9 @@ export default function CreateAlarmScreen() {
     linkMode,
     notes,
     placeObject,
+    proofCodeVerifiedAt,
     repeatSchedule,
+    requiresProofVerification,
     returnTo,
     router,
     selectedCircleId,
@@ -974,40 +1106,89 @@ export default function CreateAlarmScreen() {
       backgroundColor={colors.elevated}
       contentStyle={styles.screenContent}
       footer={
-        <View style={styles.bottomFooter}>
-          <FlowFooterButton
-            disabled={isSaving}
-            icon={hasLinkedProofCode ? 'checkmark' : activeStep === 2 ? 'scan' : 'qr-code-outline'}
-            label={footerButtonLabel}
-            onPress={
-              activeStep === 2
-                ? hasLinkedProofCode
-                  ? handleSave
-                  : () => void handleOpenScanner(linkMode === 'scanBarcode' ? 'scanBarcode' : 'scanQr')
-                : shouldSaveFromDetailsStep
-                  ? handleSave
-                  : handleContinueToLinkCode
-            }
-          />
-          {footerHelperCopy ? (
-            <View style={styles.footerHelper}>
-              <Ionicons color={colors.muted} name="lock-closed-outline" size={12} />
-              <Text style={[styles.footerHelperText, { color: colors.textSoft }]}>{footerHelperCopy}</Text>
-            </View>
-          ) : null}
-        </View>
+        activeStep === 0 ? null : (
+          <View style={styles.bottomFooter}>
+            <FlowFooterButton
+              disabled={isSaving}
+              icon={
+                canSaveLinkedProof
+                  ? 'checkmark'
+                  : activeStep === 2 && hasLinkedProofCode && requiresProofVerification && !hasVerifiedProofCode
+                    ? 'scan-outline'
+                    : activeStep === 2
+                      ? 'scan'
+                      : 'qr-code-outline'
+              }
+              label={footerButtonLabel}
+              onPress={
+                activeStep === 2
+                  ? !hasLinkedProofCode
+                    ? () => void handleOpenScanner(linkMode === 'scanBarcode' ? 'scanBarcode' : 'scanQr')
+                    : requiresProofVerification && !hasVerifiedProofCode
+                      ? () => void handleOpenTestScanner()
+                      : handleSave
+                  : shouldSaveFromDetailsStep
+                    ? handleSave
+                    : hasLinkedProofCode && requiresProofVerification && !hasVerifiedProofCode
+                      ? () => {
+                          setActiveStep(2);
+                          void handleOpenTestScanner();
+                        }
+                      : handleContinueToLinkCode
+              }
+            />
+            {footerHelperCopy ? (
+              <View style={styles.footerHelper}>
+                <Ionicons color={colors.muted} name="lock-closed-outline" size={12} />
+                <Text style={[styles.footerHelperText, { color: colors.textSoft }]}>{footerHelperCopy}</Text>
+              </View>
+            ) : null}
+          </View>
+        )
       }
       keyboardAware
       scrollRef={scrollViewRef}>
       <FlowTopBar
-        leftAccessibilityLabel={activeStep === 1 ? 'Close create checkpoint' : 'Back to create checkpoint'}
-        leftIcon={activeStep === 1 ? 'close' : 'chevron-back'}
-        onLeftPress={activeStep === 1 ? handleCancel : handleReturnToDetailsStep}
-        subtitle={activeStep === 1 ? 'Set it up in a minute.' : 'Choose the code that proves completion.'}
-        title={activeStep === 1 ? (isEditMode ? 'Edit checkpoint' : 'New checkpoint') : 'Proof code'}
+        leftAccessibilityLabel={
+          activeStep === 0
+            ? 'Close first checkpoint setup'
+            : activeStep === 1
+              ? isOnboardingConversion || isFirstCheckpoint
+                ? 'Back to starting point'
+                : 'Close create checkpoint'
+              : 'Back to create checkpoint'
+        }
+        leftIcon={activeStep === 0 || (activeStep === 1 && !(isOnboardingConversion || isFirstCheckpoint)) ? 'close' : 'chevron-back'}
+        onLeftPress={
+          activeStep === 0 ? handleCancel : activeStep === 1 ? handleReturnFromDetailsStep : handleReturnToDetailsStep
+        }
+        subtitle={
+          activeStep === 0
+            ? 'One commitment. One real place.'
+            : activeStep === 1
+              ? isOnboardingConversion
+                ? 'Then link a code and clear it once.'
+                : 'Set it up in a minute.'
+              : requiresProofVerification
+                ? 'Link the code, then test it once.'
+                : 'Choose the code that proves completion.'
+        }
+        title={
+          activeStep === 0
+            ? 'Start with one'
+            : activeStep === 1
+              ? isEditMode
+                ? 'Edit checkpoint'
+                : isOnboardingConversion
+                  ? 'First checkpoint'
+                  : 'New checkpoint'
+              : 'Proof code'
+        }
       />
 
-      {activeStep === 1 ? (
+      {activeStep === 0 ? (
+        <FirstUseCaseStep colors={colors} onSelect={(nextUseCaseType) => void handleSelectFirstUseCase(nextUseCaseType)} />
+      ) : activeStep === 1 ? (
         <CreateDetailsStep
           colors={colors}
           errors={errors}
@@ -1015,6 +1196,7 @@ export default function CreateAlarmScreen() {
           formattedTime={formattedTime}
           gracePeriodSeconds={gracePeriodSeconds}
           gracePreviewSeconds={gracePreviewSeconds}
+          guidedFirstRun={isOnboardingConversion || isFirstCheckpoint}
           label={label}
           nameInputRef={nameInputRef}
           proofCodeVerifiedAt={proofCodeVerifiedAt}
@@ -1042,13 +1224,22 @@ export default function CreateAlarmScreen() {
           onTemplateSelect={(nextUseCaseType) => {
             const defaults = getCheckpointTemplateDefaults(nextUseCaseType);
             setUseCaseType(defaults.useCaseType);
-            setRepeatSchedule(defaults.repeatSchedule);
-            setGracePeriodSeconds(String(defaults.gracePeriodSeconds));
+            setRepeatSchedule(defaults.repeatSchedule === 'once' ? 'daily' : defaults.repeatSchedule);
+            setGracePeriodSeconds(
+              String(isOnboardingConversion || isFirstCheckpoint ? FIRST_RUN_GRACE_SECONDS : defaults.gracePeriodSeconds)
+            );
+            if (!label.trim() || label === selectedTemplate.defaultLabel) {
+              setLabel(defaults.label);
+            }
+            if (!placeObject.trim() || placeObject === selectedTemplate.defaultLabel) {
+              setPlaceObject(defaults.label);
+            }
             setErrors((currentErrors) => ({ ...currentErrors, gracePeriodSeconds: undefined }));
           }}
           onTimeChange={handleTimeChange}
           placeObject={placeObject}
           repeatSchedule={repeatSchedule}
+          requiresProofVerification={requiresProofVerification}
           selectedTemplate={selectedTemplate}
           selectedCircleId={selectedCircleId}
           shareMisses={shareMisses}
@@ -1087,12 +1278,58 @@ export default function CreateAlarmScreen() {
           permissionGranted={Boolean(permission?.granted)}
           proofCodeCapturedAt={proofCodeCapturedAt}
           proofCodeVerifiedAt={proofCodeVerifiedAt}
+          requiresProofVerification={requiresProofVerification}
           scannerMessage={scannerMessage}
           scannerPurpose={scannerPurpose}
           shouldShowCameraFallback={shouldShowCameraFallback}
         />
       )}
     </AppScreen>
+  );
+}
+
+function FirstUseCaseStep({
+  colors,
+  onSelect,
+}: {
+  colors: ReturnType<typeof getAppColors>;
+  onSelect: (value: UseCaseType) => void;
+}) {
+  return (
+    <View style={styles.firstUseCaseLayout}>
+      <Text style={[styles.firstUseCaseIntro, { color: colors.textSoft }]}>
+        Choose one routine. You will link a code at a real place, then clear it once so the loop clicks.
+      </Text>
+      <View style={styles.firstUseCaseList}>
+        {FIRST_CHECKPOINT_TEMPLATES.map((template) => (
+          <Pressable
+            accessibilityLabel={`${template.title}. ${template.description}`}
+            accessibilityRole="button"
+            key={template.id}
+            onPress={() => onSelect(template.id)}
+            style={({ pressed }) => [
+              styles.firstUseCaseCard,
+              { backgroundColor: colors.panelMuted, borderColor: colors.line },
+              pressed && styles.pressed,
+            ]}>
+            <View style={[styles.firstUseCaseIcon, { backgroundColor: colors.primarySurface }]}>
+              <Ionicons color={colors.primary} name={getFirstRunUseCaseIcon(template.id)} size={22} />
+            </View>
+            <View style={styles.firstUseCaseCopy}>
+              <Text style={[styles.firstUseCaseTitle, { color: colors.text }]}>{template.title}</Text>
+              <Text style={[styles.firstUseCaseDescription, { color: colors.textSoft }]}>{template.description}</Text>
+            </View>
+            <Ionicons color={colors.muted} name="chevron-forward" size={18} />
+          </Pressable>
+        ))}
+      </View>
+      <View style={[styles.firstUseCaseNote, { backgroundColor: colors.panel, borderColor: colors.line }]}>
+        <Ionicons color={colors.primary} name="notifications-outline" size={16} />
+        <Text style={[styles.firstUseCaseNoteText, { color: colors.textSoft }]}>
+          Reminders open the app so you can scan. Keep notifications on for the best result.
+        </Text>
+      </View>
+    </View>
   );
 }
 
@@ -1103,6 +1340,7 @@ function CreateDetailsStep({
   formattedTime,
   gracePeriodSeconds,
   gracePreviewSeconds,
+  guidedFirstRun = false,
   hasLinkedProofCode,
   label,
   nameInputRef,
@@ -1125,6 +1363,7 @@ function CreateDetailsStep({
   placeObject,
   proofCodeVerifiedAt,
   repeatSchedule,
+  requiresProofVerification = false,
   selectedCircleId,
   selectedTemplate,
   shareMisses,
@@ -1141,6 +1380,7 @@ function CreateDetailsStep({
   formattedTime: string;
   gracePeriodSeconds: string;
   gracePreviewSeconds: number;
+  guidedFirstRun?: boolean;
   hasLinkedProofCode: boolean;
   label: string;
   nameInputRef: RefObject<TextInput | null>;
@@ -1163,6 +1403,7 @@ function CreateDetailsStep({
   placeObject: string;
   proofCodeVerifiedAt: string | null;
   repeatSchedule: RepeatSchedule;
+  requiresProofVerification?: boolean;
   selectedCircleId: string | null;
   selectedTemplate: ReturnType<typeof getCheckpointTemplate>;
   shareMisses: boolean;
@@ -1191,6 +1432,15 @@ function CreateDetailsStep({
 
   return (
     <View style={styles.detailsLayout}>
+      {guidedFirstRun ? (
+        <View style={[styles.guidedBanner, { backgroundColor: colors.primarySurface, borderColor: colors.ring }]}>
+          <Ionicons color={colors.primary} name="flash-outline" size={18} />
+          <Text style={[styles.guidedBannerText, { color: colors.text }]}>
+            Practice clear starts as soon as you save. Your regular {getRepeatLabel(repeatSchedule).toLowerCase()} time stays for later.
+          </Text>
+        </View>
+      ) : null}
+
       <View style={styles.nameSection}>
         <Text style={[styles.fieldLabel, { color: colors.textSoft }]}>WHAT DO YOU NEED TO DO?</Text>
         <AppInput
@@ -1206,14 +1456,16 @@ function CreateDetailsStep({
 
       <FlowPanel style={styles.corePanel}>
         <CreateFieldRow
-          description={`${getRepeatLabel(repeatSchedule)} · complete within ${formatGracePeriodLabel(gracePreviewSeconds || 0)}`}
+          description={`${getRepeatLabel(repeatSchedule)} · reach window ${formatGracePeriodLabel(gracePreviewSeconds || 0)}`}
           expanded={expandedField === 'schedule'}
           icon="alarm-outline"
           onPress={() => onFieldToggle('schedule')}
           title="When"
           value={formattedTime}>
           <View style={[styles.pickerPanel, { backgroundColor: colors.panelMuted }]}>
-            <Text style={[TextPresets.label, { color: colors.text }]}>Time</Text>
+            <Text style={[TextPresets.label, { color: colors.text }]}>
+              {guidedFirstRun ? 'Usual time after practice' : 'Time'}
+            </Text>
             <DateTimePicker
               display={Platform.OS === 'ios' ? 'spinner' : 'default'}
               mode="time"
@@ -1235,11 +1487,11 @@ function CreateDetailsStep({
         </CreateFieldRow>
 
         <CreateFieldRow
-          description="How long you have after the alarm"
+          description="How long you have to reach the code after the reminder"
           expanded={expandedField === 'window'}
           icon="timer-outline"
           onPress={() => onFieldToggle('window')}
-          title="Complete within"
+          title="Reach window"
           value={formatGracePeriodLabel(gracePreviewSeconds || 0)}>
           <View style={styles.optionGrid}>
             {GRACE_PRESET_OPTIONS.map((option) => (
@@ -1257,18 +1509,27 @@ function CreateDetailsStep({
             keyboardType="number-pad"
             label="Custom seconds"
             onChangeText={onGracePeriodChange}
-            placeholder="120"
+            placeholder="600"
             value={gracePeriodSeconds}
           />
         </CreateFieldRow>
 
         <CreateFieldRow
-          description={hasLinkedProofCode ? 'Ready to use' : 'Scan a QR code or barcode'}
+          description={
+            hasLinkedProofCode
+              ? proofCodeVerifiedAt
+                ? 'Tested and ready'
+                : requiresProofVerification
+                  ? 'Linked · test scan still needed'
+                  : 'Ready to use'
+              : 'Scan a QR code or barcode'
+          }
           expanded={false}
-          icon={hasLinkedProofCode ? 'checkmark-circle-outline' : 'qr-code-outline'}
+          icon={hasLinkedProofCode ? (proofCodeVerifiedAt ? 'checkmark-circle-outline' : 'qr-code-outline') : 'qr-code-outline'}
           onPress={onExpectedCodePress}
           title="Proof code"
-          value={hasLinkedProofCode ? (proofCodeVerifiedAt ? 'Tested' : 'Linked') : 'Add'} />
+          value={hasLinkedProofCode ? (proofCodeVerifiedAt ? 'Tested' : 'Linked') : 'Add'}
+        />
       </FlowPanel>
 
       <Pressable
@@ -1286,7 +1547,7 @@ function CreateDetailsStep({
         <View style={styles.moreOptionsCopy}>
           <Text style={[styles.moreOptionsTitle, { color: colors.text }]}>More options</Text>
           <Text style={[styles.moreOptionsDescription, { color: colors.textSoft }]}>
-            Category, sharing, location, and notes
+            {guidedFirstRun ? 'Category, location, and notes' : 'Category, sharing, location, and notes'}
           </Text>
         </View>
         <Ionicons color={colors.muted} name={showMoreOptions ? 'chevron-up' : 'chevron-down'} size={18} />
@@ -1313,30 +1574,32 @@ function CreateDetailsStep({
             </View>
           </CreateFieldRow>
 
-          <CreateFieldRow
-            description={accountabilityDescription}
-            expanded={expandedField === 'accountability'}
-            icon="people-outline"
-            onPress={() => onFieldToggle('accountability')}
-            title="Accountability"
-            value={accountabilityValue}>
-            <AccountabilityEditor
-              circles={socialCircles}
-              colors={colors}
-              error={socialCirclesError}
-              onOpenAccount={onOpenAccount}
-              onOpenCircles={onOpenCircles}
-              onSelectedCircleChange={onSelectedCircleChange}
-              onShareMissesToggle={onShareMissesToggle}
-              onShareSuccessesToggle={onShareSuccessesToggle}
-              onSocialModeChange={onSocialModeChange}
-              selectedCircleId={selectedCircleId}
-              sessionState={socialSessionState}
-              shareMisses={shareMisses}
-              shareSuccesses={shareSuccesses}
-              socialMode={socialMode}
-            />
-          </CreateFieldRow>
+          {!guidedFirstRun ? (
+            <CreateFieldRow
+              description={accountabilityDescription}
+              expanded={expandedField === 'accountability'}
+              icon="people-outline"
+              onPress={() => onFieldToggle('accountability')}
+              title="Accountability"
+              value={accountabilityValue}>
+              <AccountabilityEditor
+                circles={socialCircles}
+                colors={colors}
+                error={socialCirclesError}
+                onOpenAccount={onOpenAccount}
+                onOpenCircles={onOpenCircles}
+                onSelectedCircleChange={onSelectedCircleChange}
+                onShareMissesToggle={onShareMissesToggle}
+                onShareSuccessesToggle={onShareSuccessesToggle}
+                onSocialModeChange={onSocialModeChange}
+                selectedCircleId={selectedCircleId}
+                sessionState={socialSessionState}
+                shareMisses={shareMisses}
+                shareSuccesses={shareSuccesses}
+                socialMode={socialMode}
+              />
+            </CreateFieldRow>
+          ) : null}
 
           <CreateFieldRow
             description="Where the proof code lives"
@@ -1397,6 +1660,7 @@ function LinkCodeStep({
   permissionGranted,
   proofCodeCapturedAt,
   proofCodeVerifiedAt,
+  requiresProofVerification = false,
   scannerMessage,
   scannerPurpose,
   shouldShowCameraFallback,
@@ -1422,6 +1686,7 @@ function LinkCodeStep({
   permissionGranted: boolean;
   proofCodeCapturedAt: string | null;
   proofCodeVerifiedAt: string | null;
+  requiresProofVerification?: boolean;
   scannerMessage: string;
   scannerPurpose: ScannerPurpose;
   shouldShowCameraFallback: boolean;
@@ -1580,20 +1845,38 @@ function LinkCodeStep({
       </FlowPanel>
 
       <View style={styles.testScanGroup}>
-        <FlowSectionLabel>TEST SCAN</FlowSectionLabel>
+        <FlowSectionLabel>{requiresProofVerification ? 'REQUIRED TEST SCAN' : 'TEST SCAN'}</FlowSectionLabel>
         <Pressable
-          accessibilityLabel={`Test Scan. Verify this code matches. ${proofCodeVerifiedAt ? 'Matched' : 'Test'}.`}
+          accessibilityLabel={`Test Scan. Verify this code matches. ${proofCodeVerifiedAt ? 'Matched' : requiresProofVerification ? 'Required' : 'Test'}.`}
           accessibilityRole="button"
           onPress={onOpenTestScanner}
-          style={({ pressed }) => [styles.testScanRow, pressed && styles.pressed]}>
+          style={({ pressed }) => [
+            styles.testScanRow,
+            requiresProofVerification && !proofCodeVerifiedAt
+              ? { backgroundColor: colors.warningSurface, borderRadius: Radius.md, paddingHorizontal: Spacing.sm }
+              : null,
+            pressed && styles.pressed,
+          ]}>
           <Ionicons color={colors.primary} name="scan-outline" size={19} />
           <View style={styles.testScanCopy}>
-            <Text style={[styles.testScanTitle, { color: colors.text }]}>Test Scan</Text>
-            <Text style={[styles.testScanDescription, { color: colors.textSoft }]}>Verify this code matches</Text>
+            <Text style={[styles.testScanTitle, { color: colors.text }]}>
+              {requiresProofVerification ? 'Test before first clear' : 'Test Scan'}
+            </Text>
+            <Text style={[styles.testScanDescription, { color: colors.textSoft }]}>
+              {requiresProofVerification
+                ? proofCodeVerifiedAt
+                  ? 'Verified. You are ready to start.'
+                  : 'Required once so your first live clear works'
+                : 'Verify this code matches'}
+            </Text>
           </View>
-          <StatusPill label={proofCodeVerifiedAt ? 'Matched' : 'Test'} tone={proofCodeVerifiedAt ? 'success' : 'default'} />
+          <StatusPill
+            label={proofCodeVerifiedAt ? 'Matched' : requiresProofVerification ? 'Required' : 'Test'}
+            tone={proofCodeVerifiedAt ? 'success' : requiresProofVerification ? 'warning' : 'default'}
+          />
           <Ionicons color={colors.muted} name="chevron-forward" size={17} />
         </Pressable>
+        {error ? <Text style={[styles.errorText, { color: colors.danger }]}>{error}</Text> : null}
       </View>
 
       <FlowPanel style={styles.strictInfo} tone="muted">
@@ -1969,6 +2252,81 @@ const styles = StyleSheet.create({
     ...TextPresets.body,
     fontSize: 11,
     lineHeight: 15,
+  },
+  firstUseCaseLayout: {
+    gap: Spacing.lg,
+    paddingBottom: Spacing.xl,
+  },
+  firstUseCaseIntro: {
+    ...TextPresets.body,
+    fontSize: 14,
+    lineHeight: 21,
+    paddingHorizontal: Spacing.xs,
+  },
+  firstUseCaseList: {
+    gap: Spacing.sm,
+  },
+  firstUseCaseCard: {
+    alignItems: 'center',
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: Spacing.md,
+    minHeight: 88,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.md,
+  },
+  firstUseCaseIcon: {
+    alignItems: 'center',
+    borderRadius: Radius.sm,
+    height: 44,
+    justifyContent: 'center',
+    width: 44,
+  },
+  firstUseCaseCopy: {
+    flex: 1,
+    gap: 4,
+    minWidth: 0,
+  },
+  firstUseCaseTitle: {
+    ...TextPresets.label,
+    fontSize: 16,
+    lineHeight: 21,
+  },
+  firstUseCaseDescription: {
+    ...TextPresets.body,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  firstUseCaseNote: {
+    alignItems: 'flex-start',
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.md,
+  },
+  firstUseCaseNoteText: {
+    ...TextPresets.body,
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  guidedBanner: {
+    alignItems: 'flex-start',
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.md,
+  },
+  guidedBannerText: {
+    ...TextPresets.body,
+    flex: 1,
+    fontSize: 13,
+    lineHeight: 18,
   },
   fieldBlock: {
     gap: 7,

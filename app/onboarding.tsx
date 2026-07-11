@@ -333,7 +333,11 @@ export default function OnboardingScreen() {
         pagingEnabled
         ref={pagerRef}
         showsHorizontalScrollIndicator={false}>
-        <WelcomeStep width={width} onNext={() => navigateToStep('how')} />
+        <WelcomeStep
+          width={width}
+          onNext={() => navigateToStep('how')}
+          onSkipIntro={() => navigateToStep('permissions')}
+        />
         <HowItWorksStep width={width} onNext={() => navigateToStep('permissions')} />
         <PermissionsStep
           cameraState={cameraState}
@@ -349,7 +353,7 @@ export default function OnboardingScreen() {
   );
 }
 
-function WelcomeStep({ onNext, width }: { onNext: () => void; width: number }) {
+function WelcomeStep({ onNext, onSkipIntro, width }: { onNext: () => void; onSkipIntro: () => void; width: number }) {
   return (
     <View style={[styles.screen, { width }]}>
       <Header
@@ -373,7 +377,7 @@ function WelcomeStep({ onNext, width }: { onNext: () => void; width: number }) {
 
       <View style={styles.actions}>
         <OnboardingButton icon="chevron-forward" label="Get Started" onPress={onNext} />
-        <OnboardingButton label="See how it works" onPress={onNext} variant="secondary" />
+        <OnboardingButton label="Skip intro" onPress={onSkipIntro} variant="secondary" />
       </View>
     </View>
   );
@@ -451,8 +455,8 @@ function PermissionsStep({
   const notificationBadge = isNotificationEnabled ? 'Enabled' : notificationState === 'denied' ? 'Denied' : 'Set up now';
   const cameraBadge = isCameraEnabled ? 'Enabled' : cameraState === 'denied' ? 'Denied' : 'Set up now';
   const requirementMessage = arePermissionsReady
-    ? "You're ready. Sync is still optional."
-    : 'You can continue now. The app will ask again when you create and schedule your first checkpoint.';
+    ? "You're ready. Reminders open the app so you can scan — keep notifications on."
+    : 'Enable notifications and camera when you can. The app will ask again before your first checkpoint goes live.';
 
   return (
     <View style={[styles.screen, { width }]}>
@@ -473,8 +477,8 @@ function PermissionsStep({
             notificationState === 'denied'
               ? 'Enable notifications in system settings before scheduling a checkpoint.'
               : isNotificationEnabled
-                ? 'Checkpoint reminders are enabled.'
-                : 'Needed when you schedule your first checkpoint.'
+                ? 'Reminders can open the app when it is time to scan.'
+                : 'Needed so your checkpoint can remind you on time.'
           }
           icon="notifications-outline"
           onPress={isNotificationEnabled ? undefined : onRequestNotifications}

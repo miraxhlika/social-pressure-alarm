@@ -3,6 +3,7 @@ import { Animated, Easing, Linking, Pressable, StyleSheet, Text, View } from 're
 import { Ionicons } from '@expo/vector-icons';
 import { BarcodeScanningResult, CameraView, useCameraPermissions } from 'expo-camera';
 import * as Haptics from 'expo-haptics';
+import { LinearGradient } from 'expo-linear-gradient';
 import { StatusBar } from 'expo-status-bar';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -13,6 +14,7 @@ import { Fonts, Radius, Spacing, TextPresets, getAppColors, withAlpha } from '@/
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { trackAnalyticsEvent } from '@/lib/analytics';
 import {
+  createNextAlarmDateForSchedule,
   getAlarmById,
   getAlarmDeadlineTimestamp,
   hydrateAlarmRuntimeForCurrentUser,
@@ -48,13 +50,31 @@ const PROOF_CODE_BARCODE_TYPES: CameraBarcodeTypes = [
 ];
 
 const SCAN_DEDUPE_WINDOW_MS = 3000;
+const PRACTICE_TO_FIRST_REMINDER_BUFFER_MS = 15 * 60 * 1000;
+const TIMER_RING_SIZE = 252;
+const TIMER_RING_SEGMENT_COUNT = 72;
+const TIMER_RING_SEGMENT_RADIUS = 122;
+const TIMER_BURST_PARTICLE_ANGLES = Array.from({ length: 10 }, (_, index) => (index * 360) / 10);
 
 async function scheduleNextRecurringAlarm(alarm: Alarm) {
-  const nextScheduled = await scheduleAlarmNotificationAsync(alarm);
+  const now = new Date();
+  const normalNextDate = createNextAlarmDateForSchedule(alarm.hour, alarm.minute, alarm.repeatSchedule, now);
+  const nextDate = alarm.isPracticeRun
+    ? createNextAlarmDateForSchedule(
+        alarm.hour,
+        alarm.minute,
+        alarm.repeatSchedule,
+        new Date(now.getTime() + PRACTICE_TO_FIRST_REMINDER_BUFFER_MS)
+      )
+    : normalNextDate;
+  const nextScheduled = await scheduleAlarmNotificationAsync(alarm, {
+    scheduledFor: nextDate.toISOString(),
+  });
 
   try {
     await updateAlarm({
       ...alarm,
+      isPracticeRun: undefined,
       isActive: true,
       notificationIds: nextScheduled.notificationIds,
       scheduledFor: nextScheduled.scheduledFor,
@@ -64,6 +84,11 @@ async function scheduleNextRecurringAlarm(alarm: Alarm) {
     await cancelAlarmNotificationAsync(nextScheduled.notificationIds).catch(() => null);
     throw error;
   }
+
+  return {
+    deferredAfterPractice: alarm.isPracticeRun === true && nextDate.getTime() !== normalNextDate.getTime(),
+    scheduledFor: nextScheduled.scheduledFor,
+  };
 }
 
 function getCriticalThreshold(gracePeriodSeconds: number) {
@@ -94,6 +119,116 @@ function formatRemainingClock(seconds: number | null, fallbackSeconds: number) {
   return `${minutes.toString().padStart(2, '0')}:${remainderSeconds.toString().padStart(2, '0')}`;
 }
 
+function CircularTimerRing({
+  activeColor,
+  progress,
+  trackColor,
+}: {
+  activeColor: string;
+  progress: number;
+  trackColor: string;
+}) {
+  const activeSegmentCount = Math.ceil(TIMER_RING_SEGMENT_COUNT * progress);
+  const center = TIMER_RING_SIZE / 2;
+
+  return (
+    <View style={styles.circularTimerRing}>
+      {Array.from({ length: TIMER_RING_SEGMENT_COUNT }).map((_, index) => {
+        const angle = -90 + (index * 360) / TIMER_RING_SEGMENT_COUNT;
+        const radians = (angle * Math.PI) / 180;
+
+        return (
+          <View
+            key={index}
+            style={[
+              styles.timerRingSegment,
+              {
+                backgroundColor: index < activeSegmentCount ? activeColor : trackColor,
+                left: center + Math.cos(radians) * TIMER_RING_SEGMENT_RADIUS - 1,
+                top: center + Math.sin(radians) * TIMER_RING_SEGMENT_RADIUS - 4,
+                transform: [{ rotate: `${angle + 90}deg` }],
+              },
+            ]}
+          />
+        );
+      })}
+    </View>
+  );
+}
+
+function TimerTapBurst({
+  accentColor,
+  progress,
+  secondaryColor,
+}: {
+  accentColor: string;
+  progress: Animated.Value;
+  secondaryColor: string;
+}) {
+  const opacity = progress.interpolate({
+    inputRange: [0, 0.12, 0.72, 1],
+    outputRange: [0, 1, 0.8, 0],
+  });
+  const ringScale = progress.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.68, 1.32],
+  });
+
+  return (
+    <>
+      <Animated.View
+        pointerEvents="none"
+        style={[
+          styles.timerBurstRing,
+          {
+            borderColor: accentColor,
+            opacity,
+            transform: [{ scale: ringScale }],
+          },
+        ]}
+      />
+      {TIMER_BURST_PARTICLE_ANGLES.map((angle, index) => {
+        const radians = (angle * Math.PI) / 180;
+        const distance = 158 + (index % 2) * 12;
+
+        return (
+          <Animated.View
+            key={angle}
+            pointerEvents="none"
+            style={[
+              styles.timerBurstParticle,
+              {
+                backgroundColor: index % 3 === 0 ? secondaryColor : accentColor,
+                opacity,
+                transform: [
+                  {
+                    translateX: progress.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0, Math.cos(radians) * distance],
+                    }),
+                  },
+                  {
+                    translateY: progress.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0, Math.sin(radians) * distance],
+                    }),
+                  },
+                  {
+                    scale: progress.interpolate({
+                      inputRange: [0, 0.25, 1],
+                      outputRange: [0.3, 1.2, 0.5],
+                    }),
+                  },
+                ],
+              },
+            ]}
+          />
+        );
+      })}
+    </>
+  );
+}
+
 async function triggerHaptic(kind: 'warning' | 'error' | 'success') {
   try {
     if (kind === 'success') {
@@ -118,10 +253,17 @@ export default function RingingScreen() {
   const params = useLocalSearchParams<{ alarmId?: string }>();
   const colorScheme = useColorScheme();
   const colors = getAppColors(colorScheme);
-  const urgentBackground = '#0D1726';
-  const urgentPanel = '#111C2C';
-  const urgentText = '#F8FAFC';
-  const urgentTextSoft = '#B7C1CF';
+  const isDark = colorScheme === 'dark';
+  const urgentBackground = colors.canvas;
+  const urgentPanel = colors.panel;
+  const urgentText = colors.text;
+  const urgentTextSoft = colors.textSoft;
+  const checkpointAccent = colors.accent;
+  const actionForeground = isDark ? '#17191C' : colors.elevated;
+  const actionGradient = isDark ? (['#FAF9F5', '#DDE2E4'] as const) : (['#272B30', '#111315'] as const);
+  const backdropGradient = isDark
+    ? ([colors.canvas, '#151A1F', colors.background] as const)
+    : ([colors.canvas, colors.background, colors.cardMuted] as const);
   const [alarm, setAlarm] = useState<Alarm | null>(null);
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -139,8 +281,17 @@ export default function RingingScreen() {
   const glowPulse = useRef(new Animated.Value(0)).current;
   const framePulse = useRef(new Animated.Value(0)).current;
   const countdownScale = useRef(new Animated.Value(1)).current;
+  const timerPlayScale = useRef(new Animated.Value(1)).current;
+  const timerPlayRotation = useRef(new Animated.Value(0)).current;
+  const timerPlayBursts = useRef(Array.from({ length: 4 }, () => new Animated.Value(0))).current;
   const errorFlash = useRef(new Animated.Value(0)).current;
   const criticalGlowLoopRef = useRef<Animated.CompositeAnimation | null>(null);
+  const timerPlayAnimationRef = useRef<Animated.CompositeAnimation | null>(null);
+  const timerBurstAnimationsRef = useRef<(Animated.CompositeAnimation | null)[]>(
+    Array.from({ length: 4 }, () => null)
+  );
+  const timerBurstIndexRef = useRef(0);
+  const timerPlayDirectionRef = useRef(1);
 
   useEffect(() => {
     const loadAlarm = async () => {
@@ -183,12 +334,16 @@ export default function RingingScreen() {
   }, [framePulse]);
 
   useEffect(() => {
+    const timerBurstAnimations = timerBurstAnimationsRef.current;
+
     return () => {
       if (retryTimeoutRef.current) {
         clearTimeout(retryTimeoutRef.current);
       }
 
       criticalGlowLoopRef.current?.stop();
+      timerPlayAnimationRef.current?.stop();
+      timerBurstAnimations.forEach((animation) => animation?.stop());
     };
   }, []);
 
@@ -271,6 +426,7 @@ export default function RingingScreen() {
       const resolvedAlarm = await resolveAlarm(alarm.id, 'confirmed', {
         scheduledFor: alarm.scheduledFor,
       });
+      let practiceDeferredUntil: string | undefined;
 
       if (!resolvedAlarm) {
         router.replace({
@@ -284,6 +440,7 @@ export default function RingingScreen() {
 
       const store = await readAlarmStore();
       const successEntry = store.successHistory.find((entry) => entry.alarmId === alarm.id) ?? null;
+      const isFirstClear = store.successHistory.length === 1;
       await trackAnalyticsEvent('checkpoint_cleared', {
         checkpointId: alarm.id,
         useCaseType: alarm.useCaseType,
@@ -292,8 +449,16 @@ export default function RingingScreen() {
         timeToClearSeconds: successEntry?.timeToScanSeconds,
       });
 
+      if (isFirstClear) {
+        await trackAnalyticsEvent('demo_checkpoint_cleared', {
+          checkpointId: alarm.id,
+          useCaseType: alarm.useCaseType,
+          timeToClearSeconds: successEntry?.timeToScanSeconds,
+        });
+      }
+
       if (alarm.repeatSchedule !== 'once' && resolvedAlarm) {
-        await scheduleNextRecurringAlarm(resolvedAlarm).catch(async (error: unknown) => {
+        const nextRun = await scheduleNextRecurringAlarm(resolvedAlarm).catch(async (error: unknown) => {
           await alert({
             description: error instanceof Error
               ? `This clear was saved, but the next reminder was not scheduled. ${error.message}`
@@ -302,7 +467,12 @@ export default function RingingScreen() {
             title: 'Next checkpoint paused',
             tone: 'warning',
           });
+          return null;
         });
+
+        if (nextRun?.deferredAfterPractice) {
+          practiceDeferredUntil = nextRun.scheduledFor;
+        }
       }
 
       router.replace({
@@ -310,6 +480,7 @@ export default function RingingScreen() {
         params: {
           alarmId: alarm.id,
           label: alarm.label,
+          ...(practiceDeferredUntil ? { practiceDeferredUntil } : {}),
         },
       });
     } catch (error) {
@@ -446,6 +617,70 @@ export default function RingingScreen() {
     setIsTorchEnabled((currentValue) => !currentValue);
   }, []);
 
+  const handleTimerPlay = useCallback(() => {
+    timerPlayAnimationRef.current?.stop();
+    timerPlayDirectionRef.current *= -1;
+    const rotationDirection = timerPlayDirectionRef.current;
+    const burstIndex = timerBurstIndexRef.current;
+    const burstValue = timerPlayBursts[burstIndex];
+    timerBurstIndexRef.current = (burstIndex + 1) % timerPlayBursts.length;
+
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => null);
+
+    const animation = Animated.parallel([
+      Animated.sequence([
+        Animated.spring(timerPlayScale, {
+          toValue: 1.1,
+          friction: 5,
+          tension: 240,
+          useNativeDriver: true,
+        }),
+        Animated.spring(timerPlayScale, {
+          toValue: 1,
+          friction: 5,
+          tension: 150,
+          useNativeDriver: true,
+        }),
+      ]),
+      Animated.sequence([
+        Animated.spring(timerPlayRotation, {
+          toValue: rotationDirection,
+          friction: 5,
+          tension: 220,
+          useNativeDriver: true,
+        }),
+        Animated.spring(timerPlayRotation, {
+          toValue: 0,
+          friction: 5,
+          tension: 130,
+          useNativeDriver: true,
+        }),
+      ]),
+    ]);
+    timerBurstAnimationsRef.current[burstIndex]?.stop();
+    burstValue.setValue(0);
+    const burstAnimation = Animated.timing(burstValue, {
+      toValue: 1,
+      duration: 720,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    });
+
+    timerPlayAnimationRef.current = animation;
+    timerBurstAnimationsRef.current[burstIndex] = burstAnimation;
+    animation.start(({ finished }) => {
+      if (finished && timerPlayAnimationRef.current === animation) {
+        timerPlayAnimationRef.current = null;
+      }
+    });
+    burstAnimation.start(({ finished }) => {
+      if (finished && timerBurstAnimationsRef.current[burstIndex] === burstAnimation) {
+        burstValue.setValue(0);
+        timerBurstAnimationsRef.current[burstIndex] = null;
+      }
+    });
+  }, [timerPlayBursts, timerPlayRotation, timerPlayScale]);
+
   const handleBarcodeScanned = useCallback(
     async ({ data }: BarcodeScanningResult) => {
       if (!alarm || !scanEnabled || isSubmitting || hasResolvedRef.current) {
@@ -503,6 +738,10 @@ export default function RingingScreen() {
 
   const gracePeriodSeconds = alarm?.gracePeriodSeconds ?? 60;
   const countdownTone = getCountdownTone(remainingSeconds, gracePeriodSeconds);
+  const countdownProgressRatio = Math.max(
+    0,
+    Math.min(1, (remainingSeconds ?? gracePeriodSeconds) / gracePeriodSeconds)
+  );
   const scannerFrameBorderColor = scanError.length > 0 ? colors.danger : '#F8FAFC';
   const isCameraReady = permission?.granted === true;
   const cameraStatusLabel = !isCameraReady ? 'Camera needed' : scanEnabled ? 'Ready to scan' : 'Reading';
@@ -592,6 +831,11 @@ export default function RingingScreen() {
     inputRange: [0, 1],
     outputRange: [0.62, 1],
   });
+  const timerPlayRotate = timerPlayRotation.interpolate({
+    inputRange: [-1, 0, 1],
+    outputRange: ['-4deg', '0deg', '4deg'],
+  });
+  const timerRingScale = Animated.multiply(Animated.multiply(frameScale, countdownScale), timerPlayScale);
 
   if (!alarm) {
     return (
@@ -612,56 +856,85 @@ export default function RingingScreen() {
   if (!isScannerVisible) {
     return (
       <SafeAreaView style={[styles.safeArea, { backgroundColor: urgentBackground }]}>
-        <StatusBar animated style="light" />
+        <StatusBar animated style={isDark ? 'light' : 'dark'} />
         <View style={styles.activeScreen}>
+          <LinearGradient colors={backdropGradient} style={StyleSheet.absoluteFillObject} />
+          <View
+            pointerEvents="none"
+            style={[styles.ambientGlow, { backgroundColor: withAlpha(checkpointAccent, isDark ? '16' : '12') }]}
+          />
           <View style={styles.activeContent}>
-            <View style={[styles.activePill, { borderColor: '#2D3A4C', backgroundColor: '#101B2A' }]}>
-              <Ionicons color={colors.primary} name="location" size={15} />
-              <Text style={[styles.activePillText, { color: urgentText }]}>Checkpoint active</Text>
+            <View style={styles.activeHeader}>
+              <View style={[styles.livePill, { borderColor: colors.border, backgroundColor: withAlpha(colors.panel, 'D9') }]}>
+                <View style={[styles.liveDot, { backgroundColor: checkpointAccent }]} />
+                <Text style={[styles.livePillText, { color: urgentText }]}>CHECKPOINT LIVE</Text>
+              </View>
+              <View style={styles.windowPill}>
+                <Ionicons color={urgentTextSoft} name="timer-outline" size={14} />
+                <Text style={[styles.windowPillText, { color: urgentTextSoft }]}>
+                  {Math.ceil(gracePeriodSeconds / 60)} MIN WINDOW
+                </Text>
+              </View>
             </View>
 
             <View style={styles.activeHeroCopy}>
+              <Text style={[styles.activeEyebrow, { color: checkpointAccent }]}>TIME TO CHECK IN</Text>
               <Text style={[styles.activeTitle, { color: urgentText }]}>{alarm.label}</Text>
-              <Text style={[styles.activeDueLabel, { color: urgentTextSoft }]}>Due in</Text>
-              <Animated.Text
-                accessibilityLabel={`${remainingSeconds ?? alarm.gracePeriodSeconds} seconds left`}
-                accessibilityLiveRegion="assertive"
-                style={[
-                  styles.activeTime,
-                  {
-                    color: countdownTone === 'danger' ? colors.danger : colors.primary,
-                    transform: [{ scale: countdownScale }],
-                  },
-                ]}>
-                {formatRemainingClock(remainingSeconds, alarm.gracePeriodSeconds)}
-              </Animated.Text>
               <Text style={[styles.activeDescription, { color: urgentTextSoft }]}>
-                Complete this checkpoint to stay on track.
+                Go to the checkpoint and scan its saved code before time runs out.
               </Text>
             </View>
 
-            <View style={[styles.destinationCard, { borderColor: '#526174', backgroundColor: '#263449' }]}>
-              <View style={styles.destinationCopy}>
-                <View style={styles.destinationHeading}>
-                  <View style={styles.destinationIconWrap}>
-                    <Ionicons color={urgentText} name="location" size={25} />
-                  </View>
-                  <View style={styles.destinationTextWrap}>
-                    <Text style={[styles.destinationEyebrow, { color: '#DDE5EE' }]}>Go to:</Text>
-                    <Text style={[styles.destinationTitle, { color: urgentText }]}>{placeObjectLabel}</Text>
-                  </View>
+            <Pressable
+              accessibilityHint="Plays a celebration animation"
+              accessibilityLabel="Animate countdown"
+              accessibilityRole="button"
+              onPress={handleTimerPlay}
+              style={styles.timerPressable}>
+              <View style={styles.timerStage}>
+                {timerPlayBursts.map((burst, index) => (
+                  <TimerTapBurst
+                    key={index}
+                    accentColor={checkpointAccent}
+                    progress={burst}
+                    secondaryColor={urgentText}
+                  />
+                ))}
+                <Animated.View
+                  pointerEvents="none"
+                  style={[
+                    styles.timerAura,
+                    {
+                      opacity: frameOpacity,
+                      transform: [{ scale: timerRingScale }, { rotate: timerPlayRotate }],
+                    },
+                  ]}>
+                  <CircularTimerRing
+                    activeColor={countdownTone === 'danger' ? colors.danger : checkpointAccent}
+                    progress={countdownProgressRatio}
+                    trackColor={colors.border}
+                  />
+                </Animated.View>
+                <View style={styles.timerOrb}>
+                  <LinearGradient
+                    colors={isDark ? (['#20262C', '#12161A'] as const) : ([colors.elevated, colors.cardMuted] as const)}
+                    style={[styles.timerOrbInner, { borderColor: colors.border }]}>
+                    <Text style={[styles.timerLabel, { color: urgentTextSoft }]}>TIME REMAINING</Text>
+                    <Animated.Text
+                      accessibilityLabel={`${remainingSeconds ?? alarm.gracePeriodSeconds} seconds left`}
+                      accessibilityLiveRegion="assertive"
+                      style={[
+                        styles.activeTime,
+                        {
+                          color: countdownTone === 'danger' ? colors.danger : urgentText,
+                        },
+                      ]}>
+                      {formatRemainingClock(remainingSeconds, alarm.gracePeriodSeconds)}
+                    </Animated.Text>
+                  </LinearGradient>
                 </View>
-                <Text style={[styles.destinationBody, { color: '#C6D0DC' }]}>
-                  Use the linked object to prove you were there.
-                </Text>
               </View>
-              <View style={styles.destinationArt} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
-                <View style={[styles.artPlant, { backgroundColor: colors.primary }]} />
-                <View style={[styles.artCounter, { backgroundColor: '#D9E1E9' }]} />
-                <View style={[styles.artMirror, { borderColor: '#B7C4D1', backgroundColor: '#EDF3F8' }]} />
-                <View style={[styles.artMirrorStem, { backgroundColor: '#B7C4D1' }]} />
-              </View>
-            </View>
+            </Pressable>
 
             <View style={styles.activeActions}>
               <Pressable
@@ -673,20 +946,22 @@ export default function RingingScreen() {
                 }}
                 style={({ pressed }) => [
                   styles.activePrimaryButton,
-                  { borderColor: '#F8FAFC', opacity: isSubmitting ? 0.55 : 1 },
+                  { opacity: isSubmitting ? 0.55 : 1 },
                   pressed && styles.pressed,
                 ]}>
-                <Ionicons color="#F8FAFC" name="scan-outline" size={20} />
-                <Text style={styles.activePrimaryButtonText}>Scan proof code</Text>
+                <LinearGradient colors={actionGradient} style={StyleSheet.absoluteFillObject} />
+                <View style={styles.scanButtonIcon}>
+                  <Ionicons color={actionForeground} name="scan-outline" size={22} />
+                </View>
+                <Text style={[styles.activePrimaryButtonText, { color: actionForeground }]}>Scan proof code</Text>
               </Pressable>
 
-            </View>
-
-            <View style={styles.activeLockRow}>
-              <Ionicons color={urgentTextSoft} name="lock-closed-outline" size={14} />
-              <Text style={[styles.activeLockText, { color: urgentTextSoft }]}>
-                This checkpoint must be completed to continue.
-              </Text>
+              <View style={styles.activeLockRow}>
+                <Ionicons color={urgentTextSoft} name="lock-closed-outline" size={13} />
+                <Text style={[styles.activeLockText, { color: urgentTextSoft }]}>
+                  Only the linked code can clear this checkpoint
+                </Text>
+              </View>
             </View>
           </View>
         </View>
@@ -828,168 +1103,241 @@ const styles = StyleSheet.create({
     transform: [{ scale: 0.99 }],
   },
   activeScreen: {
-    backgroundColor: '#0D1726',
+    backgroundColor: 'transparent',
     flex: 1,
-    justifyContent: 'center',
     overflow: 'hidden',
-    padding: Spacing.xl,
+    paddingBottom: Spacing.lg,
+    paddingHorizontal: Spacing.xl,
+    paddingTop: Spacing.md,
     position: 'relative',
   },
+  ambientGlow: {
+    borderRadius: 260,
+    height: 420,
+    left: 26,
+    position: 'absolute',
+    top: 185,
+    transform: [{ scaleX: 1.28 }],
+    width: 420,
+  },
   activeContent: {
-    alignItems: 'center',
-    gap: Spacing.lg,
+    flex: 1,
+    gap: 12,
     width: '100%',
   },
-  activePill: {
+  activeHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 38,
+  },
+  livePill: {
     alignItems: 'center',
     borderRadius: Radius.pill,
     borderWidth: 1,
     flexDirection: 'row',
-    gap: Spacing.xs,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
+    gap: 7,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
   },
-  activePillText: {
+  liveDot: {
+    borderRadius: Radius.pill,
+    height: 7,
+    width: 7,
+  },
+  livePillText: {
     fontFamily: Fonts.rounded,
-    fontSize: 13,
-    fontWeight: '700',
-    lineHeight: 16,
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 1,
+    lineHeight: 13,
+  },
+  windowPill: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 5,
+  },
+  windowPillText: {
+    fontFamily: Fonts.rounded,
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.7,
+    lineHeight: 13,
   },
   activeHeroCopy: {
     alignItems: 'center',
-    gap: 4,
+    gap: 6,
+    paddingHorizontal: Spacing.md,
+    paddingTop: 2,
+  },
+  activeEyebrow: {
+    fontFamily: Fonts.rounded,
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 1.4,
+    lineHeight: 15,
   },
   activeTitle: {
     fontFamily: Fonts.serif,
-    fontSize: 35,
+    fontSize: 36,
     fontWeight: '800',
-    letterSpacing: -0.7,
+    letterSpacing: -0.9,
     lineHeight: 42,
     textAlign: 'center',
   },
-  activeDueLabel: {
-    ...TextPresets.label,
-    marginTop: Spacing.xs,
-  },
   activeTime: {
     fontFamily: Fonts.rounded,
-    fontSize: 46,
+    fontSize: 48,
     fontWeight: '900',
-    letterSpacing: -0.9,
-    lineHeight: 52,
+    letterSpacing: -1.2,
+    lineHeight: 58,
     textAlign: 'center',
   },
   activeDescription: {
     ...TextPresets.body,
-    fontSize: 14,
-    lineHeight: 20,
-    maxWidth: 230,
+    fontSize: 13,
+    lineHeight: 19,
+    maxWidth: 300,
     textAlign: 'center',
   },
+  timerPressable: {
+    alignItems: 'center',
+  },
+  timerStage: {
+    alignItems: 'center',
+    height: 270,
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  timerBurstRing: {
+    borderRadius: TIMER_RING_SIZE / 2,
+    borderWidth: 2,
+    height: TIMER_RING_SIZE,
+    position: 'absolute',
+    top: 9,
+    width: TIMER_RING_SIZE,
+  },
+  timerBurstParticle: {
+    borderRadius: Radius.pill,
+    height: 8,
+    left: '50%',
+    marginLeft: -4,
+    marginTop: -4,
+    position: 'absolute',
+    top: '50%',
+    width: 8,
+  },
+  timerAura: {
+    height: 252,
+    position: 'absolute',
+    top: 9,
+    width: 252,
+  },
+  circularTimerRing: {
+    height: TIMER_RING_SIZE,
+    position: 'relative',
+    width: TIMER_RING_SIZE,
+  },
+  timerRingSegment: {
+    borderRadius: Radius.pill,
+    height: 8,
+    position: 'absolute',
+    width: 2,
+  },
+  timerOrb: {
+    borderRadius: 116,
+    height: 226,
+    overflow: 'hidden',
+    width: 226,
+  },
+  timerOrbInner: {
+    alignItems: 'center',
+    borderRadius: 116,
+    borderWidth: 1,
+    flex: 1,
+    gap: 5,
+    justifyContent: 'center',
+    padding: Spacing.lg,
+  },
+  timerLabel: {
+    fontFamily: Fonts.rounded,
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 1.25,
+    lineHeight: 14,
+  },
+  timerTrack: {
+    borderRadius: Radius.pill,
+    height: 4,
+    marginTop: 14,
+    overflow: 'hidden',
+    width: 174,
+  },
+  timerProgress: {
+    borderRadius: Radius.pill,
+    height: '100%',
+  },
   destinationCard: {
+    alignItems: 'center',
     borderRadius: Radius.md,
     borderWidth: 1,
     flexDirection: 'row',
-    gap: Spacing.md,
-    minHeight: 142,
-    overflow: 'hidden',
-    padding: Spacing.md,
+    gap: 14,
+    minHeight: 90,
+    paddingHorizontal: 18,
+    paddingVertical: 14,
     width: '100%',
   },
   destinationCopy: {
     flex: 1,
-    gap: Spacing.md,
-  },
-  destinationHeading: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: Spacing.sm,
-  },
-  destinationIconWrap: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: 28,
-  },
-  destinationTextWrap: {
-    flex: 1,
+    gap: 2,
     minWidth: 0,
   },
   destinationEyebrow: {
-    ...TextPresets.body,
-    fontSize: 13,
-    lineHeight: 17,
+    fontFamily: Fonts.rounded,
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 1.2,
+    lineHeight: 13,
   },
   destinationTitle: {
     fontFamily: Fonts.rounded,
-    fontSize: 18,
-    fontWeight: '800',
+    fontSize: 17,
+    fontWeight: '900',
     lineHeight: 22,
   },
   destinationBody: {
     ...TextPresets.body,
-    fontSize: 14,
-    lineHeight: 21,
-    maxWidth: 210,
-  },
-  destinationArt: {
-    alignSelf: 'flex-end',
-    height: 96,
-    position: 'relative',
-    width: 96,
-  },
-  artPlant: {
-    borderRadius: Radius.pill,
-    bottom: 20,
-    height: 46,
-    opacity: 0.52,
-    position: 'absolute',
-    right: 56,
-    transform: [{ rotate: '-18deg' }],
-    width: 12,
-  },
-  artCounter: {
-    borderRadius: 8,
-    bottom: 0,
-    height: 28,
-    position: 'absolute',
-    right: 0,
-    width: 82,
-  },
-  artMirror: {
-    borderRadius: 24,
-    borderWidth: 3,
-    bottom: 22,
-    height: 66,
-    position: 'absolute',
-    right: 6,
-    width: 44,
-  },
-  artMirrorStem: {
-    bottom: 8,
-    height: 20,
-    position: 'absolute',
-    right: 27,
-    width: 4,
+    fontSize: 12,
+    lineHeight: 17,
+    marginTop: 2,
   },
   activeActions: {
-    gap: Spacing.sm,
+    gap: 11,
+    marginTop: 'auto',
     width: '100%',
   },
   activePrimaryButton: {
     alignItems: 'center',
-    borderRadius: Radius.md,
-    borderWidth: 1.5,
+    borderRadius: 20,
     flexDirection: 'row',
-    gap: Spacing.sm,
+    gap: 12,
     justifyContent: 'center',
-    minHeight: 58,
+    minHeight: 72,
+    overflow: 'hidden',
+    paddingHorizontal: 18,
   },
   activePrimaryButtonText: {
-    color: '#F4F7FB',
     fontFamily: Fonts.rounded,
     fontSize: 16,
-    fontWeight: '800',
+    fontWeight: '900',
     lineHeight: 20,
+  },
+  scanButtonIcon: {
+    alignItems: 'center',
+    height: 30,
+    justifyContent: 'center',
+    width: 30,
   },
   activeLockRow: {
     alignItems: 'center',
@@ -999,8 +1347,8 @@ const styles = StyleSheet.create({
   },
   activeLockText: {
     ...TextPresets.body,
-    fontSize: 12,
-    lineHeight: 17,
+    fontSize: 11,
+    lineHeight: 15,
     textAlign: 'center',
   },
   scannerScreen: {

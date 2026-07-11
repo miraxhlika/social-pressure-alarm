@@ -772,9 +772,9 @@ export default function AccountScreen() {
                 action={<StatusPill label={notificationPermissionLabel} tone={getNotificationPermissionTone(notificationPermissionState)} />}
                 title="Notifications"
                 description={
-                  notificationPermissionState === 'granted'
-                    ? 'Checkpoint alarms can ring in the background.'
-                    : 'Enable alerts so checkpoint alarms ring on time.'
+                  notificationPermissionState === 'granted' || notificationPermissionState === 'provisional'
+                    ? 'Reminders open the app so you can scan. They work best when the phone is unlocked and notifications stay allowed.'
+                    : 'Enable alerts so checkpoint reminders can open the app on time.'
                 }
               />
               {notificationPermissionState !== 'granted' ? (
