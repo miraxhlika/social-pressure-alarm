@@ -23,7 +23,13 @@ import { SkeletonTextStack } from '@/components/ui/skeleton';
 import { Fonts, Radius, Spacing, TextPresets, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { trackAnalyticsEvent } from '@/lib/analytics';
-import { hydrateAlarmRuntimeForCurrentUser, readAlarmStore, saveNewAlarm, updateAlarm } from '@/lib/alarms';
+import {
+  ALARM_RUNTIME_CACHE_MAX_AGE_MS,
+  hydrateAlarmRuntimeForCurrentUser,
+  readAlarmStore,
+  saveNewAlarm,
+  updateAlarm,
+} from '@/lib/alarms';
 import {
   CHECKPOINT_TEMPLATES,
   formatGracePeriodLabel,
@@ -39,7 +45,11 @@ import {
   scheduleAlarmNotificationAsync,
 } from '@/lib/notifications';
 import { markOnboardingCompleted } from '@/lib/onboarding';
-import { listMySocialCircles } from '@/lib/social/circles';
+import {
+  SOCIAL_CIRCLES_CACHE_MAX_AGE_MS,
+  getCachedMySocialCircles,
+  listMySocialCircles,
+} from '@/lib/social/circles';
 import { findCircleName, getSharedOutcomeLabel } from '@/lib/social/settings';
 import { SocialCircleSummary } from '@/lib/social/types';
 import { useAppDialog } from '@/providers/app-dialog-provider';
@@ -354,11 +364,19 @@ export default function CreateAlarmScreen() {
         return;
       }
 
-      setIsLoadingSocialCircles(true);
+      const cachedCircles = getCachedMySocialCircles(user.id);
+
+      if (cachedCircles) {
+        setSocialCircles(cachedCircles);
+        setIsLoadingSocialCircles(false);
+      } else {
+        setIsLoadingSocialCircles(true);
+      }
+
       setSocialCirclesError('');
 
       try {
-        const nextCircles = await listMySocialCircles();
+        const nextCircles = await listMySocialCircles({ maxAgeMs: SOCIAL_CIRCLES_CACHE_MAX_AGE_MS });
 
         if (isMounted) {
           setSocialCircles(nextCircles);
@@ -389,8 +407,9 @@ export default function CreateAlarmScreen() {
 
   useEffect(() => {
     const loadFormData = async () => {
-      await hydrateAlarmRuntimeForCurrentUser().catch(() => null);
-      const store = await readAlarmStore();
+      const store = await hydrateAlarmRuntimeForCurrentUser({
+        maxAgeMs: ALARM_RUNTIME_CACHE_MAX_AGE_MS,
+      }).catch(() => readAlarmStore());
       setSavedCodePresets(store.checkpointPresets);
       setErrors({});
       setActiveStep(1);
@@ -958,7 +977,7 @@ export default function CreateAlarmScreen() {
         <View style={styles.bottomFooter}>
           <FlowFooterButton
             disabled={isSaving}
-            icon={activeStep === 2 && hasLinkedProofCode ? 'checkmark' : activeStep === 2 ? 'scan' : 'add'}
+            icon={hasLinkedProofCode ? 'checkmark' : activeStep === 2 ? 'scan' : 'qr-code-outline'}
             label={footerButtonLabel}
             onPress={
               activeStep === 2
