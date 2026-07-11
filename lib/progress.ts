@@ -1,4 +1,8 @@
 import { getUseCaseLabel } from '@/lib/checkpoint-templates';
+import {
+  getFailureOccurrenceTimestamp,
+  getSuccessOccurrenceTimestamp,
+} from '@/lib/alarm-history';
 import { AlarmOutcome, AlarmStore, SuccessHistoryEntry, UseCaseType } from '@/types/alarm';
 
 const WEEK_IN_MS = 7 * 24 * 60 * 60 * 1000;
@@ -115,33 +119,38 @@ function roundAverage(values: number[]) {
   return Math.round(sum / values.length);
 }
 
-function getUseCaseTypeForAlarm(store: AlarmStore, alarmId: string): UseCaseType {
-  return store.alarms.find((alarm) => alarm.id === alarmId)?.useCaseType ?? 'custom';
+function getUseCaseTypesByAlarmId(store: AlarmStore) {
+  return new Map(store.alarms.map((alarm) => [alarm.id, alarm.useCaseType]));
+}
+
+function getUseCaseTypeForAlarm(useCaseTypesByAlarmId: Map<string, UseCaseType>, alarmId: string): UseCaseType {
+  return useCaseTypesByAlarmId.get(alarmId) ?? 'custom';
 }
 
 function getWeeklyAttemptRecords(store: AlarmStore, now = Date.now()): AttemptRecord[] {
   const windowStart = now - WEEK_IN_MS;
+  const useCaseTypesByAlarmId = getUseCaseTypesByAlarmId(store);
   const successAttempts = store.successHistory
-    .filter((entry) => new Date(entry.confirmedAt).getTime() >= windowStart)
+    .filter((entry) => new Date(getSuccessOccurrenceTimestamp(entry)).getTime() >= windowStart)
     .map<AttemptRecord>((entry) => ({
       alarmId: entry.alarmId,
       label: entry.label,
       outcome: 'confirmed',
-      resolvedAt: entry.confirmedAt,
+      resolvedAt: getSuccessOccurrenceTimestamp(entry),
       timeToScanSeconds: entry.timeToScanSeconds,
       gracePeriodSeconds: entry.gracePeriodSeconds,
-      useCaseType: getUseCaseTypeForAlarm(store, entry.alarmId),
+      useCaseType: getUseCaseTypeForAlarm(useCaseTypesByAlarmId, entry.alarmId),
     }));
   const failureAttempts = store.failureHistory
-    .filter((entry) => new Date(entry.failedAt).getTime() >= windowStart)
+    .filter((entry) => new Date(getFailureOccurrenceTimestamp(entry)).getTime() >= windowStart)
     .map<AttemptRecord>((entry) => ({
       alarmId: entry.alarmId,
       label: entry.label,
       outcome: 'missed',
-      resolvedAt: entry.failedAt,
+      resolvedAt: getFailureOccurrenceTimestamp(entry),
       timeToScanSeconds: null,
       gracePeriodSeconds: null,
-      useCaseType: getUseCaseTypeForAlarm(store, entry.alarmId),
+      useCaseType: getUseCaseTypeForAlarm(useCaseTypesByAlarmId, entry.alarmId),
     }));
 
   return [...successAttempts, ...failureAttempts].sort(
@@ -187,8 +196,7 @@ export function getMilestoneProgress(currentStreak: number): MilestoneProgress {
   };
 }
 
-export function getProgressBadges(store: AlarmStore, now = Date.now()): ProgressBadge[] {
-  const weeklyStats = getWeeklyCompletionStats(store, now);
+function buildProgressBadges(store: AlarmStore, weeklyStats: WeeklyCompletionStats): ProgressBadge[] {
   const latestSuccess = store.successHistory[0] ?? null;
   const badges: ProgressBadge[] = [];
   const streakMilestone = [...STREAK_MILESTONES]
@@ -233,8 +241,11 @@ export function getProgressBadges(store: AlarmStore, now = Date.now()): Progress
   return badges;
 }
 
-export function getUseCaseReliability(store: AlarmStore, now = Date.now()): UseCaseReliability[] {
-  const attempts = getWeeklyAttemptRecords(store, now);
+export function getProgressBadges(store: AlarmStore, now = Date.now()): ProgressBadge[] {
+  return buildProgressBadges(store, getWeeklyCompletionStats(store, now));
+}
+
+function buildUseCaseReliability(attempts: AttemptRecord[]): UseCaseReliability[] {
   const groupedAttempts = attempts.reduce<Record<UseCaseType, AttemptRecord[]>>((groups, entry) => {
     const existingGroup = groups[entry.useCaseType] ?? [];
     existingGroup.push(entry);
@@ -273,6 +284,10 @@ export function getUseCaseReliability(store: AlarmStore, now = Date.now()): UseC
     });
 }
 
+export function getUseCaseReliability(store: AlarmStore, now = Date.now()): UseCaseReliability[] {
+  return buildUseCaseReliability(getWeeklyAttemptRecords(store, now));
+}
+
 function getStrongestUseCase(useCaseReliability: UseCaseReliability[]) {
   return (
     [...useCaseReliability]
@@ -309,9 +324,10 @@ function getRecoveryUseCase(useCaseReliability: UseCaseReliability[]) {
   );
 }
 
-export function getWeeklyReview(store: AlarmStore, now = Date.now()): WeeklyReview {
-  const weeklyStats = getWeeklyCompletionStats(store, now);
-  const useCaseReliability = getUseCaseReliability(store, now);
+function buildWeeklyReview(
+  weeklyStats: WeeklyCompletionStats,
+  useCaseReliability: UseCaseReliability[]
+): WeeklyReview {
   const strongestUseCase = getStrongestUseCase(useCaseReliability);
   const recoveryUseCase = getRecoveryUseCase(useCaseReliability);
 
@@ -386,6 +402,14 @@ export function getWeeklyReview(store: AlarmStore, now = Date.now()): WeeklyRevi
   };
 }
 
+export function getWeeklyReview(store: AlarmStore, now = Date.now()): WeeklyReview {
+  const attempts = getWeeklyAttemptRecords(store, now);
+  const weeklyStats = buildWeeklyCompletionStats(attempts);
+  const useCaseReliability = buildUseCaseReliability(attempts);
+
+  return buildWeeklyReview(weeklyStats, useCaseReliability);
+}
+
 export function getProgressSummary(store: AlarmStore, now = Date.now()): ProgressSummary {
   const currentStreakMilestone =
     [...STREAK_MILESTONES].reverse().find((milestone) => store.currentStreak >= milestone.threshold) ??
@@ -393,9 +417,10 @@ export function getProgressSummary(store: AlarmStore, now = Date.now()): Progres
   const nextStreakMilestone =
     STREAK_MILESTONES.find((milestone) => store.currentStreak < milestone.threshold) ?? null;
   const milestoneProgress = getMilestoneProgress(store.currentStreak);
-  const weeklyStats = getWeeklyCompletionStats(store, now);
-  const useCaseReliability = getUseCaseReliability(store, now);
-  const weeklyReview = getWeeklyReview(store, now);
+  const weeklyAttempts = getWeeklyAttemptRecords(store, now);
+  const weeklyStats = buildWeeklyCompletionStats(weeklyAttempts);
+  const useCaseReliability = buildUseCaseReliability(weeklyAttempts);
+  const weeklyReview = buildWeeklyReview(weeklyStats, useCaseReliability);
 
   return {
     checkpointTitle: getTitleForScore(store.longestStreak),
@@ -405,7 +430,7 @@ export function getProgressSummary(store: AlarmStore, now = Date.now()): Progres
     weeklyStats,
     useCaseReliability,
     weeklyReview,
-    activeBadges: getProgressBadges(store, now),
+    activeBadges: buildProgressBadges(store, weeklyStats),
     recentWins: store.successHistory.slice(0, 3),
     latestSuccess: store.successHistory[0] ?? null,
     nextGoalCopy: nextStreakMilestone

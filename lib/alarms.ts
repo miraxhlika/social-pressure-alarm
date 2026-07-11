@@ -14,6 +14,10 @@ import {
   RepeatSchedule,
   SuccessHistoryEntry,
 } from '@/types/alarm';
+import {
+  getFailureOccurrenceTimestamp,
+  getSuccessOccurrenceTimestamp,
+} from '@/lib/alarm-history';
 import { normalizeUseCaseType } from '@/lib/checkpoint-templates';
 import { getWeeklyCompletionStats } from '@/lib/progress';
 import { hasSocialBackendConfig } from '@/lib/social/config';
@@ -60,6 +64,29 @@ let hydrateAlarmRuntimeRequest: {
   scope: string;
 } | null = null;
 
+type CachedHydratedAlarmStoreOptions = {
+  maxAgeMs?: number;
+};
+
+export function getCachedHydratedAlarmStoreForScope(
+  scope: string,
+  options: CachedHydratedAlarmStoreOptions = {}
+) {
+  if (!hydratedAlarmStoreCache || hydratedAlarmStoreCache.scope !== scope) {
+    return null;
+  }
+
+  if (typeof options.maxAgeMs === 'number') {
+    const cacheAgeMs = Date.now() - hydratedAlarmStoreCache.updatedAt;
+
+    if (cacheAgeMs >= options.maxAgeMs) {
+      return null;
+    }
+  }
+
+  return hydratedAlarmStoreCache.store;
+}
+
 type LegacyAlarmInput = Partial<Alarm> & {
   title?: unknown;
   qrValue?: unknown;
@@ -102,7 +129,7 @@ function createDefaultRuntimeStore(): AlarmRuntimeStore {
 type AlarmAttemptHistoryEntry = {
   alarmId: string;
   outcome: AlarmOutcome;
-  resolvedAt: string;
+  occurredAt: string;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -159,16 +186,16 @@ function getAlarmAttemptHistory(successHistory: SuccessHistoryEntry[], failureHi
   const successAttempts = successHistory.map<AlarmAttemptHistoryEntry>((entry) => ({
     alarmId: entry.alarmId,
     outcome: 'confirmed',
-    resolvedAt: entry.confirmedAt,
+    occurredAt: getSuccessOccurrenceTimestamp(entry),
   }));
   const failureAttempts = failureHistory.map<AlarmAttemptHistoryEntry>((entry) => ({
     alarmId: entry.alarmId,
     outcome: 'missed',
-    resolvedAt: entry.failedAt,
+    occurredAt: getFailureOccurrenceTimestamp(entry),
   }));
 
   return [...successAttempts, ...failureAttempts].sort(
-    (left, right) => new Date(left.resolvedAt).getTime() - new Date(right.resolvedAt).getTime()
+    (left, right) => new Date(left.occurredAt).getTime() - new Date(right.occurredAt).getTime()
   );
 }
 

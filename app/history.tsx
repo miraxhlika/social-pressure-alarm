@@ -16,7 +16,11 @@ import {
 import { LoadingBlock } from '@/components/ui/loading-block';
 import { Fonts, Radius, Spacing, TextPresets, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { hydrateAlarmRuntimeForCurrentUser, readAlarmStore } from '@/lib/alarms';
+import {
+  getFailureOccurrenceTimestamp,
+  getSuccessOccurrenceTimestamp,
+} from '@/lib/alarm-history';
+import { ALARM_RUNTIME_CACHE_MAX_AGE_MS, hydrateAlarmRuntimeForCurrentUser, readAlarmStore } from '@/lib/alarms';
 import { getUseCaseLabel } from '@/lib/checkpoint-templates';
 import { getProgressSummary, ProgressSummary } from '@/lib/progress';
 import { AlarmStore, UseCaseType } from '@/types/alarm';
@@ -149,16 +153,16 @@ function getBucketIndex(timestamp: string, range: PeriodRange) {
 }
 
 function getPeriodStats(store: AlarmStore, range: PeriodRange): PeriodStats {
-  const successes = store.successHistory.filter((entry) => isInRange(entry.confirmedAt, range));
-  const failures = store.failureHistory.filter((entry) => isInRange(entry.failedAt, range));
+  const successes = store.successHistory.filter((entry) => isInRange(getSuccessOccurrenceTimestamp(entry), range));
+  const failures = store.failureHistory.filter((entry) => isInRange(getFailureOccurrenceTimestamp(entry), range));
   const clearPoints = Array.from({ length: range.bucketCount }, () => 0);
   const missPoints = Array.from({ length: range.bucketCount }, () => 0);
 
   successes.forEach((entry) => {
-    clearPoints[getBucketIndex(entry.confirmedAt, range)] += 1;
+    clearPoints[getBucketIndex(getSuccessOccurrenceTimestamp(entry), range)] += 1;
   });
   failures.forEach((entry) => {
-    missPoints[getBucketIndex(entry.failedAt, range)] += 1;
+    missPoints[getBucketIndex(getFailureOccurrenceTimestamp(entry), range)] += 1;
   });
 
   return {
@@ -185,10 +189,10 @@ function getPeriodCategories(store: AlarmStore, range: PeriodRange): PeriodCateg
   };
 
   store.successHistory
-    .filter((entry) => isInRange(entry.confirmedAt, range))
+    .filter((entry) => isInRange(getSuccessOccurrenceTimestamp(entry), range))
     .forEach((entry) => recordAttempt(entry.alarmId, true));
   store.failureHistory
-    .filter((entry) => isInRange(entry.failedAt, range))
+    .filter((entry) => isInRange(getFailureOccurrenceTimestamp(entry), range))
     .forEach((entry) => recordAttempt(entry.alarmId, false));
 
   return [...groups.entries()]
@@ -252,8 +256,9 @@ export default function HistoryScreen() {
     }
 
     try {
-      await hydrateAlarmRuntimeForCurrentUser().catch(() => null);
-      const store = await readAlarmStore();
+      const store = await hydrateAlarmRuntimeForCurrentUser({
+        maxAgeMs: ALARM_RUNTIME_CACHE_MAX_AGE_MS,
+      }).catch(() => readAlarmStore());
       if (loadHistoryRequestRef.current === requestId) {
         setState({ store, summary: getProgressSummary(store) });
       }
@@ -295,7 +300,7 @@ export default function HistoryScreen() {
     }
 
     const clearTimes = state.store.successHistory
-      .filter((entry) => isInRange(entry.confirmedAt, periodRange))
+      .filter((entry) => isInRange(getSuccessOccurrenceTimestamp(entry), periodRange))
       .map((entry) => entry.timeToScanSeconds);
 
     return clearTimes.length === 0

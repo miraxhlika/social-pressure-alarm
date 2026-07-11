@@ -14,14 +14,18 @@ import {
 import { LoadingBlock } from '@/components/ui/loading-block';
 import { Fonts, Spacing, TextPresets, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { hydrateAlarmRuntimeForCurrentUser, readAlarmStore } from '@/lib/alarms';
+import {
+  getFailureOccurrenceTimestamp,
+  getSuccessOccurrenceTimestamp,
+} from '@/lib/alarm-history';
+import { ALARM_RUNTIME_CACHE_MAX_AGE_MS, hydrateAlarmRuntimeForCurrentUser, readAlarmStore } from '@/lib/alarms';
 import { AlarmStore } from '@/types/alarm';
 
 type TodayActivityEvent = {
   id: string;
   alarmId: string;
   description: string;
-  resolvedAt: string;
+  occurredAt: string;
   statusLabel: string;
   statusTone: 'success' | 'danger';
   title: string;
@@ -47,24 +51,24 @@ function formatEventTime(timestamp: string) {
 
 function getTodayActivityEvents(store: AlarmStore): TodayActivityEvent[] {
   const clears = store.successHistory
-    .filter((entry) => isSameLocalDay(entry.confirmedAt))
+    .filter((entry) => isSameLocalDay(getSuccessOccurrenceTimestamp(entry)))
     .map<TodayActivityEvent>((entry) => ({
       alarmId: entry.alarmId,
       description: `Cleared in ${entry.timeToScanSeconds}s`,
       id: `clear-${entry.alarmId}-${entry.confirmedAt}`,
-      resolvedAt: entry.confirmedAt,
+      occurredAt: getSuccessOccurrenceTimestamp(entry),
       statusLabel: 'Cleared',
       statusTone: 'success',
       title: entry.label,
       type: 'cleared',
     }));
   const misses = store.failureHistory
-    .filter((entry) => isSameLocalDay(entry.failedAt))
+    .filter((entry) => isSameLocalDay(getFailureOccurrenceTimestamp(entry)))
     .map<TodayActivityEvent>((entry) => ({
       alarmId: entry.alarmId,
       description: 'Missed before the saved proof matched',
       id: `miss-${entry.alarmId}-${entry.failedAt}`,
-      resolvedAt: entry.failedAt,
+      occurredAt: getFailureOccurrenceTimestamp(entry),
       statusLabel: 'Missed',
       statusTone: 'danger',
       title: entry.label,
@@ -72,7 +76,7 @@ function getTodayActivityEvents(store: AlarmStore): TodayActivityEvent[] {
     }));
 
   return [...clears, ...misses].sort(
-    (left, right) => new Date(right.resolvedAt).getTime() - new Date(left.resolvedAt).getTime()
+    (left, right) => new Date(right.occurredAt).getTime() - new Date(left.occurredAt).getTime()
   );
 }
 
@@ -93,8 +97,9 @@ export default function TodayActivityScreen() {
     }
 
     try {
-      await hydrateAlarmRuntimeForCurrentUser().catch(() => null);
-      const nextStore = await readAlarmStore();
+      const nextStore = await hydrateAlarmRuntimeForCurrentUser({
+        maxAgeMs: ALARM_RUNTIME_CACHE_MAX_AGE_MS,
+      }).catch(() => readAlarmStore());
       if (loadActivityRequestRef.current === requestId) {
         setStore(nextStore);
       }
@@ -159,10 +164,10 @@ export default function TodayActivityScreen() {
         />
       ) : (
         <FlowPanel style={styles.eventsPanel}>
-          <FlowSectionLabel>RESOLVED TODAY</FlowSectionLabel>
+          <FlowSectionLabel>TODAY&apos;S OUTCOMES</FlowSectionLabel>
           {events.map((event) => (
             <FlowListRow
-              description={`${event.description} · ${formatEventTime(event.resolvedAt)}`}
+              description={`${event.description} · ${formatEventTime(event.occurredAt)}`}
               key={event.id}
               leading={
                 <FlowIconBadge

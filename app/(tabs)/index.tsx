@@ -15,23 +15,17 @@ import { LoadingBlock } from '@/components/ui/loading-block';
 import { Fonts, Radius, Spacing, TextPresets, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import {
+  getFailureOccurrenceTimestamp,
+  getSuccessOccurrenceTimestamp,
+} from '@/lib/alarm-history';
+import {
   ALARM_RUNTIME_CACHE_MAX_AGE_MS,
   formatAlarmRuntimeTime,
   hydrateAlarmRuntimeForCurrentUser,
 } from '@/lib/alarms';
-import {
-  formatSocialTimestamp,
-  getAlarmPhaseLabel,
-  getPrimaryAlarm,
-  getSocialStatusLabel,
-  getSocialStatusTone,
-} from '@/lib/dashboard';
+import { getAlarmPhaseLabel, getPrimaryAlarm } from '@/lib/dashboard';
 import { getNotificationPermissionState, isNotificationPermissionEnabled } from '@/lib/notifications';
 import { ProgressSummary, getProgressSummary } from '@/lib/progress';
-import { SOCIAL_CIRCLES_CACHE_MAX_AGE_MS, listMySocialCircles } from '@/lib/social/circles';
-import { getSocialRuntimeSnapshot } from '@/lib/social/queue';
-import { SocialRuntimeSnapshot } from '@/lib/social/types';
-import { useSocialSession } from '@/providers/social-session-provider';
 import { Alarm, FailureHistoryEntry, SuccessHistoryEntry } from '@/types/alarm';
 
 type HomeState = {
@@ -39,12 +33,8 @@ type HomeState = {
   currentStreak: number;
   lifetimeAlarmCreations: number;
   progressSummary: ProgressSummary | null;
-  socialRuntime: SocialRuntimeSnapshot | null;
-  circleCount: number;
   successHistory: SuccessHistoryEntry[];
   failureHistory: FailureHistoryEntry[];
-  latestSuccess: SuccessHistoryEntry | null;
-  latestFailure: FailureHistoryEntry | null;
   notificationsEnabled: boolean;
 };
 
@@ -56,15 +46,6 @@ type TimelineItem = {
   tone: 'success' | 'danger' | 'warning' | 'primary';
   sortAt: number;
   timeLabel: string;
-};
-
-type WeeklyDayStat = {
-  key: string;
-  label: string;
-  attempts: number;
-  successes: number;
-  failures: number;
-  completionRate: number;
 };
 
 function formatTodayTitleDate(day = new Date()) {
@@ -131,48 +112,6 @@ function getScheduledDateForToday(alarm: Alarm, day = new Date()) {
   return scheduledDate;
 }
 
-function getLatestOutcome(
-  success: SuccessHistoryEntry | null,
-  failure: FailureHistoryEntry | null
-): { tone: 'success' | 'danger'; title: string; detail: string } | null {
-  if (!success && !failure) {
-    return null;
-  }
-
-  const successTime = success ? new Date(success.confirmedAt).getTime() : 0;
-  const failureTime = failure ? new Date(failure.failedAt).getTime() : 0;
-
-  if (successTime >= failureTime && success) {
-    return {
-      tone: 'success',
-      title: success.label,
-      detail: `Checked in · ${formatSocialTimestamp(success.confirmedAt)}`,
-    };
-  }
-
-  if (failure) {
-    return {
-      tone: 'danger',
-      title: failure.label,
-      detail: `Missed · ${formatSocialTimestamp(failure.failedAt)}`,
-    };
-  }
-
-  return null;
-}
-
-function getCircleSummary(circleCount: number, lastSuccessfulSyncAt?: string | null) {
-  if (circleCount === 0) {
-    return 'Private until you add a circle.';
-  }
-
-  if (!lastSuccessfulSyncAt) {
-    return `${circleCount} circle${circleCount === 1 ? '' : 's'} ready`;
-  }
-
-  return `${circleCount} circle${circleCount === 1 ? '' : 's'} · ${formatSocialTimestamp(lastSuccessfulSyncAt)}`;
-}
-
 function isSameLocalDay(timestamp: string, day = new Date()) {
   const date = new Date(timestamp);
 
@@ -188,11 +127,11 @@ function isSameLocalDay(timestamp: string, day = new Date()) {
 }
 
 function getTodayClears(successHistory: SuccessHistoryEntry[]) {
-  return successHistory.filter((entry) => isSameLocalDay(entry.confirmedAt));
+  return successHistory.filter((entry) => isSameLocalDay(getSuccessOccurrenceTimestamp(entry)));
 }
 
 function getTodayMisses(failureHistory: FailureHistoryEntry[]) {
-  return failureHistory.filter((entry) => isSameLocalDay(entry.failedAt));
+  return failureHistory.filter((entry) => isSameLocalDay(getFailureOccurrenceTimestamp(entry)));
 }
 
 function normalizeTimelineTimestampKey(timestamp?: string) {
@@ -261,8 +200,8 @@ function getTodayTimeline(successHistory: SuccessHistoryEntry[], failureHistory:
     detail: `Checked in · ${entry.timeToScanSeconds}s`,
     statusLabel: 'Done',
     tone: 'success',
-    sortAt: new Date(entry.scheduledFor ?? entry.confirmedAt).getTime(),
-    timeLabel: formatTimelineTime(entry.scheduledFor ?? entry.confirmedAt),
+    sortAt: new Date(getSuccessOccurrenceTimestamp(entry)).getTime(),
+    timeLabel: formatTimelineTime(getSuccessOccurrenceTimestamp(entry)),
   }));
   const missedItems = todayMisses.map<TimelineItem>((entry) => ({
     id: `miss-${entry.alarmId}-${entry.failedAt}`,
@@ -270,8 +209,8 @@ function getTodayTimeline(successHistory: SuccessHistoryEntry[], failureHistory:
     detail: 'Missed',
     statusLabel: 'Missed',
     tone: 'danger',
-    sortAt: new Date(entry.scheduledFor ?? entry.failedAt).getTime(),
-    timeLabel: formatTimelineTime(entry.scheduledFor ?? entry.failedAt),
+    sortAt: new Date(getFailureOccurrenceTimestamp(entry)).getTime(),
+    timeLabel: formatTimelineTime(getFailureOccurrenceTimestamp(entry)),
   }));
 
   const scheduledItems = alarms
@@ -344,50 +283,9 @@ function getCurrentRunCopy(progressSummary: ProgressSummary | null, currentStrea
   };
 }
 
-function getWeekStart(day = new Date()) {
-  const weekStart = new Date(day);
-  const dayOfWeek = weekStart.getDay();
-  const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
-  weekStart.setDate(weekStart.getDate() + mondayOffset);
-  weekStart.setHours(0, 0, 0, 0);
-  return weekStart;
-}
-
-function getWeeklyDayStats(successHistory: SuccessHistoryEntry[], failureHistory: FailureHistoryEntry[], day = new Date()) {
-  const weekStart = getWeekStart(day);
-  const labels = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
-
-  return labels.map<WeeklyDayStat>((label, index) => {
-    const start = new Date(weekStart);
-    start.setDate(weekStart.getDate() + index);
-    const end = new Date(start);
-    end.setDate(start.getDate() + 1);
-
-    const successes = successHistory.filter((entry) => {
-      const timestamp = new Date(entry.confirmedAt).getTime();
-      return timestamp >= start.getTime() && timestamp < end.getTime();
-    }).length;
-    const failures = failureHistory.filter((entry) => {
-      const timestamp = new Date(entry.failedAt).getTime();
-      return timestamp >= start.getTime() && timestamp < end.getTime();
-    }).length;
-    const attempts = successes + failures;
-
-    return {
-      key: start.toISOString(),
-      label,
-      attempts,
-      successes,
-      failures,
-      completionRate: attempts === 0 ? 0 : successes / attempts,
-    };
-  });
-}
-
 export default function TodayScreen() {
   const router = useRouter();
   const colors = getAppColors(useColorScheme());
-  const { configured, user } = useSocialSession();
   const hasLoadedHomeRef = useRef(false);
   const loadHomeRequestRef = useRef(0);
   const [isLoading, setIsLoading] = useState(true);
@@ -397,31 +295,22 @@ export default function TodayScreen() {
     currentStreak: 0,
     lifetimeAlarmCreations: 0,
     progressSummary: null,
-    socialRuntime: null,
-    circleCount: 0,
     successHistory: [],
     failureHistory: [],
-    latestSuccess: null,
-    latestFailure: null,
     notificationsEnabled: true,
   });
 
   const loadHome = useCallback(async () => {
     const requestId = loadHomeRequestRef.current + 1;
     loadHomeRequestRef.current = requestId;
-    const shouldLoadCircles = Boolean(configured && user?.id);
 
     if (!hasLoadedHomeRef.current) {
       setIsLoading(true);
     }
 
     try {
-      const [store, socialRuntime, circles, notificationPermissionState] = await Promise.all([
+      const [store, notificationPermissionState] = await Promise.all([
         hydrateAlarmRuntimeForCurrentUser({ maxAgeMs: ALARM_RUNTIME_CACHE_MAX_AGE_MS }),
-        getSocialRuntimeSnapshot(),
-        shouldLoadCircles
-          ? listMySocialCircles({ maxAgeMs: SOCIAL_CIRCLES_CACHE_MAX_AGE_MS }).catch(() => [])
-          : Promise.resolve([]),
         getNotificationPermissionState(),
       ]);
 
@@ -432,12 +321,8 @@ export default function TodayScreen() {
           currentStreak: store.currentStreak,
           lifetimeAlarmCreations: store.lifetimeAlarmCreations,
           progressSummary: getProgressSummary(store),
-          socialRuntime,
-          circleCount: circles.length,
           successHistory: store.successHistory,
           failureHistory: store.failureHistory,
-          latestSuccess: store.successHistory[0] ?? null,
-          latestFailure: store.failureHistory[0] ?? null,
           notificationsEnabled: isNotificationPermissionEnabled(notificationPermissionState),
         });
       }
@@ -451,7 +336,7 @@ export default function TodayScreen() {
         setIsLoading(false);
       }
     }
-  }, [configured, user?.id]);
+  }, []);
 
   useFocusEffect(
     useCallback(() => {
@@ -460,20 +345,11 @@ export default function TodayScreen() {
   );
 
   const primaryAlarm = useMemo(() => getPrimaryAlarm(state.alarms), [state.alarms]);
-  const socialStatusLabel = getSocialStatusLabel(state.socialRuntime);
-  const socialStatusTone = getSocialStatusTone(state.socialRuntime);
-  const latestOutcome = getLatestOutcome(state.latestSuccess, state.latestFailure);
   const weeklyReliability = getWeeklyReliabilityCopy(state.progressSummary);
   const currentRun = getCurrentRunCopy(state.progressSummary, state.currentStreak);
-  const todayClears = useMemo(() => getUniqueTodayClears(state.successHistory), [state.successHistory]);
-  const todayMisses = useMemo(() => getUniqueTodayMisses(state.failureHistory), [state.failureHistory]);
   const todayTimeline = useMemo(
     () => getTodayTimeline(state.successHistory, state.failureHistory, state.alarms),
     [state.alarms, state.failureHistory, state.successHistory]
-  );
-  const weeklyDayStats = useMemo(
-    () => getWeeklyDayStats(state.successHistory, state.failureHistory),
-    [state.failureHistory, state.successHistory]
   );
   const upcomingAlarms = useMemo(() => getUpcomingAlarms(state.alarms, primaryAlarm?.id), [primaryAlarm?.id, state.alarms]);
   const primaryPhaseLabel = getAlarmPhaseLabel(primaryAlarm);
@@ -755,63 +631,6 @@ function TimelineRow({ item, showLine }: { item: TimelineItem; showLine: boolean
   );
 }
 
-function WeekBars({ days }: { days: WeeklyDayStat[] }) {
-  const colors = getAppColors(useColorScheme());
-
-  return (
-    <View style={styles.weekBars}>
-      {days.map((day) => {
-        const hasAttempts = day.attempts > 0;
-        const barColor = !hasAttempts
-          ? colors.line
-          : day.failures > 0 && day.successes === 0
-            ? colors.danger
-            : day.failures > 0
-              ? colors.warning
-              : colors.success;
-        const barHeight = hasAttempts ? 12 + Math.round(day.completionRate * 18) : 8;
-
-        return (
-        <View key={day.key} style={styles.weekBarWrap}>
-          <View
-            style={[
-              styles.weekBar,
-              {
-                backgroundColor: barColor,
-                height: barHeight,
-                opacity: hasAttempts ? 1 : 0.65,
-              },
-            ]}
-          />
-          <Text style={[styles.weekLabel, { color: colors.muted }]}>{day.label}</Text>
-        </View>
-        );
-      })}
-    </View>
-  );
-}
-
-function StreakDots({ activeDots }: { activeDots: number }) {
-  const colors = getAppColors(useColorScheme());
-
-  return (
-    <View style={styles.streakDots}>
-      {Array.from({ length: 5 }).map((_, index) => (
-        <View
-          key={index}
-          style={[
-            styles.streakDot,
-            {
-              backgroundColor: index < activeDots ? colors.success : colors.line,
-            },
-          ]}>
-          {index < activeDots ? <Ionicons color={colors.successText} name="checkmark" size={10} /> : null}
-        </View>
-      ))}
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
   screenContent: {
     gap: Spacing.xl,
@@ -1057,39 +876,6 @@ const styles = StyleSheet.create({
     borderColor: 'transparent',
     borderRadius: 0,
     paddingHorizontal: 2,
-  },
-  weekBars: {
-    alignItems: 'flex-end',
-    flexDirection: 'row',
-    gap: 6,
-    minHeight: 44,
-    paddingTop: Spacing.xs,
-  },
-  weekBarWrap: {
-    alignItems: 'center',
-    gap: 3,
-  },
-  weekBar: {
-    borderRadius: Radius.pill,
-    width: 6,
-  },
-  weekLabel: {
-    fontFamily: Fonts.rounded,
-    fontSize: 8,
-    fontWeight: '700',
-    lineHeight: 10,
-  },
-  streakDots: {
-    flexDirection: 'row',
-    gap: 5,
-    paddingTop: Spacing.xs,
-  },
-  streakDot: {
-    alignItems: 'center',
-    borderRadius: Radius.pill,
-    height: 18,
-    justifyContent: 'center',
-    width: 18,
   },
   compactSectionHeader: {
     alignItems: 'center',

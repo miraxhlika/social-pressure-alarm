@@ -6,7 +6,6 @@ import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { AppScreen } from '@/components/ui/app-screen';
 import { EmptyState } from '@/components/ui/empty-state';
 import {
-  FlowPanel,
   FlowTopBar,
 } from '@/components/ui/flow-primitives';
 import {
@@ -17,14 +16,14 @@ import { StatusPill } from '@/components/ui/status-pill';
 import { Fonts, Radius, Spacing, TextPresets, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import {
+  ALARM_RUNTIME_CACHE_MAX_AGE_MS,
   deleteAlarm,
   formatAlarmRuntimeTime,
   formatAlarmTime,
   formatRepeatSchedule,
-  getAlarmById,
   getAlarmPhase,
+  getCachedHydratedAlarmStoreForScope,
   hydrateAlarmRuntimeForCurrentUser,
-  readAlarmStore,
   rescheduleAlarm,
   updateAlarm,
 } from '@/lib/alarms';
@@ -32,8 +31,10 @@ import { formatGracePeriodLabel, getUseCaseLabel } from '@/lib/checkpoint-templa
 import { cancelAlarmNotificationAsync } from '@/lib/notifications';
 import { getProgressSummary, ProgressSummary } from '@/lib/progress';
 import { getCheckpointSocialDescription } from '@/lib/social/settings';
+import { GUEST_STORAGE_SCOPE } from '@/lib/storage';
 import { useAppDialog } from '@/providers/app-dialog-provider';
-import { Alarm, AlarmProofCodeType, FailureHistoryEntry, SuccessHistoryEntry } from '@/types/alarm';
+import { useSocialSession } from '@/providers/social-session-provider';
+import { Alarm, AlarmProofCodeType, AlarmStore, FailureHistoryEntry, SuccessHistoryEntry } from '@/types/alarm';
 
 type CheckpointDetailsState = {
   alarm: Alarm | null;
@@ -43,6 +44,38 @@ type CheckpointDetailsState = {
   currentStreak: number;
   longestStreak: number;
 };
+
+function createEmptyCheckpointDetailsState(): CheckpointDetailsState {
+  return {
+    alarm: null,
+    progressSummary: null,
+    successes: [],
+    failures: [],
+    currentStreak: 0,
+    longestStreak: 0,
+  };
+}
+
+function getCheckpointDetailsKey(storageScope: string, checkpointId: string) {
+  return `${storageScope}:${checkpointId}`;
+}
+
+function getCheckpointDetailsState(store: AlarmStore, checkpointId: string): CheckpointDetailsState {
+  return {
+    alarm: store.alarms.find((candidate) => candidate.id === checkpointId) ?? null,
+    progressSummary: getProgressSummary(store),
+    successes: store.successHistory.filter((entry) => entry.alarmId === checkpointId),
+    failures: store.failureHistory.filter((entry) => entry.alarmId === checkpointId),
+    currentStreak: store.currentStreak,
+    longestStreak: store.longestStreak,
+  };
+}
+
+function getCachedCheckpointDetailsState(checkpointId: string, storageScope: string) {
+  const cachedStore = getCachedHydratedAlarmStoreForScope(storageScope);
+
+  return cachedStore ? getCheckpointDetailsState(cachedStore, checkpointId) : null;
+}
 
 function getPhaseCopy(alarm: Alarm | null) {
   if (!alarm) {
@@ -65,24 +98,6 @@ function getPhaseCopy(alarm: Alarm | null) {
   }
 }
 
-function getProofPreview(payload: string) {
-  if (payload.length <= 18) {
-    return payload;
-  }
-
-  return `${payload.slice(0, 8)}...${payload.slice(-7)}`;
-}
-
-function getSavedCodeId(payload: string) {
-  let hash = 0;
-
-  for (let index = 0; index < payload.length; index += 1) {
-    hash = (hash * 31 + payload.charCodeAt(index)) >>> 0;
-  }
-
-  return `ID: WF-PRW-${hash.toString(16).toUpperCase().padStart(3, '0').slice(0, 3)}`;
-}
-
 function getProofCodeType(alarm: Alarm): AlarmProofCodeType {
   if (alarm.proofCodeType) {
     return alarm.proofCodeType;
@@ -95,19 +110,6 @@ function getProofCodeType(alarm: Alarm): AlarmProofCodeType {
   }
 
   return 'qr';
-}
-
-function formatDueWindow(alarm: Alarm) {
-  const start = new Date();
-  start.setHours(alarm.hour, alarm.minute, 0, 0);
-
-  const end = new Date(start);
-  end.setSeconds(end.getSeconds() + alarm.gracePeriodSeconds);
-
-  return `${start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} - ${end.toLocaleTimeString([], {
-    hour: 'numeric',
-    minute: '2-digit',
-  })}`;
 }
 
 function formatScheduleLine(alarm: Alarm) {
@@ -153,58 +155,61 @@ export default function CheckpointDetailsScreen() {
   const { alert, confirm } = useAppDialog();
   const params = useLocalSearchParams<{ id?: string }>();
   const colors = getAppColors(useColorScheme());
-  const loadedDetailsIdRef = useRef<string | null>(null);
+  const { isLoading: isSocialSessionLoading, user } = useSocialSession();
+  const checkpointId = typeof params.id === 'string' ? params.id : undefined;
+  const storageScope = isSocialSessionLoading ? null : user?.id ?? GUEST_STORAGE_SCOPE;
+  const initialDetailsState =
+    checkpointId && storageScope ? getCachedCheckpointDetailsState(checkpointId, storageScope) : null;
+  const initialDetailsKey =
+    checkpointId && storageScope && initialDetailsState ? getCheckpointDetailsKey(storageScope, checkpointId) : null;
+  const loadedDetailsKeyRef = useRef<string | null>(initialDetailsKey);
   const loadDetailsRequestRef = useRef(0);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(!initialDetailsState);
   const [loadError, setLoadError] = useState('');
-  const [state, setState] = useState<CheckpointDetailsState>({
-    alarm: null,
-    progressSummary: null,
-    successes: [],
-    failures: [],
-    currentStreak: 0,
-    longestStreak: 0,
-  });
+  const [state, setState] = useState<CheckpointDetailsState>(
+    initialDetailsState ?? createEmptyCheckpointDetailsState
+  );
 
   const loadDetails = useCallback(async () => {
     const requestId = loadDetailsRequestRef.current + 1;
     loadDetailsRequestRef.current = requestId;
 
-    const checkpointId = params.id;
-
     if (!checkpointId) {
-      loadedDetailsIdRef.current = null;
+      loadedDetailsKeyRef.current = null;
       setLoadError('');
-      setState({
-        alarm: null,
-        progressSummary: null,
-        successes: [],
-        failures: [],
-        currentStreak: 0,
-        longestStreak: 0,
-      });
+      setState(createEmptyCheckpointDetailsState());
       setIsLoading(false);
       return;
     }
 
-    if (loadedDetailsIdRef.current !== checkpointId) {
+    if (!storageScope) {
       setIsLoading(true);
+      return;
+    }
+
+    const detailsKey = getCheckpointDetailsKey(storageScope, checkpointId);
+    const cachedDetailsState = getCachedCheckpointDetailsState(checkpointId, storageScope);
+    const hasLoadedDetails = loadedDetailsKeyRef.current === detailsKey;
+
+    if (cachedDetailsState && !hasLoadedDetails) {
+      loadedDetailsKeyRef.current = detailsKey;
+      setLoadError('');
+      setState(cachedDetailsState);
+    }
+
+    if (!cachedDetailsState && !hasLoadedDetails) {
+      setState(createEmptyCheckpointDetailsState());
+      setIsLoading(true);
+    } else {
+      setIsLoading(false);
     }
 
     try {
-      await hydrateAlarmRuntimeForCurrentUser();
-      const [store, alarm] = await Promise.all([readAlarmStore(), getAlarmById(checkpointId)]);
+      const store = await hydrateAlarmRuntimeForCurrentUser({ maxAgeMs: ALARM_RUNTIME_CACHE_MAX_AGE_MS });
 
       if (loadDetailsRequestRef.current === requestId) {
         setLoadError('');
-        setState({
-          alarm,
-          progressSummary: getProgressSummary(store),
-          successes: store.successHistory.filter((entry) => entry.alarmId === checkpointId),
-          failures: store.failureHistory.filter((entry) => entry.alarmId === checkpointId),
-          currentStreak: store.currentStreak,
-          longestStreak: store.longestStreak,
-        });
+        setState(getCheckpointDetailsState(store, checkpointId));
       }
     } catch (error) {
       if (loadDetailsRequestRef.current === requestId) {
@@ -212,11 +217,11 @@ export default function CheckpointDetailsScreen() {
       }
     } finally {
       if (loadDetailsRequestRef.current === requestId) {
-        loadedDetailsIdRef.current = checkpointId;
+        loadedDetailsKeyRef.current = detailsKey;
         setIsLoading(false);
       }
     }
-  }, [params.id]);
+  }, [checkpointId, storageScope]);
 
   useFocusEffect(
     useCallback(() => {
@@ -313,7 +318,7 @@ export default function CheckpointDetailsScreen() {
     }
   }, [alarm, alert, loadDetails]);
 
-  if (isLoading) {
+  if (isLoading && !alarm) {
     return (
       <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
         <LoadingBlock
@@ -503,33 +508,6 @@ function SetupRow({
         <Text numberOfLines={2} style={[styles.setupValue, { color: colors.text }]}>{value}</Text>
       </View>
     </View>
-  );
-}
-
-function MiniStat({
-  icon,
-  label,
-  tone,
-  value,
-}: {
-  icon: keyof typeof Ionicons.glyphMap;
-  label: string;
-  tone: 'warning' | 'success';
-  value: string;
-}) {
-  const colors = getAppColors(useColorScheme());
-  const iconColor = tone === 'success' ? colors.success : colors.warning;
-
-  return (
-    <FlowPanel style={styles.miniStatPanel}>
-      <View style={styles.miniStatRow}>
-        <Ionicons color={iconColor} name={icon} size={19} />
-        <View style={styles.miniStatCopy}>
-          <Text style={[styles.miniStatLabel, { color: colors.textSoft }]}>{label}</Text>
-          <Text style={[styles.miniStatValue, { color: colors.text }]}>{value}</Text>
-        </View>
-      </View>
-    </FlowPanel>
   );
 }
 
@@ -728,30 +706,6 @@ const styles = StyleSheet.create({
   streakGrid: {
     flexDirection: 'row',
     gap: Spacing.sm,
-  },
-  miniStatPanel: {
-    flex: 1,
-    padding: 10,
-  },
-  miniStatRow: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: 9,
-  },
-  miniStatCopy: {
-    flex: 1,
-    gap: 1,
-    minWidth: 0,
-  },
-  miniStatLabel: {
-    ...TextPresets.body,
-    fontSize: 10,
-    lineHeight: 13,
-  },
-  miniStatValue: {
-    ...TextPresets.label,
-    fontSize: 13,
-    lineHeight: 17,
   },
   reliabilityPanel: {
     borderRadius: Radius.md,

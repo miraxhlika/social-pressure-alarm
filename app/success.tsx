@@ -9,6 +9,10 @@ import { AppScreen } from '@/components/ui/app-screen';
 import { LoadingBlock } from '@/components/ui/loading-block';
 import { Fonts, Radius, Spacing, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import {
+  getFailureOccurrenceTimestamp,
+  getSuccessOccurrenceTimestamp,
+} from '@/lib/alarm-history';
 import { formatAlarmRuntimeTime, readAlarmStore } from '@/lib/alarms';
 import { getPrimaryAlarm } from '@/lib/dashboard';
 import { ProgressSummary, getProgressSummary } from '@/lib/progress';
@@ -63,8 +67,8 @@ function getTodayProgress(
   successHistory: SuccessHistoryEntry[],
   failureHistory: FailureHistoryEntry[]
 ) {
-  const successesToday = successHistory.filter((entry) => isSameLocalDay(entry.confirmedAt));
-  const failuresToday = failureHistory.filter((entry) => isSameLocalDay(entry.failedAt));
+  const successesToday = successHistory.filter((entry) => isSameLocalDay(getSuccessOccurrenceTimestamp(entry)));
+  const failuresToday = failureHistory.filter((entry) => isSameLocalDay(getFailureOccurrenceTimestamp(entry)));
   const resolvedAlarmIds = new Set([
     ...successesToday.map((entry) => entry.alarmId),
     ...failuresToday.map((entry) => entry.alarmId),
