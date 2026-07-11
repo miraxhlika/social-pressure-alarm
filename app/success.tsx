@@ -2,12 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, DimensionValue, Easing, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
+import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { AppButton } from '@/components/ui/app-button';
 import { AppScreen } from '@/components/ui/app-screen';
 import { LoadingBlock } from '@/components/ui/loading-block';
-import { Fonts, Radius, Spacing, getAppColors } from '@/constants/theme';
+import { Fonts, Radius, Shadows, Spacing, TextPresets, getAppColors, withAlpha } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import {
   getFailureOccurrenceTimestamp,
@@ -25,6 +26,7 @@ type SuccessState = {
   completedToday: number;
   currentStreak: number;
   failuresToday: number;
+  isFirstClear: boolean;
   nextAlarm: Alarm | null;
   summary: ProgressSummary;
   successEntry: SuccessHistoryEntry | null;
@@ -114,6 +116,27 @@ function getNextDueLabel(nextAlarm: Alarm | null) {
   return `Due around ${formatAlarmRuntimeTime(nextAlarm)}`;
 }
 
+function getPracticeDeferredCopy(timestamp: string) {
+  const scheduledFor = new Date(timestamp);
+
+  if (Number.isNaN(scheduledFor.getTime())) {
+    return null;
+  }
+
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const isTomorrow =
+    scheduledFor.getFullYear() === tomorrow.getFullYear() &&
+    scheduledFor.getMonth() === tomorrow.getMonth() &&
+    scheduledFor.getDate() === tomorrow.getDate();
+  const dayLabel = isTomorrow
+    ? 'tomorrow'
+    : scheduledFor.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const timeLabel = scheduledFor.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+  return `First reminder ${dayLabel} at ${timeLabel}. Today was skipped because you just completed practice.`;
+}
+
 async function triggerSuccessArrival() {
   try {
     await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -124,8 +147,16 @@ async function triggerSuccessArrival() {
 
 export default function SuccessScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ alarmId?: string; label?: string; mode?: string; promptSecondCheckpoint?: string }>();
-  const colors = getAppColors(useColorScheme());
+  const params = useLocalSearchParams<{
+    alarmId?: string;
+    label?: string;
+    mode?: string;
+    practiceDeferredUntil?: string;
+    promptSecondCheckpoint?: string;
+  }>();
+  const colorScheme = useColorScheme();
+  const colors = getAppColors(colorScheme);
+  const isDark = colorScheme === 'dark';
   const [isLoading, setIsLoading] = useState(true);
   const [successState, setSuccessState] = useState<SuccessState | null>(null);
   const arrivalOpacity = useRef(new Animated.Value(0)).current;
@@ -156,6 +187,7 @@ export default function SuccessScreen() {
           completedToday: todayProgress.completedToday,
           currentStreak: store.currentStreak,
           failuresToday: todayProgress.failuresToday,
+          isFirstClear: !isSetupComplete && store.successHistory.length === 1,
           nextAlarm: getPrimaryAlarm(store.alarms),
           summary,
           successEntry,
@@ -253,7 +285,7 @@ export default function SuccessScreen() {
 
   if (isLoading || !successState) {
     return (
-      <AppScreen backgroundColor="#FFFCF7">
+      <AppScreen backgroundColor={colors.canvas}>
         <LoadingBlock
           description={isSetupComplete ? 'Preparing your first real checkpoint.' : 'Saving this clear to your progress.'}
           layout="hero"
@@ -264,21 +296,45 @@ export default function SuccessScreen() {
     );
   }
 
-  const title = isSetupComplete ? 'Ready!' : 'Cleared!';
-  const subtitle = isSetupComplete ? 'Proof saved' : 'Proof verified';
+  const isFirstClear = successState.isFirstClear;
+  const title = isSetupComplete
+    ? 'Your checkpoint is ready.'
+    : isFirstClear
+      ? 'That’s your first clear.'
+      : 'Checkpoint cleared.';
+  const subtitle = isSetupComplete
+    ? 'The reminder and proof code are set.'
+    : isFirstClear
+      ? `You reached ${successState.alarm?.label ?? 'the checkpoint'} and matched the exact code.`
+      : `Proof verified for ${successState.alarm?.label ?? 'this checkpoint'}.`;
   const completionLabel = isSetupComplete
     ? successState.alarm?.scheduledFor
       ? `Scheduled ${formatTimestampLabel(successState.alarm.scheduledFor)}`
       : 'Saved just now'
     : formatCompletedAt(successState.successEntry);
-  const streakValue = successState.currentStreak === 1 ? '1 day' : `${successState.currentStreak} days`;
+  const streakValue = successState.currentStreak === 1 ? '1 clear' : `${successState.currentStreak} clears`;
   const progressCopy = `${successState.completedToday} of ${successState.totalToday} checkpoints`;
-  const nextTitle = shouldPromptSecondCheckpoint ? 'Add another checkpoint' : successState.nextAlarm?.label ?? 'All clear';
-  const nextSubtitle = shouldPromptSecondCheckpoint ? 'Protect one more routine while setup is fresh.' : getNextDueLabel(successState.nextAlarm);
-  const continueTarget = shouldPromptSecondCheckpoint ? '/create' : '/';
+  const nextTitle = shouldPromptSecondCheckpoint
+    ? 'Add another checkpoint'
+    : successState.nextAlarm?.label ?? 'You’re done for today';
+  const practiceDeferredCopy = params.practiceDeferredUntil
+    ? getPracticeDeferredCopy(params.practiceDeferredUntil)
+    : null;
+  const nextSubtitle = shouldPromptSecondCheckpoint
+    ? 'Protect one more routine while setup is fresh.'
+    : practiceDeferredCopy ?? getNextDueLabel(successState.nextAlarm);
+  const primaryLabel = shouldPromptSecondCheckpoint ? 'Add another checkpoint' : 'Go to Today';
+  const primaryTarget = shouldPromptSecondCheckpoint ? '/create' : '/';
+  const showAccountabilityAction = isFirstClear && !shouldPromptSecondCheckpoint;
+  const heroGradient = isDark
+    ? (['#211B17', '#17191C', '#121518'] as const)
+    : (['#FFF7ED', '#FBF5EE', '#F4F1ED'] as const);
 
   return (
-    <AppScreen backgroundColor="#FFFCF7" contentStyle={styles.content}>
+    <AppScreen
+      backgroundColor={colors.canvas}
+      contentStyle={styles.content}
+      scrollProps={{ contentInsetAdjustmentBehavior: 'never' }}>
       <Animated.View
         style={[
           styles.shell,
@@ -287,122 +343,149 @@ export default function SuccessScreen() {
             transform: [{ translateY: arrivalTranslateY }],
           },
         ]}>
-        <View style={styles.celebrationWrap}>
-          <Animated.View style={[styles.confettiDot, styles.confettiAnchor, { backgroundColor: colors.primary }, getConfettiMotion(-82, -42, -22)]} />
-          <Animated.View style={[styles.confettiDot, styles.confettiAnchor, { backgroundColor: '#D9B46F' }, getConfettiMotion(74, -34, 18)]} />
-          <Animated.View style={[styles.confettiDot, styles.confettiAnchor, { backgroundColor: colors.success }, getConfettiMotion(-94, 24, 30)]} />
-          <Animated.View style={[styles.confettiDot, styles.confettiAnchor, { backgroundColor: '#D9B46F' }, getConfettiMotion(88, 18, -28)]} />
-          <Animated.View style={[styles.confettiDot, styles.confettiAnchor, { backgroundColor: '#45B890' }, getConfettiMotion(-58, 48, -42)]} />
-          <Animated.View style={[styles.confettiDot, styles.confettiAnchor, { backgroundColor: '#D88755' }, getConfettiMotion(54, 42, 36)]} />
-          <Animated.View style={[styles.confettiDash, styles.confettiAnchor, { backgroundColor: colors.primary }, getConfettiMotion(-108, -8, -48)]} />
-          <Animated.View style={[styles.confettiDash, styles.confettiAnchor, { backgroundColor: '#D9B46F' }, getConfettiMotion(104, -2, 44)]} />
-          <Animated.View style={[styles.confettiDash, styles.confettiAnchor, { backgroundColor: '#D88755' }, getConfettiMotion(86, -54, -18)]} />
-          <Animated.View style={[styles.confettiDash, styles.confettiAnchor, { backgroundColor: '#45B890' }, getConfettiMotion(-78, -58, 26)]} />
-          <Animated.View style={[styles.confettiDash, styles.confettiAnchor, { backgroundColor: '#C9A052' }, getConfettiMotion(28, -74, 66)]} />
-          <Animated.View style={[styles.confettiDot, styles.confettiAnchor, { backgroundColor: '#59BFA3' }, getConfettiMotion(-22, -82, -52)]} />
+        <LinearGradient
+          colors={heroGradient}
+          end={{ x: 1, y: 1 }}
+          start={{ x: 0, y: 0 }}
+          style={[styles.hero, Shadows.hero, { borderColor: colors.line }]}>
+          <View style={[styles.heroEyebrow, { backgroundColor: colors.successSurface }]}>
+            <Ionicons color={colors.success} name="shield-checkmark" size={13} />
+            <Text style={[styles.heroEyebrowText, { color: colors.success }]}>
+              {isFirstClear ? 'FIRST CHECKPOINT CLEARED' : isSetupComplete ? 'SETUP COMPLETE' : 'PROOF VERIFIED'}
+            </Text>
+          </View>
 
-          <Animated.View style={[styles.medalOuter, { transform: [{ scale: medalScale }] }]}>
-            <View style={styles.medalInner}>
-              <Ionicons color="#FFFFFF" name="checkmark" size={54} />
-            </View>
-          </Animated.View>
-        </View>
+          <View style={styles.celebrationWrap}>
+            <Animated.View style={[styles.confettiDot, styles.confettiAnchor, { backgroundColor: colors.primary }, getConfettiMotion(-72, -30, -22)]} />
+            <Animated.View style={[styles.confettiDot, styles.confettiAnchor, { backgroundColor: colors.warning }, getConfettiMotion(68, -26, 18)]} />
+            <Animated.View style={[styles.confettiDot, styles.confettiAnchor, { backgroundColor: colors.success }, getConfettiMotion(-78, 20, 30)]} />
+            <Animated.View style={[styles.confettiDot, styles.confettiAnchor, { backgroundColor: colors.primary }, getConfettiMotion(76, 16, -28)]} />
+            <Animated.View style={[styles.confettiDash, styles.confettiAnchor, { backgroundColor: colors.primary }, getConfettiMotion(-90, -2, -48)]} />
+            <Animated.View style={[styles.confettiDash, styles.confettiAnchor, { backgroundColor: colors.warning }, getConfettiMotion(88, 0, 44)]} />
 
-        <View style={styles.titleBlock}>
-          <Text style={styles.title}>{title}</Text>
-          <Text style={styles.subtitle}>{subtitle}</Text>
-        </View>
+            <Animated.View
+              style={[
+                styles.medalOuter,
+                {
+                  backgroundColor: colors.primarySurface,
+                  borderColor: withAlpha(colors.primary, '42'),
+                  shadowColor: colors.primary,
+                  transform: [{ scale: medalScale }],
+                },
+              ]}>
+              <View style={[styles.medalInner, { backgroundColor: colors.primary }]}>
+                <Ionicons color={colors.primaryText} name="checkmark" size={42} />
+              </View>
+            </Animated.View>
+          </View>
 
-        <View style={styles.summaryCard}>
-          <SummaryRow icon="time-outline" label={isSetupComplete ? 'Scheduled' : 'Completed'} value={completionLabel} />
-          <View style={styles.summaryDivider} />
-          <SummaryRow
-            badgeLabel={isSetupComplete ? undefined : '+1'}
+          <View style={styles.titleBlock}>
+            <Text style={[styles.title, { color: colors.text }]}>{title}</Text>
+            <Text style={[styles.subtitle, { color: colors.textSoft }]}>{subtitle}</Text>
+          </View>
+        </LinearGradient>
+
+        <View style={styles.metricGrid}>
+          <SummaryMetric
+            colors={colors}
+            icon="checkmark-circle-outline"
+            label={isSetupComplete ? 'Scheduled' : 'Completed'}
+            value={completionLabel}
+          />
+          <SummaryMetric
+            colors={colors}
             icon="calendar-outline"
             label="Streak"
             value={isSetupComplete ? 'Starts after first clear' : streakValue}
           />
-          {!isSetupComplete ? (
-            <>
-              <View style={styles.summaryDivider} />
-              <SummaryRow icon="people-outline" label="Sharing" value={successState.shareConfirmation} />
-            </>
-          ) : null}
         </View>
 
-        <View style={styles.progressCard}>
+        <View style={[styles.progressCard, Shadows.card, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
           <View style={styles.progressHeader}>
-            <Text style={styles.progressTitle}>{"Today's progress"}</Text>
-            <Text style={styles.progressValue}>{progressCopy}</Text>
+            <View>
+              <Text style={[styles.progressEyebrow, { color: colors.textSoft }]}>TODAY</Text>
+              <Text style={[styles.progressTitle, { color: colors.text }]}>Your progress</Text>
+            </View>
+            <Text style={[styles.progressValue, { color: colors.primary }]}>{progressCopy}</Text>
           </View>
-          <View style={styles.progressTrack}>
-            <View style={[styles.progressFill, { width: progressWidth }]} />
+          <View style={[styles.progressTrack, { backgroundColor: colors.panelMuted }]}>
+            <View style={[styles.progressFill, { backgroundColor: colors.primary, width: progressWidth }]} />
           </View>
           {successState.failuresToday > 0 ? (
-            <Text style={styles.progressNote}>{successState.failuresToday} missed checkpoint still needs a reset.</Text>
+            <Text style={[styles.progressNote, { color: colors.warning }]}>
+              {successState.failuresToday} missed checkpoint still needs a reset.
+            </Text>
           ) : null}
         </View>
 
-        <View style={styles.nextCard}>
-          <View style={styles.nextIcon}>
-            <Ionicons color="#D79C38" name="sunny" size={22} />
+        <View style={[styles.nextCard, { backgroundColor: colors.panelMuted, borderColor: colors.line }]}>
+          <View style={[styles.nextIcon, { backgroundColor: colors.primarySurface }]}>
+            <Ionicons
+              color={colors.primary}
+              name={shouldPromptSecondCheckpoint ? 'add' : successState.nextAlarm ? 'notifications-outline' : 'checkmark-done'}
+              size={21}
+            />
           </View>
           <View style={styles.nextCopy}>
-            <Text style={styles.nextEyebrow}>Up next</Text>
-            <Text style={styles.nextTitle}>{nextTitle}</Text>
-            <Text style={styles.nextSubtitle}>{nextSubtitle}</Text>
+            <Text style={[styles.nextEyebrow, { color: colors.textSoft }]}>
+              {shouldPromptSecondCheckpoint ? 'NEXT STEP' : successState.nextAlarm ? 'NEXT REMINDER' : 'TODAY'}
+            </Text>
+            <Text style={[styles.nextTitle, { color: colors.text }]}>{nextTitle}</Text>
+            <Text style={[styles.nextSubtitle, { color: colors.textSoft }]}>{nextSubtitle}</Text>
           </View>
         </View>
+
+        {!isSetupComplete ? (
+          <View style={styles.privacyRow}>
+            <Ionicons color={colors.muted} name="lock-closed-outline" size={14} />
+            <Text style={[styles.privacyText, { color: colors.textSoft }]}>{successState.shareConfirmation}</Text>
+          </View>
+        ) : null}
 
         <View style={styles.actions}>
           <AppButton
-            label="Continue"
+            icon={shouldPromptSecondCheckpoint ? 'add' : 'arrow-forward'}
+            label={primaryLabel}
             onPress={() => {
-              router.replace(continueTarget);
+              router.replace(primaryTarget);
             }}
-            style={styles.continueButton}
-            textStyle={styles.primaryButtonText}
+            style={styles.primaryButton}
           />
-          <AppButton
-            label="View today"
-            onPress={() => {
-              router.replace('/');
-            }}
-            style={styles.secondaryButton}
-            textStyle={styles.secondaryButtonText}
-            variant="secondary"
-          />
+          {showAccountabilityAction ? (
+            <AppButton
+              icon="people-outline"
+              label="Add accountability (optional)"
+              onPress={() => {
+                router.replace('/circles');
+              }}
+              style={styles.secondaryButton}
+              variant="secondary"
+            />
+          ) : null}
         </View>
       </Animated.View>
     </AppScreen>
   );
 }
 
-function SummaryRow({
+function SummaryMetric({
+  colors,
   icon,
   label,
   value,
-  badgeLabel,
 }: {
+  colors: ReturnType<typeof getAppColors>;
   icon: keyof typeof Ionicons.glyphMap;
   label: string;
   value: string;
-  badgeLabel?: string;
 }) {
   return (
-    <View style={styles.summaryRow}>
-      <View style={styles.summaryIcon}>
-        <Ionicons color="#313946" name={icon} size={20} />
+    <View style={[styles.metricCard, Shadows.card, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
+      <View style={[styles.metricIcon, { backgroundColor: colors.primarySurface }]}>
+        <Ionicons color={colors.primary} name={icon} size={18} />
       </View>
-      <Text style={styles.summaryLabel}>{label}</Text>
-      <Text numberOfLines={1} style={styles.summaryValue}>
-        {value}
-      </Text>
-      {badgeLabel ? (
-        <View style={styles.summaryBadge}>
-          <Text style={styles.summaryBadgeText}>{badgeLabel}</Text>
-        </View>
-      ) : null}
+      <Text style={[styles.metricLabel, { color: colors.textSoft }]}>{label}</Text>
+      <Text numberOfLines={2} style={[styles.metricValue, { color: colors.text }]}>{value}</Text>
     </View>
   );
 }
@@ -410,41 +493,62 @@ function SummaryRow({
 const styles = StyleSheet.create({
   content: {
     flexGrow: 1,
-    justifyContent: 'center',
-    paddingHorizontal: Spacing.xl,
+    gap: 0,
+    paddingBottom: Spacing.xl,
+    paddingHorizontal: Spacing.lg,
+    paddingTop: Spacing.sm,
   },
   shell: {
-    gap: Spacing.lg,
+    gap: 14,
+  },
+  hero: {
+    alignItems: 'center',
+    borderRadius: Radius.xl,
+    borderWidth: 1,
+    gap: Spacing.sm,
+    overflow: 'hidden',
+    paddingBottom: Spacing.xl,
+    paddingHorizontal: Spacing.lg,
+    paddingTop: Spacing.lg,
+  },
+  heroEyebrow: {
+    alignItems: 'center',
+    alignSelf: 'center',
+    borderRadius: Radius.pill,
+    flexDirection: 'row',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  heroEyebrowText: {
+    ...TextPresets.eyebrow,
+    fontSize: 9,
+    lineHeight: 12,
   },
   celebrationWrap: {
     alignItems: 'center',
-    height: 122,
+    height: 90,
     justifyContent: 'center',
     position: 'relative',
+    width: '100%',
   },
   medalOuter: {
     alignItems: 'center',
-    backgroundColor: '#EAD4B3',
-    borderColor: '#F7E9D5',
     borderRadius: Radius.pill,
-    borderWidth: 8,
-    height: 96,
+    borderWidth: 6,
+    height: 82,
     justifyContent: 'center',
-    shadowColor: '#8A5A24',
-    shadowOffset: { width: 0, height: 12 },
-    shadowOpacity: 0.18,
-    shadowRadius: 20,
-    width: 96,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.2,
+    shadowRadius: 18,
+    width: 82,
   },
   medalInner: {
     alignItems: 'center',
-    backgroundColor: '#D1A05E',
-    borderColor: '#B98745',
     borderRadius: Radius.pill,
-    borderWidth: 2,
-    height: 66,
+    height: 58,
     justifyContent: 'center',
-    width: 66,
+    width: 58,
   },
   confettiDot: {
     borderRadius: Radius.pill,
@@ -454,7 +558,7 @@ const styles = StyleSheet.create({
   },
   confettiAnchor: {
     left: '50%',
-    top: 58,
+    top: 42,
   },
   confettiDotOne: {
     left: '32%',
@@ -508,24 +612,53 @@ const styles = StyleSheet.create({
   },
   titleBlock: {
     alignItems: 'center',
-    gap: 2,
+    gap: Spacing.xs,
+    maxWidth: 310,
   },
   title: {
-    color: '#101722',
-    fontFamily: Fonts.serif,
-    fontSize: 34,
-    fontWeight: '900',
-    letterSpacing: -0.6,
-    lineHeight: 40,
+    fontFamily: Fonts.rounded,
+    fontSize: 29,
+    fontWeight: '800',
+    letterSpacing: -0.7,
+    lineHeight: 35,
     textAlign: 'center',
   },
   subtitle: {
-    color: '#A57944',
-    fontFamily: Fonts.rounded,
-    fontSize: 15,
-    fontWeight: '800',
+    ...TextPresets.body,
+    fontSize: 14,
     lineHeight: 20,
     textAlign: 'center',
+  },
+  metricGrid: {
+    flexDirection: 'row',
+    gap: Spacing.sm,
+  },
+  metricCard: {
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    flex: 1,
+    gap: 3,
+    minHeight: 112,
+    padding: Spacing.md,
+  },
+  metricIcon: {
+    alignItems: 'center',
+    borderRadius: 10,
+    height: 34,
+    justifyContent: 'center',
+    marginBottom: 3,
+    width: 34,
+  },
+  metricLabel: {
+    ...TextPresets.eyebrow,
+    fontSize: 9,
+    lineHeight: 12,
+  },
+  metricValue: {
+    fontFamily: Fonts.rounded,
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 18,
   },
   summaryCard: {
     backgroundColor: '#FFFFFF',
@@ -583,45 +716,43 @@ const styles = StyleSheet.create({
     marginHorizontal: Spacing.md,
   },
   progressCard: {
-    backgroundColor: '#FFFFFF',
-    borderColor: '#EFE7DC',
-    borderRadius: 14,
+    borderRadius: Radius.md,
     borderWidth: 1,
-    gap: Spacing.md,
-    padding: Spacing.md,
+    gap: 10,
+    padding: 14,
   },
   progressHeader: {
     alignItems: 'center',
     flexDirection: 'row',
     justifyContent: 'space-between',
   },
+  progressEyebrow: {
+    ...TextPresets.eyebrow,
+    fontSize: 9,
+    lineHeight: 12,
+  },
   progressTitle: {
-    color: '#101722',
     fontFamily: Fonts.rounded,
-    fontSize: 14,
-    fontWeight: '900',
-    lineHeight: 18,
+    fontSize: 15,
+    fontWeight: '800',
+    lineHeight: 20,
   },
   progressValue: {
-    color: '#6B7280',
-    fontFamily: Fonts.sans,
+    fontFamily: Fonts.rounded,
     fontSize: 12,
-    fontWeight: '700',
+    fontWeight: '800',
     lineHeight: 16,
   },
   progressTrack: {
-    backgroundColor: '#F1EADF',
     borderRadius: Radius.pill,
-    height: 9,
+    height: 8,
     overflow: 'hidden',
   },
   progressFill: {
-    backgroundColor: '#D3A04E',
     borderRadius: Radius.pill,
     height: '100%',
   },
   progressNote: {
-    color: '#A26245',
     fontFamily: Fonts.sans,
     fontSize: 12,
     fontWeight: '700',
@@ -629,21 +760,20 @@ const styles = StyleSheet.create({
   },
   nextCard: {
     alignItems: 'center',
-    backgroundColor: '#FFFFFF',
-    borderColor: '#EFE7DC',
-    borderRadius: 14,
+    borderRadius: Radius.md,
     borderWidth: 1,
     flexDirection: 'row',
     gap: Spacing.md,
-    padding: Spacing.md,
+    minHeight: 78,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: 12,
   },
   nextIcon: {
     alignItems: 'center',
-    backgroundColor: '#FFF1D5',
-    borderRadius: Radius.pill,
-    height: 42,
+    borderRadius: Radius.sm,
+    height: 40,
     justifyContent: 'center',
-    width: 42,
+    width: 40,
   },
   nextCopy: {
     flex: 1,
@@ -651,49 +781,41 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   nextEyebrow: {
-    color: '#7D6A58',
-    fontFamily: Fonts.rounded,
-    fontSize: 12,
-    fontWeight: '800',
-    lineHeight: 16,
+    ...TextPresets.eyebrow,
+    fontSize: 9,
+    lineHeight: 12,
   },
   nextTitle: {
-    color: '#101722',
-    fontFamily: Fonts.rounded,
-    fontSize: 16,
-    fontWeight: '900',
-    lineHeight: 20,
-  },
-  nextSubtitle: {
-    color: '#6B7280',
-    fontFamily: Fonts.sans,
-    fontSize: 13,
-    fontWeight: '700',
-    lineHeight: 18,
-  },
-  actions: {
-    gap: Spacing.sm,
-  },
-  continueButton: {
-    backgroundColor: '#101827',
-    borderColor: '#101827',
-    borderRadius: 9,
-  },
-  secondaryButton: {
-    backgroundColor: '#FFFCF7',
-    borderColor: '#E6DDD0',
-    borderRadius: 9,
-  },
-  secondaryButtonText: {
-    color: '#101827',
     fontFamily: Fonts.rounded,
     fontSize: 15,
     fontWeight: '800',
+    lineHeight: 20,
   },
-  primaryButtonText: {
-    color: '#FFFFFF',
-    fontFamily: Fonts.rounded,
-    fontSize: 16,
-    fontWeight: '900',
+  nextSubtitle: {
+    ...TextPresets.body,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  privacyRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 6,
+    justifyContent: 'center',
+    minHeight: 20,
+  },
+  privacyText: {
+    ...TextPresets.body,
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  actions: {
+    gap: Spacing.sm,
+    paddingTop: 2,
+  },
+  primaryButton: {
+    borderRadius: Radius.md,
+  },
+  secondaryButton: {
+    borderRadius: Radius.md,
   },
 });

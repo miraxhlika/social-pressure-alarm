@@ -20,6 +20,7 @@ import {
   hydrateAlarmRuntimeForCurrentUser,
   readAlarmStore,
   rescheduleAlarm,
+  restartAlarmNow,
 } from '@/lib/alarms';
 import { getCheckpointRoutineCopy } from '@/lib/checkpoint-templates';
 import { getProgressSummary, ProgressSummary } from '@/lib/progress';
@@ -47,12 +48,6 @@ function getTomorrowRetryDate(alarm: Alarm) {
   tomorrow.setDate(tomorrow.getDate() + 1);
   tomorrow.setHours(alarm.hour, alarm.minute, 0, 0);
   return tomorrow;
-}
-
-function getRestartDate() {
-  const restartAt = new Date(Date.now() + 60 * 1000);
-  restartAt.setSeconds(0, 0);
-  return restartAt;
 }
 
 export default function MissedScreen() {
@@ -172,7 +167,7 @@ export default function MissedScreen() {
         return;
       }
 
-      await rescheduleAlarm(state.alarm, { scheduledFor: getRestartDate().toISOString() });
+      await restartAlarmNow(state.alarm);
       await trackRecovery('restart');
       router.replace(`/ringing?alarmId=${state.alarm.id}`);
     });
@@ -263,7 +258,7 @@ export default function MissedScreen() {
       <View style={styles.actionGroup}>
         <FlowSectionLabel>WHAT WOULD YOU LIKE TO DO?</FlowSectionLabel>
         <RecoveryRow
-          description={processingAction === 'restart' ? 'Starting scanner...' : 'Start a new timed attempt'}
+          description={processingAction === 'restart' ? 'Starting checkpoint...' : 'Start a fresh timed attempt immediately'}
           icon="refresh"
           isPrimary
           onPress={handleRestartNow}

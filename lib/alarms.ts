@@ -306,6 +306,7 @@ function normalizeRuntimeMetadata(rawValue: unknown): AlarmRuntimeMetadata | nul
     return null;
   }
 
+  const isPracticeRun = rawValue.isPracticeRun === true;
   const scheduledFor = getOptionalIsoString(rawValue.scheduledFor);
   const notificationStrategyKey = getTrimmedString(rawValue.notificationStrategyKey);
   const notificationIds = Array.isArray(rawValue.notificationIds)
@@ -314,11 +315,12 @@ function normalizeRuntimeMetadata(rawValue: unknown): AlarmRuntimeMetadata | nul
         .filter((value): value is string => Boolean(value))
     : [];
 
-  if (notificationIds.length === 0 && !scheduledFor) {
+  if (notificationIds.length === 0 && !scheduledFor && !isPracticeRun) {
     return null;
   }
 
   return {
+    isPracticeRun,
     notificationIds,
     scheduledFor,
     notificationStrategyKey,
@@ -713,13 +715,19 @@ function upsertCheckpointPreset(existingPresets: CheckpointPreset[], alarmLike: 
 }
 
 function stripAlarmRuntimeMetadata(alarm: Alarm): AlarmDefinition {
-  const { notificationIds: _notificationIds, notificationStrategyKey: _notificationStrategyKey, ...alarmDefinition } = alarm;
+  const {
+    isPracticeRun: _isPracticeRun,
+    notificationIds: _notificationIds,
+    notificationStrategyKey: _notificationStrategyKey,
+    ...alarmDefinition
+  } = alarm;
   return alarmDefinition;
 }
 
 function mergeAlarmWithRuntimeMetadata(alarm: AlarmDefinition, runtimeMetadata?: AlarmRuntimeMetadata): Alarm {
   return {
     ...alarm,
+    isPracticeRun: runtimeMetadata?.isPracticeRun,
     notificationIds: runtimeMetadata?.notificationIds,
   };
 }
@@ -1731,6 +1739,7 @@ export async function saveNewAlarm(alarm: Alarm) {
     alarms: {
       ...runtimeStore.alarms,
       [alarmToSave.id]: {
+        isPracticeRun: alarmToSave.isPracticeRun,
         notificationIds: alarmToSave.notificationIds,
         scheduledFor: alarmToSave.scheduledFor,
         notificationStrategyKey: alarmToSave.notificationStrategyKey,
@@ -1783,6 +1792,7 @@ export async function updateAlarm(updatedAlarm: Alarm) {
     alarms: {
       ...runtimeStore.alarms,
       [alarmToSave.id]: {
+        isPracticeRun: alarmToSave.isPracticeRun,
         notificationIds: alarmToSave.notificationIds,
         scheduledFor: alarmToSave.scheduledFor,
         notificationStrategyKey: alarmToSave.notificationStrategyKey,
@@ -1814,6 +1824,27 @@ export async function updateAlarm(updatedAlarm: Alarm) {
   }
 
   return alarmToSave;
+}
+
+export async function restartAlarmNow(alarmOrId: Alarm | string) {
+  const alarm = typeof alarmOrId === 'string' ? await getAlarmById(alarmOrId) : alarmOrId;
+
+  if (!alarm) {
+    return null;
+  }
+
+  const { cancelAlarmNotificationAsync } = await import('@/lib/notifications');
+  await cancelAlarmNotificationAsync(alarm.notificationIds);
+
+  return updateAlarm({
+    ...alarm,
+    isActive: true,
+    isPracticeRun: undefined,
+    lastOutcome: undefined,
+    notificationIds: undefined,
+    notificationStrategyKey: undefined,
+    scheduledFor: new Date().toISOString(),
+  });
 }
 
 export async function rescheduleAlarm(
@@ -1936,6 +1967,7 @@ export async function resolveAlarm(
     alarms: {
       ...runtimeStore.alarms,
       [updatedAlarm.id]: {
+        isPracticeRun: updatedAlarm.isPracticeRun,
         notificationIds: updatedAlarm.notificationIds,
         scheduledFor: updatedAlarm.scheduledFor,
         notificationStrategyKey: updatedAlarm.notificationStrategyKey,

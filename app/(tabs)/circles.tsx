@@ -35,6 +35,7 @@ import { StatusPill } from '@/components/ui/status-pill';
 import { Radius, Spacing, TextPresets, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { trackAnalyticsEvent } from '@/lib/analytics';
+import { ALARM_RUNTIME_CACHE_MAX_AGE_MS, hydrateAlarmRuntimeForCurrentUser } from '@/lib/alarms';
 import {
   buildCircleInviteUrl,
   createSocialCircle,
@@ -202,6 +203,8 @@ export default function CirclesScreen() {
   const [visibleActivityLimit, setVisibleActivityLimit] = useState(ACTIVITY_VISIBLE_STEP);
   const [nudgingEventId, setNudgingEventId] = useState<string | null>(null);
   const [nudgedEventIds, setNudgedEventIds] = useState<Set<string>>(() => new Set());
+  const [hasFirstClear, setHasFirstClear] = useState(false);
+  const [hasLoadedActivationGate, setHasLoadedActivationGate] = useState(false);
   const circleSheetAnimation = useRef(new Animated.Value(0)).current;
   const circleSheetKeyboardOffset = useRef(new Animated.Value(0)).current;
   const copyFeedbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -351,7 +354,31 @@ export default function CirclesScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      let isMounted = true;
+
+      const refreshActivationGate = async () => {
+        try {
+          const store = await hydrateAlarmRuntimeForCurrentUser({ maxAgeMs: ALARM_RUNTIME_CACHE_MAX_AGE_MS });
+          if (isMounted) {
+            setHasFirstClear(store.successHistory.length > 0);
+          }
+        } catch {
+          if (isMounted) {
+            setHasFirstClear(false);
+          }
+        } finally {
+          if (isMounted) {
+            setHasLoadedActivationGate(true);
+          }
+        }
+      };
+
+      void refreshActivationGate();
       void loadCircles();
+
+      return () => {
+        isMounted = false;
+      };
     }, [loadCircles])
   );
 
@@ -554,7 +581,7 @@ export default function CirclesScreen() {
       backgroundColor={colors.elevated}
       contentStyle={styles.screenContent}
       footer={
-        !configured || isLoading || !user || !isProfileComplete ? null : (
+        !configured || isLoading || !hasLoadedActivationGate || !hasFirstClear || !user || !isProfileComplete ? null : (
           <View style={styles.createCtaFooter}>
             <FlowFooterButton
               label="Create or join a circle"
@@ -577,6 +604,18 @@ export default function CirclesScreen() {
         />
       ) : isLoading ? (
         <LoadingBlock description="Loading your account session for circles." layout="list" title="Loading circles" />
+      ) : !hasLoadedActivationGate ? (
+        <LoadingBlock description="Checking whether your first clear is ready." layout="compact" title="Loading circles" />
+      ) : !hasFirstClear ? (
+        <EmptyState
+          actionLabel="Create a checkpoint"
+          description="Clear one checkpoint first. Circles unlock after you prove the loop works for you."
+          eyebrow="Circles"
+          icon="scan-outline"
+          onAction={() => router.push({ pathname: '/create', params: { returnTo: '/circles' } })}
+          title="Clear one checkpoint first"
+          tone="primary"
+        />
       ) : !user ? (
         <EmptyState
           actionLabel="Go to account"

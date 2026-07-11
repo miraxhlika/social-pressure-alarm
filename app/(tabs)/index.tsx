@@ -40,12 +40,14 @@ type HomeState = {
 
 type TimelineItem = {
   id: string;
+  alarmId: string;
   title: string;
   detail: string;
   statusLabel: string;
   tone: 'success' | 'danger' | 'warning' | 'primary';
   sortAt: number;
   timeLabel: string;
+  destination: 'ringing' | 'checkpoint' | 'missed';
 };
 
 function formatTodayTitleDate(day = new Date()) {
@@ -196,21 +198,25 @@ function getTodayTimeline(successHistory: SuccessHistoryEntry[], failureHistory:
   ]);
   const clearedItems = todayClears.map<TimelineItem>((entry) => ({
     id: `success-${entry.alarmId}-${entry.confirmedAt}`,
+    alarmId: entry.alarmId,
     title: entry.label,
     detail: `Checked in · ${entry.timeToScanSeconds}s`,
     statusLabel: 'Done',
     tone: 'success',
     sortAt: new Date(getSuccessOccurrenceTimestamp(entry)).getTime(),
     timeLabel: formatTimelineTime(getSuccessOccurrenceTimestamp(entry)),
+    destination: 'checkpoint',
   }));
   const missedItems = todayMisses.map<TimelineItem>((entry) => ({
     id: `miss-${entry.alarmId}-${entry.failedAt}`,
+    alarmId: entry.alarmId,
     title: entry.label,
     detail: 'Missed',
     statusLabel: 'Missed',
     tone: 'danger',
     sortAt: new Date(getFailureOccurrenceTimestamp(entry)).getTime(),
     timeLabel: formatTimelineTime(getFailureOccurrenceTimestamp(entry)),
+    destination: 'missed',
   }));
 
   const scheduledItems = alarms
@@ -220,15 +226,20 @@ function getTodayTimeline(successHistory: SuccessHistoryEntry[], failureHistory:
       return { alarm, scheduledDate };
     })
     .filter(({ scheduledDate }) => isSameLocalDay(scheduledDate.toISOString()))
-    .map<TimelineItem>(({ alarm, scheduledDate }) => ({
-      id: `scheduled-${alarm.id}`,
-      title: alarm.label,
-      detail: formatDueDistance(scheduledDate),
-      statusLabel: 'Soon',
-      tone: new Date().getTime() >= scheduledDate.getTime() ? 'warning' : 'primary',
-      sortAt: scheduledDate.getTime(),
-      timeLabel: formatTimelineTime(scheduledDate),
-    }));
+    .map<TimelineItem>(({ alarm, scheduledDate }) => {
+      const isDue = new Date().getTime() >= scheduledDate.getTime();
+      return {
+        id: `scheduled-${alarm.id}`,
+        alarmId: alarm.id,
+        title: alarm.label,
+        detail: formatDueDistance(scheduledDate),
+        statusLabel: 'Soon',
+        tone: isDue ? 'warning' : 'primary',
+        sortAt: scheduledDate.getTime(),
+        timeLabel: formatTimelineTime(scheduledDate),
+        destination: isDue ? 'ringing' : 'checkpoint',
+      };
+    });
 
   return [...clearedItems, ...missedItems, ...scheduledItems].sort((left, right) => left.sortAt - right.sortAt);
 }
@@ -504,7 +515,24 @@ export default function TodayScreen() {
             <View style={styles.timelineList}>
               {todayTimeline.length > 0 ? (
                 todayTimeline.map((item, index) => (
-                  <TimelineRow item={item} key={item.id} showLine={index < todayTimeline.length - 1} />
+                  <TimelineRow
+                    item={item}
+                    key={item.id}
+                    onPress={() => {
+                      if (item.destination === 'ringing') {
+                        router.push(`/ringing?alarmId=${item.alarmId}`);
+                        return;
+                      }
+
+                      if (item.destination === 'missed') {
+                        router.push(`/missed?alarmId=${item.alarmId}`);
+                        return;
+                      }
+
+                      router.push(`/checkpoint/${item.alarmId}`);
+                    }}
+                    showLine={index < todayTimeline.length - 1}
+                  />
                 ))
               ) : (
                 <Text style={[styles.emptyCopy, { color: colors.textSoft }]}>Proof events will appear here as the day unfolds.</Text>
@@ -527,9 +555,9 @@ export default function TodayScreen() {
             </View>
             <View style={[styles.progressDivider, { backgroundColor: colors.line }]} />
             <View style={styles.progressItem}>
-              <Text style={[styles.progressValue, { color: colors.text }]}>🔥 {currentRun.value}</Text>
+              <Text style={[styles.progressValue, { color: colors.text }]}>{currentRun.value}</Text>
               <Text style={[styles.progressLabel, { color: colors.textSoft }]}>
-                day streak
+                clear streak
               </Text>
             </View>
             <Ionicons color={colors.muted} name="chevron-forward" size={17} />
@@ -599,14 +627,26 @@ function UpcomingCheckpointCard({ alarm, onPress }: { alarm: Alarm; onPress: () 
   );
 }
 
-function TimelineRow({ item, showLine }: { item: TimelineItem; showLine: boolean }) {
+function TimelineRow({
+  item,
+  onPress,
+  showLine,
+}: {
+  item: TimelineItem;
+  onPress: () => void;
+  showLine: boolean;
+}) {
   const colors = getAppColors(useColorScheme());
   const dotColor =
     item.tone === 'success' ? colors.success : item.tone === 'danger' ? colors.danger : item.tone === 'warning' ? colors.warning : colors.primary;
   const isSuccess = item.tone === 'success';
 
   return (
-    <View style={styles.timelineRow}>
+    <Pressable
+      accessibilityLabel={`${item.title}. ${item.detail}. ${item.timeLabel}`}
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ pressed }) => [styles.timelineRow, pressed && styles.pressed]}>
       <View style={styles.timelineTimeColumn}>
         <Text style={[styles.timelineTime, { color: colors.textSoft }]}>{item.timeLabel}</Text>
       </View>
@@ -627,7 +667,8 @@ function TimelineRow({ item, showLine }: { item: TimelineItem; showLine: boolean
         <Text style={[styles.timelineTitle, { color: colors.text }]}>{item.title}</Text>
         <Text style={[styles.timelineDetail, { color: colors.textSoft }]}>{item.detail}</Text>
       </View>
-    </View>
+      <Ionicons color={colors.muted} name="chevron-forward" size={14} />
+    </Pressable>
   );
 }
 

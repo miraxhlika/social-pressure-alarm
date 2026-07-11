@@ -25,6 +25,9 @@ export type CheckpointLiveCopy = {
 
 export const DEFAULT_USE_CASE_TYPE: UseCaseType = 'custom';
 
+/** Reach window after the reminder fires — long enough to walk to a real checkpoint. */
+export const FIRST_RUN_GRACE_SECONDS = 600;
+
 const CHECKPOINT_TEMPLATE_MAP: Record<UseCaseType, CheckpointTemplate> = {
   wake_up: {
     id: 'wake_up',
@@ -33,7 +36,7 @@ const CHECKPOINT_TEMPLATE_MAP: Record<UseCaseType, CheckpointTemplate> = {
     description: 'Force yourself out of bed and all the way to a real checkpoint.',
     defaultLabel: 'Bathroom sink',
     repeatSchedule: 'weekdays',
-    gracePeriodSeconds: 180,
+    gracePeriodSeconds: 600,
     coaching: 'Best when the code is far enough away that you must stand up and move.',
   },
   medication: {
@@ -43,7 +46,7 @@ const CHECKPOINT_TEMPLATE_MAP: Record<UseCaseType, CheckpointTemplate> = {
     description: 'Make the proof happen where the medication actually lives.',
     defaultLabel: 'Medicine cabinet',
     repeatSchedule: 'daily',
-    gracePeriodSeconds: 180,
+    gracePeriodSeconds: 600,
     coaching: 'A scan only confirms a check-in near the medication; it does not confirm that a dose was taken.',
   },
   study_start: {
@@ -53,7 +56,7 @@ const CHECKPOINT_TEMPLATE_MAP: Record<UseCaseType, CheckpointTemplate> = {
     description: 'Turn “I should start” into a clear beginning with physical proof.',
     defaultLabel: 'Desk',
     repeatSchedule: 'weekdays',
-    gracePeriodSeconds: 180,
+    gracePeriodSeconds: 300,
     coaching: 'Place the code where starting work means you are really in position.',
   },
   deep_work: {
@@ -63,7 +66,7 @@ const CHECKPOINT_TEMPLATE_MAP: Record<UseCaseType, CheckpointTemplate> = {
     description: 'Protect focused work with a checkpoint that starts a serious block.',
     defaultLabel: 'Workstation',
     repeatSchedule: 'weekdays',
-    gracePeriodSeconds: 180,
+    gracePeriodSeconds: 300,
     coaching: 'Choose a checkpoint that marks the start of a no-distraction session.',
   },
   leave_home: {
@@ -73,8 +76,8 @@ const CHECKPOINT_TEMPLATE_MAP: Record<UseCaseType, CheckpointTemplate> = {
     description: 'Use the front door or bag area so leaving becomes the proof moment.',
     defaultLabel: 'Front door',
     repeatSchedule: 'weekdays',
-    gracePeriodSeconds: 120,
-    coaching: 'Short reach times work best when the checkpoint is at the exit.',
+    gracePeriodSeconds: 300,
+    coaching: 'Keep the code at the exit so leaving and scanning stay in one motion.',
   },
   workout: {
     id: 'workout',
@@ -83,7 +86,7 @@ const CHECKPOINT_TEMPLATE_MAP: Record<UseCaseType, CheckpointTemplate> = {
     description: 'Make the first physical step of training impossible to fake.',
     defaultLabel: 'Gym bag',
     repeatSchedule: 'daily',
-    gracePeriodSeconds: 180,
+    gracePeriodSeconds: 600,
     coaching: 'Use the bag, mat, or door so the checkpoint proves you started moving.',
   },
   custom: {
@@ -92,8 +95,8 @@ const CHECKPOINT_TEMPLATE_MAP: Record<UseCaseType, CheckpointTemplate> = {
     shortTitle: 'Custom',
     description: 'Start neutral, then tune the checkpoint for your own routine.',
     defaultLabel: '',
-    repeatSchedule: 'once',
-    gracePeriodSeconds: 120,
+    repeatSchedule: 'daily',
+    gracePeriodSeconds: 300,
     coaching: 'Useful when your commitment does not fit the standard templates yet.',
   },
 };
@@ -102,11 +105,20 @@ const VALID_USE_CASE_TYPES = new Set<UseCaseType>(Object.keys(CHECKPOINT_TEMPLAT
 
 export const CHECKPOINT_TEMPLATES = [
   CHECKPOINT_TEMPLATE_MAP.wake_up,
-  CHECKPOINT_TEMPLATE_MAP.study_start,
-  CHECKPOINT_TEMPLATE_MAP.deep_work,
   CHECKPOINT_TEMPLATE_MAP.leave_home,
+  CHECKPOINT_TEMPLATE_MAP.study_start,
   CHECKPOINT_TEMPLATE_MAP.workout,
+  CHECKPOINT_TEMPLATE_MAP.medication,
+  CHECKPOINT_TEMPLATE_MAP.deep_work,
   CHECKPOINT_TEMPLATE_MAP.custom,
+] as const;
+
+/** Curated first-run choices — keep the decision set small. */
+export const FIRST_CHECKPOINT_TEMPLATES = [
+  CHECKPOINT_TEMPLATE_MAP.wake_up,
+  CHECKPOINT_TEMPLATE_MAP.leave_home,
+  CHECKPOINT_TEMPLATE_MAP.study_start,
+  CHECKPOINT_TEMPLATE_MAP.workout,
 ] as const;
 
 export function normalizeUseCaseType(value: unknown): UseCaseType {
@@ -264,11 +276,11 @@ export function getCheckpointNotificationCopy(
       return typeof secondsRemaining === 'number'
         ? {
             title: `${windowLabel} left: wake-up proof`,
-            body: `Get to ${targetLabel} and scan now. This run only clears once you are out of bed.`,
+            body: `Open the app, get to ${targetLabel}, and scan now.`,
           }
         : {
             title: 'Wake-up checkpoint live',
-            body: `Stand up, get to ${targetLabel}, and scan within ${windowLabel}.`,
+            body: `Open the app, stand up, get to ${targetLabel}, and scan within ${windowLabel}.`,
           };
     case 'medication':
       return typeof secondsRemaining === 'number'

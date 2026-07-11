@@ -144,6 +144,21 @@ function getNotificationAlarmId(notification: Notifications.NotificationRequest)
   return typeof alarmId === 'string' ? alarmId : null;
 }
 
+async function scheduleLocalNotificationAsync(
+  request: Parameters<typeof Notifications.scheduleNotificationAsync>[0],
+  failureMessage: string
+) {
+  try {
+    return await Notifications.scheduleNotificationAsync(request);
+  } catch (error) {
+    if (__DEV__) {
+      console.error('[notifications] Native scheduling failed', error);
+    }
+
+    throw new Error(failureMessage);
+  }
+}
+
 async function cancelScheduledNotificationsForAlarmAsync(alarmId: string, preservedNotificationIds: string[] = []) {
   const preservedNotificationIdSet = new Set(preservedNotificationIds);
   const scheduledNotifications = await Notifications.getAllScheduledNotificationsAsync();
@@ -250,6 +265,18 @@ export async function scheduleAlarmNotificationAsync(
   const scheduledFor = options?.scheduledFor
     ? new Date(options.scheduledFor)
     : createNextAlarmDateForSchedule(alarm.hour, alarm.minute, alarm.repeatSchedule);
+
+  if (Number.isNaN(scheduledFor.getTime())) {
+    throw new Error('The checkpoint time is invalid. Choose a new time and try again.');
+  }
+
+  // iOS rejects past DATE triggers with a native NSInternalInconsistencyException
+  // whose trigger is null. Immediate in-app practice runs must bypass notification
+  // scheduling instead of trying to represent "now" as a local notification.
+  if (scheduledFor.getTime() <= Date.now()) {
+    throw new Error('The checkpoint time has already passed. Choose a future time and try again.');
+  }
+
   const triggerContent = getCheckpointNotificationCopy(
     alarm.useCaseType,
     alarm.label,
@@ -258,23 +285,26 @@ export async function scheduleAlarmNotificationAsync(
   const strategyKey = getAlarmNotificationStrategyKey(alarm, preferences, scheduledFor);
 
   const primaryNotificationIdentifier = getCheckpointNotificationId(alarm.id, scheduledFor, 'primary');
-  const primaryNotificationId = await Notifications.scheduleNotificationAsync({
-    identifier: primaryNotificationIdentifier,
-    content: {
-      title: `${triggerContent.title} · ${formatAlarmTime(scheduledFor.getHours(), scheduledFor.getMinutes())}`,
-      body: triggerContent.body,
-      sound: 'default',
-      data: {
-        alarmId: alarm.id,
-        kind: 'primary',
+  const primaryNotificationId = await scheduleLocalNotificationAsync(
+    {
+      identifier: primaryNotificationIdentifier,
+      content: {
+        title: `${triggerContent.title} · ${formatAlarmTime(scheduledFor.getHours(), scheduledFor.getMinutes())}`,
+        body: triggerContent.body,
+        sound: 'default',
+        data: {
+          alarmId: alarm.id,
+          kind: 'primary',
+        },
+      },
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.DATE,
+        date: scheduledFor,
+        channelId: ALARM_CHANNEL_ID,
       },
     },
-    trigger: {
-      type: Notifications.SchedulableTriggerInputTypes.DATE,
-      date: scheduledFor,
-      channelId: ALARM_CHANNEL_ID,
-    },
-  });
+    'This checkpoint reminder could not be scheduled. Choose a future time and try again.'
+  );
 
   const notificationIds = [primaryNotificationId];
   const reminderDelaySeconds = preferences.urgencyRemindersEnabled
@@ -292,25 +322,31 @@ export async function scheduleAlarmNotificationAsync(
     );
 
     const reminderNotificationIdentifier = getCheckpointNotificationId(alarm.id, scheduledFor, 'urgency');
-    const reminderNotificationId = await Notifications.scheduleNotificationAsync({
-      identifier: reminderNotificationIdentifier,
-      content: {
-        title: reminderContent.title,
-        body: reminderContent.body,
-        sound: 'default',
-        data: {
-          alarmId: alarm.id,
-          kind: 'urgency',
+    const reminderNotificationId = await scheduleLocalNotificationAsync(
+        {
+          identifier: reminderNotificationIdentifier,
+          content: {
+            title: reminderContent.title,
+            body: reminderContent.body,
+            sound: 'default',
+            data: {
+              alarmId: alarm.id,
+              kind: 'urgency',
+            },
+          },
+          trigger: {
+            type: Notifications.SchedulableTriggerInputTypes.DATE,
+            date: reminderDate,
+            channelId: ALARM_CHANNEL_ID,
+          },
         },
-      },
-      trigger: {
-        type: Notifications.SchedulableTriggerInputTypes.DATE,
-        date: reminderDate,
-        channelId: ALARM_CHANNEL_ID,
-      },
-    });
+        'The urgency follow-up could not be scheduled. Your main checkpoint reminder is still active.'
+      )
+      .catch(() => null);
 
-    notificationIds.push(reminderNotificationId);
+    if (reminderNotificationId) {
+      notificationIds.push(reminderNotificationId);
+    }
   }
 
   if (preferences.eveningReadinessRemindersEnabled && shouldScheduleEveningReadinessReminder(alarm, scheduledFor)) {
@@ -319,25 +355,31 @@ export async function scheduleAlarmNotificationAsync(
     if (readinessDate.getTime() > Date.now()) {
       const readinessContent = getCheckpointReadinessNotificationCopy(alarm.useCaseType, alarm.label);
       const readinessNotificationIdentifier = getCheckpointNotificationId(alarm.id, scheduledFor, 'readiness');
-      const readinessNotificationId = await Notifications.scheduleNotificationAsync({
-        identifier: readinessNotificationIdentifier,
-        content: {
-          title: readinessContent.title,
-          body: readinessContent.body,
-          sound: 'default',
-          data: {
-            alarmId: alarm.id,
-            kind: 'readiness',
+      const readinessNotificationId = await scheduleLocalNotificationAsync(
+          {
+            identifier: readinessNotificationIdentifier,
+            content: {
+              title: readinessContent.title,
+              body: readinessContent.body,
+              sound: 'default',
+              data: {
+                alarmId: alarm.id,
+                kind: 'readiness',
+              },
+            },
+            trigger: {
+              type: Notifications.SchedulableTriggerInputTypes.DATE,
+              date: readinessDate,
+              channelId: ALARM_CHANNEL_ID,
+            },
           },
-        },
-        trigger: {
-          type: Notifications.SchedulableTriggerInputTypes.DATE,
-          date: readinessDate,
-          channelId: ALARM_CHANNEL_ID,
-        },
-      });
+          'The evening preparation reminder could not be scheduled.'
+        )
+        .catch(() => null);
 
-      notificationIds.push(readinessNotificationId);
+      if (readinessNotificationId) {
+        notificationIds.push(readinessNotificationId);
+      }
     }
   }
 
@@ -390,21 +432,24 @@ export async function syncWeeklyReviewReminderAsync(
 
   const weeklyReviewDate = getNextWeeklyReviewDate();
   const weeklyReviewContent = getWeeklyReviewNotificationCopy();
-  const weeklyReviewNotificationId = await Notifications.scheduleNotificationAsync({
-    content: {
-      title: weeklyReviewContent.title,
-      body: weeklyReviewContent.body,
-      sound: 'default',
-      data: {
-        kind: 'weekly-review',
+  const weeklyReviewNotificationId = await scheduleLocalNotificationAsync(
+    {
+      content: {
+        title: weeklyReviewContent.title,
+        body: weeklyReviewContent.body,
+        sound: 'default',
+        data: {
+          kind: 'weekly-review',
+        },
+      },
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.DATE,
+        date: weeklyReviewDate,
+        channelId: ALARM_CHANNEL_ID,
       },
     },
-    trigger: {
-      type: Notifications.SchedulableTriggerInputTypes.DATE,
-      date: weeklyReviewDate,
-      channelId: ALARM_CHANNEL_ID,
-    },
-  });
+    'The weekly review reminder could not be scheduled.'
+  );
 
   await writeScopedStorageValue(WEEKLY_REVIEW_NOTIFICATION_STORAGE_KEY, weeklyReviewNotificationId);
 

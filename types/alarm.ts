@@ -96,6 +96,7 @@ export type AlarmDefinition = {
 };
 
 export type AlarmRuntimeMetadata = {
+  isPracticeRun?: boolean;
   notificationIds?: string[];
   scheduledFor?: string;
   notificationStrategyKey?: string;
