@@ -185,3 +185,18 @@ export async function clearMyRemoteAlarms() {
     throw error;
   }
 }
+
+export async function clearMyRemoteCheckpointData() {
+  const { client, user } = await getRequiredAlarmSyncContext();
+  const { error: historyError } = await client.from('alarm_events').delete().eq('user_id', user.id);
+
+  if (historyError) {
+    throw historyError;
+  }
+
+  const { error: alarmsError } = await client.from('user_alarms').delete().eq('user_id', user.id);
+
+  if (alarmsError) {
+    throw alarmsError;
+  }
+}

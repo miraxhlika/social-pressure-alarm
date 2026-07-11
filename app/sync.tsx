@@ -1,26 +1,38 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
-import { Alert, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { AppScreen } from '@/components/ui/app-screen';
 import { Fonts, Radius, Spacing, TextPresets, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { hydrateAlarmRuntimeForCurrentUser } from '@/lib/alarms';
 import { writeScopedStorageValue } from '@/lib/storage';
+import { useAppDialog } from '@/providers/app-dialog-provider';
 import { useSocialSession } from '@/providers/social-session-provider';
 
 const SYNC_CHOICE_STORAGE_KEY = 'social-pressure-alarm/sync-choice';
 
 export default function SyncScreen() {
   const router = useRouter();
+  const { alert } = useAppDialog();
+  const params = useLocalSearchParams<{ next?: string }>();
   const colors = getAppColors(useColorScheme());
   const { authProviderInFlight, configured, continueWithApple, continueWithGoogle } = useSocialSession();
   const supportsAppleSignIn = Platform.OS === 'ios';
   const isSyncing = Boolean(authProviderInFlight);
+  const nextRoute =
+    params.next === 'first-checkpoint'
+      ? ({ pathname: '/create', params: { onboardingMode: 'convert_demo' } } as const)
+      : ('/circles' as const);
 
   const handleEnableSync = async (provider: 'apple' | 'google') => {
     if (!configured) {
-      Alert.alert('Sync is not configured', 'Local checkpoints still work. Add backend configuration before enabling sync.');
+      await alert({
+        description: 'Local checkpoints still work, but account sync is unavailable in this build.',
+        icon: 'cloud-offline-outline',
+        title: 'Sync is unavailable',
+        tone: 'warning',
+      });
       return;
     }
 
@@ -31,15 +43,29 @@ export default function SyncScreen() {
         await continueWithGoogle();
       }
       await hydrateAlarmRuntimeForCurrentUser();
-      router.replace('/circles');
+      router.replace(nextRoute);
     } catch (error) {
-      Alert.alert('Unable to enable sync', error instanceof Error ? error.message : 'Sync could not be enabled right now.');
+      await alert({
+        description: error instanceof Error ? error.message : 'Sync could not be enabled right now.',
+        icon: 'cloud-offline-outline',
+        title: 'Unable to enable sync',
+        tone: 'warning',
+      });
     }
   };
 
   const handleKeepLocalOnly = async () => {
     await writeScopedStorageValue(SYNC_CHOICE_STORAGE_KEY, 'local-only');
-    router.replace('/');
+    router.replace(
+      params.next === 'first-checkpoint'
+        ? {
+            pathname: '/create',
+            params: {
+              onboardingMode: 'convert_demo',
+            },
+          }
+        : '/'
+    );
   };
 
   return (

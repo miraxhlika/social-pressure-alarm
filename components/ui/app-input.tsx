@@ -14,7 +14,20 @@ type AppInputProps = TextInputProps & {
 };
 
 export const AppInput = forwardRef<TextInput, AppInputProps>(function AppInput(
-  { label, helper, error, containerStyle, inputStyle, onBlur, onFocus, style: textInputStyle, tone = 'default', ...props },
+  {
+    accessibilityHint,
+    accessibilityLabel,
+    label,
+    helper,
+    error,
+    containerStyle,
+    inputStyle,
+    onBlur,
+    onFocus,
+    style: textInputStyle,
+    tone = 'default',
+    ...props
+  },
   ref
 ) {
   const colors = getAppColors(useColorScheme());
@@ -29,6 +42,8 @@ export const AppInput = forwardRef<TextInput, AppInputProps>(function AppInput(
     <View style={[styles.container, containerStyle]}>
       {label ? <Text style={[styles.label, { color: colors.text }]}>{label}</Text> : null}
       <TextInput
+        accessibilityHint={accessibilityHint ?? supportingText}
+        accessibilityLabel={accessibilityLabel ?? label}
         accessibilityState={{ disabled: props.editable === false }}
         onBlur={(event) => {
           setIsFocused(false);

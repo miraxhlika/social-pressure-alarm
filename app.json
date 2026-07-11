@@ -22,13 +22,12 @@
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#FFF7EB",
-        "foregroundImage": "./assets/images/icon.png"
+        "foregroundImage": "./assets/images/android-icon-foreground.png"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "permissions": [
-        "android.permission.CAMERA",
-        "android.permission.RECORD_AUDIO"
+        "android.permission.CAMERA"
       ],
       "package": "com.miraxhlika.socialpressurealarm"
     },
@@ -43,7 +42,8 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Allow $(PRODUCT_NAME) to access your camera so you can scan proof codes."
+          "cameraPermission": "Allow $(PRODUCT_NAME) to access your camera so you can scan proof codes.",
+          "recordAudioAndroid": false
         }
       ],
       [

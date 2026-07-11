@@ -1,5 +1,5 @@
 import { type ComponentProps, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Animated, Easing, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, Easing, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { BarcodeScanningResult, CameraView, useCameraPermissions } from 'expo-camera';
 import * as Haptics from 'expo-haptics';
@@ -22,6 +22,7 @@ import {
 } from '@/lib/alarms';
 import { getCheckpointLiveCopy } from '@/lib/checkpoint-templates';
 import { cancelAlarmNotificationAsync, scheduleAlarmNotificationAsync } from '@/lib/notifications';
+import { useAppDialog } from '@/providers/app-dialog-provider';
 import { Alarm } from '@/types/alarm';
 
 type CountdownTone = 'primary' | 'warning' | 'danger';
@@ -47,6 +48,23 @@ const PROOF_CODE_BARCODE_TYPES: CameraBarcodeTypes = [
 ];
 
 const SCAN_DEDUPE_WINDOW_MS = 3000;
+
+async function scheduleNextRecurringAlarm(alarm: Alarm) {
+  const nextScheduled = await scheduleAlarmNotificationAsync(alarm);
+
+  try {
+    await updateAlarm({
+      ...alarm,
+      isActive: true,
+      notificationIds: nextScheduled.notificationIds,
+      scheduledFor: nextScheduled.scheduledFor,
+      notificationStrategyKey: nextScheduled.strategyKey,
+    });
+  } catch (error) {
+    await cancelAlarmNotificationAsync(nextScheduled.notificationIds).catch(() => null);
+    throw error;
+  }
+}
 
 function getCriticalThreshold(gracePeriodSeconds: number) {
   return Math.min(15, Math.ceil(gracePeriodSeconds * 0.2));
@@ -96,6 +114,7 @@ async function triggerHaptic(kind: 'warning' | 'error' | 'success') {
 
 export default function RingingScreen() {
   const router = useRouter();
+  const { alert } = useAppDialog();
   const params = useLocalSearchParams<{ alarmId?: string }>();
   const colorScheme = useColorScheme();
   const colors = getAppColors(colorScheme);
@@ -274,13 +293,15 @@ export default function RingingScreen() {
       });
 
       if (alarm.repeatSchedule !== 'once' && resolvedAlarm) {
-        const nextScheduled = await scheduleAlarmNotificationAsync(resolvedAlarm);
-        await updateAlarm({
-          ...resolvedAlarm,
-          isActive: true,
-          notificationIds: nextScheduled.notificationIds,
-          scheduledFor: nextScheduled.scheduledFor,
-          notificationStrategyKey: nextScheduled.strategyKey,
+        await scheduleNextRecurringAlarm(resolvedAlarm).catch(async (error: unknown) => {
+          await alert({
+            description: error instanceof Error
+              ? `This clear was saved, but the next reminder was not scheduled. ${error.message}`
+              : 'This clear was saved, but the next reminder could not be scheduled.',
+            icon: 'notifications-off-outline',
+            title: 'Next checkpoint paused',
+            tone: 'warning',
+          });
         });
       }
 
@@ -299,11 +320,16 @@ export default function RingingScreen() {
       const errorMessage =
         error instanceof Error ? error.message : 'The checkpoint could not be confirmed.';
 
-      Alert.alert('Unable to confirm checkpoint', errorMessage);
+      await alert({
+        description: errorMessage,
+        icon: 'alert-circle-outline',
+        title: 'Unable to confirm checkpoint',
+        tone: 'danger',
+      });
     } finally {
       setIsSubmitting(false);
     }
-  }, [alarm, isSubmitting, router]);
+  }, [alarm, alert, isSubmitting, router]);
 
   const handleMissedAlarm = useCallback(async () => {
     if (!alarm || isSubmitting || hasResolvedRef.current) {
@@ -337,13 +363,15 @@ export default function RingingScreen() {
       }
 
       if (alarm.repeatSchedule !== 'once' && resolvedAlarm) {
-        const nextScheduled = await scheduleAlarmNotificationAsync(resolvedAlarm);
-        await updateAlarm({
-          ...resolvedAlarm,
-          isActive: true,
-          notificationIds: nextScheduled.notificationIds,
-          scheduledFor: nextScheduled.scheduledFor,
-          notificationStrategyKey: nextScheduled.strategyKey,
+        await scheduleNextRecurringAlarm(resolvedAlarm).catch(async (error: unknown) => {
+          await alert({
+            description: error instanceof Error
+              ? `This miss was saved, but the next reminder was not scheduled. ${error.message}`
+              : 'This miss was saved, but the next reminder could not be scheduled.',
+            icon: 'notifications-off-outline',
+            title: 'Next checkpoint paused',
+            tone: 'warning',
+          });
         });
       }
 
@@ -359,11 +387,16 @@ export default function RingingScreen() {
       const errorMessage =
         error instanceof Error ? error.message : 'The missed checkpoint could not be recorded.';
 
-      Alert.alert('Unable to record missed checkpoint', errorMessage);
+      await alert({
+        description: errorMessage,
+        icon: 'alert-circle-outline',
+        title: 'Unable to record missed checkpoint',
+        tone: 'danger',
+      });
     } finally {
       setIsSubmitting(false);
     }
-  }, [alarm, isSubmitting, router]);
+  }, [alarm, alert, isSubmitting, router]);
 
   const handleStartScanner = useCallback(async () => {
     if (isSubmitting) {
@@ -632,6 +665,7 @@ export default function RingingScreen() {
 
             <View style={styles.activeActions}>
               <Pressable
+                accessibilityLabel="Scan proof code"
                 accessibilityRole="button"
                 disabled={isSubmitting}
                 onPress={() => {
@@ -761,11 +795,11 @@ export default function RingingScreen() {
             </View>
 
             <Pressable
+              accessibilityLabel="Try scanning again"
               accessibilityRole="button"
               onPress={handleRetryScan}
               style={({ pressed }) => [styles.retryButton, pressed && styles.pressed]}>
-              <Ionicons color="#F7FAFC" name="refresh" size={18} />
-              <Text style={styles.retryButtonText}>Try scanning again</Text>
+              <Ionicons color="#F7FAFC" name="refresh" size={21} />
             </Pressable>
           </View>
         ) : null}
@@ -1123,19 +1157,12 @@ const styles = StyleSheet.create({
   },
   retryButton: {
     alignItems: 'center',
+    alignSelf: 'center',
     backgroundColor: '#0C1420',
     borderRadius: 14,
-    flexDirection: 'row',
-    gap: Spacing.sm,
+    height: 54,
     justifyContent: 'center',
-    minHeight: 54,
-  },
-  retryButtonText: {
-    color: '#F7FAFC',
-    fontFamily: Fonts.rounded,
-    fontSize: 15,
-    fontWeight: '800',
-    lineHeight: 20,
+    width: 54,
   },
   screenShell: {
     flex: 1,

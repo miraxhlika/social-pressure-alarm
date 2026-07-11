@@ -227,7 +227,7 @@ export default function MissedScreen() {
       <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
         <FlowTopBar
           leftAccessibilityLabel="Go back"
-          leftLabel="Back"
+          leftIcon="chevron-back"
           onLeftPress={() => router.back()}
           title="Missed Checkpoint"
         />
@@ -246,7 +246,7 @@ export default function MissedScreen() {
     <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
       <FlowTopBar
         leftAccessibilityLabel="Back to today"
-        leftLabel="Back"
+        leftIcon="chevron-back"
         onLeftPress={() => router.replace('/')}
         title="Missed Checkpoint"
       />
@@ -263,7 +263,7 @@ export default function MissedScreen() {
       <View style={styles.actionGroup}>
         <FlowSectionLabel>WHAT WOULD YOU LIKE TO DO?</FlowSectionLabel>
         <RecoveryRow
-          description={processingAction === 'restart' ? 'Starting scanner...' : 'Mark it clear and continue'}
+          description={processingAction === 'restart' ? 'Starting scanner...' : 'Start a new timed attempt'}
           icon="refresh"
           isPrimary
           onPress={handleRestartNow}

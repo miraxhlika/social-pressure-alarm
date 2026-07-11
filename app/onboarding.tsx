@@ -261,7 +261,12 @@ export default function OnboardingScreen() {
       mode: 'local',
       notificationPermission: notificationState,
     });
-    router.replace('/');
+    router.replace({
+      pathname: '/create',
+      params: {
+        onboardingMode: 'convert_demo',
+      },
+    });
   };
 
   const handleOptionalSignIn = async () => {
@@ -271,7 +276,12 @@ export default function OnboardingScreen() {
       mode: 'optional_sign_in',
       notificationPermission: notificationState,
     });
-    router.replace('/sync');
+    router.replace({
+      pathname: '/sync',
+      params: {
+        next: 'first-checkpoint',
+      },
+    });
   };
 
   const handleRequestNotifications = async () => {
@@ -345,10 +355,10 @@ function WelcomeStep({ onNext, width }: { onNext: () => void; width: number }) {
       <Header
         title={
           <>
-            Don’t dismiss it.{'\n'}Prove it.
+            Don’t dismiss it.{'\n'}Check in.
           </>
         }
-        description="Checkpoints only clear when you scan the QR code or barcode you've saved."
+        description="Clear a reminder by reaching a real place or object and scanning its saved code."
       />
 
       <View style={styles.heroArt}>
@@ -378,7 +388,7 @@ function HowItWorksStep({
 }) {
   return (
     <View style={[styles.screen, styles.howScreen, { width }]}>
-      <Header title="How it works" description="Three simple steps to prove you were really there." />
+      <Header title="How it works" description="Three simple steps to confirm you reached your checkpoint." />
 
       <View style={styles.howList}>
         {HOW_STEPS.map((step) => (
@@ -437,12 +447,12 @@ function PermissionsStep({
 }) {
   const isNotificationEnabled = isNotificationPermissionEnabled(notificationState);
   const isCameraEnabled = cameraState === 'granted';
-  const canCompleteOnboarding = isNotificationEnabled && isCameraEnabled;
-  const notificationBadge = isNotificationEnabled ? 'Enabled' : notificationState === 'denied' ? 'Denied' : 'Required';
-  const cameraBadge = isCameraEnabled ? 'Enabled' : cameraState === 'denied' ? 'Denied' : 'Required';
-  const requirementMessage = canCompleteOnboarding
+  const arePermissionsReady = isNotificationEnabled && isCameraEnabled;
+  const notificationBadge = isNotificationEnabled ? 'Enabled' : notificationState === 'denied' ? 'Denied' : 'Set up now';
+  const cameraBadge = isCameraEnabled ? 'Enabled' : cameraState === 'denied' ? 'Denied' : 'Set up now';
+  const requirementMessage = arePermissionsReady
     ? "You're ready. Sync is still optional."
-    : 'Notifications and camera access are required to run checkpoints on this device.';
+    : 'You can continue now. The app will ask again when you create and schedule your first checkpoint.';
 
   return (
     <View style={[styles.screen, { width }]}>
@@ -461,10 +471,10 @@ function PermissionsStep({
           badgeTone={notificationState === 'denied' ? 'danger' : isNotificationEnabled ? 'success' : 'warning'}
           description={
             notificationState === 'denied'
-              ? 'Notifications are required for checkpoint reminders. Enable them in system settings to continue.'
+              ? 'Enable notifications in system settings before scheduling a checkpoint.'
               : isNotificationEnabled
                 ? 'Checkpoint reminders are enabled.'
-                : 'Required so checkpoints can remind you at the scheduled time.'
+                : 'Needed when you schedule your first checkpoint.'
           }
           icon="notifications-outline"
           onPress={isNotificationEnabled ? undefined : onRequestNotifications}
@@ -475,10 +485,10 @@ function PermissionsStep({
           badgeTone={cameraState === 'denied' ? 'danger' : isCameraEnabled ? 'success' : 'warning'}
           description={
             cameraState === 'denied'
-              ? 'Camera access is required for scans. Enable it in system settings to continue.'
+              ? 'Enable camera access in system settings before linking a proof code.'
               : isCameraEnabled
                 ? 'Camera access is enabled for scans.'
-                : 'Required to scan QR codes and barcodes.'
+                : 'Needed when you link a QR code or barcode.'
           }
           icon="camera-outline"
           onPress={isCameraEnabled ? undefined : onRequestCamera}
@@ -497,26 +507,24 @@ function PermissionsStep({
 
       <View style={styles.actions}>
         <OnboardingButton
-          disabled={!canCompleteOnboarding}
           icon="chevron-forward"
-          label="Continue Locally"
+          label="Create First Checkpoint"
           onPress={onContinueLocally}
         />
         <OnboardingButton
-          disabled={!canCompleteOnboarding}
           icon="person"
           iconPosition="left"
-          label="Optional Sign In"
+          label="Sign In Before Setup"
           onPress={onOptionalSignIn}
           variant="secondary"
         />
-        <View style={[styles.controlNote, !canCompleteOnboarding ? styles.requirementNote : null]}>
+        <View style={[styles.controlNote, !arePermissionsReady ? styles.requirementNote : null]}>
           <Ionicons
-            color={canCompleteOnboarding ? palette.muted : palette.gold}
-            name={canCompleteOnboarding ? 'shield-checkmark-outline' : 'alert-circle-outline'}
+            color={arePermissionsReady ? palette.muted : palette.gold}
+            name={arePermissionsReady ? 'shield-checkmark-outline' : 'information-circle-outline'}
             size={18}
           />
-          <Text style={[styles.controlText, !canCompleteOnboarding ? styles.requirementText : null]}>{requirementMessage}</Text>
+          <Text style={[styles.controlText, !arePermissionsReady ? styles.requirementText : null]}>{requirementMessage}</Text>
         </View>
       </View>
     </View>

@@ -7,6 +7,7 @@ import { type ComponentProps, type RefObject, useCallback, useEffect, useMemo, u
 import { Alert, AppState, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { AppButton } from '@/components/ui/app-button';
+import { AppIconButton } from '@/components/ui/app-icon-button';
 import { AppInput } from '@/components/ui/app-input';
 import { AppScreen } from '@/components/ui/app-screen';
 import { StatusPill } from '@/components/ui/status-pill';
@@ -41,6 +42,7 @@ import { markOnboardingCompleted } from '@/lib/onboarding';
 import { listMySocialCircles } from '@/lib/social/circles';
 import { findCircleName, getSharedOutcomeLabel } from '@/lib/social/settings';
 import { SocialCircleSummary } from '@/lib/social/types';
+import { useAppDialog } from '@/providers/app-dialog-provider';
 import { useSocialSession } from '@/providers/social-session-provider';
 import {
   Alarm,
@@ -197,6 +199,7 @@ function buildSavedCodeId(payload: string) {
 
 export default function CreateAlarmScreen() {
   const router = useRouter();
+  const { alert } = useAppDialog();
   const params = useLocalSearchParams<{
     alarmId?: string;
     mode?: string;
@@ -239,7 +242,7 @@ export default function CreateAlarmScreen() {
   const [socialMode, setSocialMode] = useState<SocialMode>('private');
   const [selectedCircleId, setSelectedCircleId] = useState<string | null>(null);
   const [shareSuccesses, setShareSuccesses] = useState(false);
-  const [shareMisses, setShareMisses] = useState(true);
+  const [shareMisses, setShareMisses] = useState(false);
   const [socialCircles, setSocialCircles] = useState<SocialCircleSummary[]>([]);
   const [isLoadingSocialCircles, setIsLoadingSocialCircles] = useState(false);
   const [socialCirclesError, setSocialCirclesError] = useState('');
@@ -251,6 +254,8 @@ export default function CreateAlarmScreen() {
   const nameInputRef = useRef<TextInput | null>(null);
   const scannerTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastScannedPayloadRef = useRef<{ payload: string; purpose: ScannerPurpose; scannedAt: number } | null>(null);
+  const saveInFlightRef = useRef(false);
+  const newAlarmIdRef = useRef<string | null>(null);
   const [nameFocusRequest, setNameFocusRequest] = useState(0);
   const isEditMode = params.mode === 'edit' && typeof params.alarmId === 'string';
   const isReuseMode = params.mode === 'reuse' && typeof params.alarmId === 'string';
@@ -261,13 +266,13 @@ export default function CreateAlarmScreen() {
   const gracePreviewSeconds = Number.isFinite(parsedGracePeriod) ? Math.max(parsedGracePeriod, 0) : 0;
   const hasLinkedProofCode = expectedQrPayload.trim().length > 0;
   const shouldSaveFromDetailsStep = activeStep === 1 && hasLinkedProofCode;
-  let footerButtonLabel = 'Continue to Link Code';
-  let footerHelperCopy = 'You can edit these details anytime.';
+  let footerButtonLabel = 'Link proof code';
+  let footerHelperCopy = '';
 
   if (activeStep === 2) {
-    footerButtonLabel = 'Continue';
+    footerButtonLabel = hasLinkedProofCode ? (isSaving ? 'Saving...' : isEditMode ? 'Save Changes' : 'Save Checkpoint') : 'Link a Code';
     footerHelperCopy = hasLinkedProofCode
-      ? 'Code linked. Continue to review your checkpoint.'
+      ? 'Code linked. Save now or run an optional test scan first.'
       : 'Link a code before saving this checkpoint.';
   } else if (shouldSaveFromDetailsStep) {
     footerButtonLabel = isSaving ? 'Saving...' : isEditMode ? 'Save Changes' : 'Save Checkpoint';
@@ -432,7 +437,13 @@ export default function CreateAlarmScreen() {
       }
 
       const nextTime = createInitialTime();
-      nextTime.setHours(alarm.hour, alarm.minute, 0, 0);
+      const activeScheduledDate = alarm.isActive && alarm.scheduledFor ? new Date(alarm.scheduledFor) : null;
+
+      if (activeScheduledDate && !Number.isNaN(activeScheduledDate.getTime())) {
+        nextTime.setHours(activeScheduledDate.getHours(), activeScheduledDate.getMinutes(), 0, 0);
+      } else {
+        nextTime.setHours(alarm.hour, alarm.minute, 0, 0);
+      }
 
       setSourceAlarm(alarm);
       setTime(nextTime);
@@ -528,7 +539,9 @@ export default function CreateAlarmScreen() {
     setIsScannerVisible(false);
   }, []);
 
-  usePreventRemove(activeStep === 2, handleReturnToDetailsStep);
+  // Only intercept an actual attempt to leave an unfinished link-code step.
+  // Once saving starts, the success redirect must be allowed to remove this screen.
+  usePreventRemove(activeStep === 2 && !isSaving, handleReturnToDetailsStep);
 
   const handleOpenScanner = useCallback(async (mode: Extract<LinkMode, 'scanQr' | 'scanBarcode'>) => {
     setLinkMode(mode);
@@ -742,37 +755,32 @@ export default function CreateAlarmScreen() {
       if (nextMode === 'private') {
         setSelectedCircleId(null);
         setShareSuccesses(false);
-        setShareMisses(true);
+        setShareMisses(false);
         return;
       }
 
       setSelectedCircleId((currentCircleId) => currentCircleId ?? socialCircles[0]?.id ?? null);
-      setShareMisses((currentValue) => currentValue || !shareSuccesses);
     },
-    [shareSuccesses, socialCircles]
+    [socialCircles]
   );
 
   const handleShareMissesToggle = useCallback(() => {
-    setShareMisses((currentValue) => {
-      if (currentValue && !shareSuccesses) {
-        return currentValue;
-      }
-
-      return !currentValue;
-    });
-  }, [shareSuccesses]);
+    setShareMisses((currentValue) => !currentValue);
+  }, []);
 
   const handleShareSuccessesToggle = useCallback(() => {
-    setShareSuccesses((currentValue) => {
-      if (currentValue && !shareMisses) {
-        return currentValue;
-      }
-
-      return !currentValue;
-    });
-  }, [shareMisses]);
+    setShareSuccesses((currentValue) => !currentValue);
+  }, []);
 
   const handleSave = useCallback(async () => {
+    // State updates do not disable the button until React renders again. Guard the
+    // mutation synchronously so rapid presses cannot create two checkpoints.
+    if (saveInFlightRef.current) {
+      return;
+    }
+
+    saveInFlightRef.current = true;
+
     const trimmedLabel = label.trim();
     const trimmedPlaceObject = placeObject.trim();
     const trimmedNotes = notes.trim();
@@ -793,6 +801,7 @@ export default function CreateAlarmScreen() {
     }
 
     if (Object.keys(nextErrors).length > 0) {
+      saveInFlightRef.current = false;
       setErrors(nextErrors);
       if (nextErrors.label || nextErrors.gracePeriodSeconds) {
         setActiveStep(1);
@@ -805,13 +814,12 @@ export default function CreateAlarmScreen() {
 
     setErrors({});
 
-    const store = await readAlarmStore();
-
     setIsSaving(true);
 
     let scheduledNotificationIds: string[] | undefined;
 
     try {
+      const store = await readAlarmStore();
       const hasNotificationPermission = await ensureNotificationPermissionsAsync();
       const nextNotificationPermissionState = await getNotificationPermissionState().catch(
         () => (hasNotificationPermission ? 'granted' : 'denied') as NotificationPermissionState
@@ -825,7 +833,14 @@ export default function CreateAlarmScreen() {
         return;
       }
 
-      const alarmId = isEditMode && sourceAlarm ? sourceAlarm.id : `${Date.now()}`;
+      if (!newAlarmIdRef.current) {
+        newAlarmIdRef.current = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      }
+
+      // Keep one stable identity for this screen's creation attempt. If a later
+      // navigation regression retries the save, persistence can update the same
+      // checkpoint instead of inserting another one.
+      const alarmId = isEditMode && sourceAlarm ? sourceAlarm.id : newAlarmIdRef.current;
       const nextSocialSettings = buildAlarmSocialSettings({
         selectedCircleId,
         shareMisses,
@@ -901,11 +916,18 @@ export default function CreateAlarmScreen() {
 
       const errorMessage = error instanceof Error ? error.message : 'The checkpoint could not be saved right now.';
 
-      Alert.alert('Unable to save checkpoint', errorMessage);
+      await alert({
+        description: errorMessage,
+        icon: 'cloud-offline-outline',
+        title: 'Checkpoint not saved',
+        tone: 'warning',
+      });
     } finally {
+      saveInFlightRef.current = false;
       setIsSaving(false);
     }
   }, [
+    alert,
     expectedQrPayload,
     focusNameField,
     gracePeriodSeconds,
@@ -936,24 +958,34 @@ export default function CreateAlarmScreen() {
         <View style={styles.bottomFooter}>
           <FlowFooterButton
             disabled={isSaving}
-            icon={activeStep === 2 ? 'arrow-forward' : 'add'}
+            icon={activeStep === 2 && hasLinkedProofCode ? 'checkmark' : activeStep === 2 ? 'scan' : 'add'}
             label={footerButtonLabel}
-            onPress={activeStep === 2 ? handleReturnToDetailsStep : shouldSaveFromDetailsStep ? handleSave : handleContinueToLinkCode}
+            onPress={
+              activeStep === 2
+                ? hasLinkedProofCode
+                  ? handleSave
+                  : () => void handleOpenScanner(linkMode === 'scanBarcode' ? 'scanBarcode' : 'scanQr')
+                : shouldSaveFromDetailsStep
+                  ? handleSave
+                  : handleContinueToLinkCode
+            }
           />
-          <View style={styles.footerHelper}>
-            <Ionicons color={colors.muted} name="lock-closed-outline" size={12} />
-            <Text style={[styles.footerHelperText, { color: colors.textSoft }]}>{footerHelperCopy}</Text>
-          </View>
+          {footerHelperCopy ? (
+            <View style={styles.footerHelper}>
+              <Ionicons color={colors.muted} name="lock-closed-outline" size={12} />
+              <Text style={[styles.footerHelperText, { color: colors.textSoft }]}>{footerHelperCopy}</Text>
+            </View>
+          ) : null}
         </View>
       }
       keyboardAware
       scrollRef={scrollViewRef}>
       <FlowTopBar
         leftAccessibilityLabel={activeStep === 1 ? 'Close create checkpoint' : 'Back to create checkpoint'}
-        leftLabel={activeStep === 1 ? 'Close' : 'Back'}
+        leftIcon={activeStep === 1 ? 'close' : 'chevron-back'}
         onLeftPress={activeStep === 1 ? handleCancel : handleReturnToDetailsStep}
-        subtitle={activeStep === 1 ? 'Define what to prove, when, and where.' : 'Link the exact code that proves it.'}
-        title={activeStep === 1 ? (isEditMode ? 'Edit Checkpoint' : 'Create Checkpoint') : 'Link QR / Barcode'}
+        subtitle={activeStep === 1 ? 'Set it up in a minute.' : 'Choose the code that proves completion.'}
+        title={activeStep === 1 ? (isEditMode ? 'Edit checkpoint' : 'New checkpoint') : 'Proof code'}
       />
 
       {activeStep === 1 ? (
@@ -1127,7 +1159,7 @@ function CreateDetailsStep({
   };
   time: Date;
 }) {
-  const checkpointTitle = label.trim() || selectedTemplate.defaultLabel || 'Enter a clear name';
+  const [showMoreOptions, setShowMoreOptions] = useState(false);
   const selectedCircleName = findCircleName(socialCircles, selectedCircleId ?? undefined);
   const accountabilityValue =
     socialMode === 'circle' && selectedCircleId
@@ -1139,177 +1171,188 @@ function CreateDetailsStep({
       : 'Not shared';
 
   return (
-    <FlowPanel style={styles.formPanel}>
-      <CreateFieldRow
-        description={label.trim() ? 'Tap to rename' : 'Enter a clear name'}
-        expanded={expandedField === 'name'}
-        icon="clipboard-outline"
-        onPress={() => onFieldToggle('name')}
-        title="Checkpoint Name"
-        value={checkpointTitle}>
+    <View style={styles.detailsLayout}>
+      <View style={styles.nameSection}>
+        <Text style={[styles.fieldLabel, { color: colors.textSoft }]}>WHAT DO YOU NEED TO DO?</Text>
         <AppInput
           autoCapitalize="words"
           error={errors.label}
-          label="Name"
+          label="Checkpoint name"
           onChangeText={onLabelChange}
-          placeholder={selectedTemplate.defaultLabel || 'Morning Medication'}
+          placeholder={selectedTemplate.defaultLabel || 'Morning routine'}
           ref={nameInputRef}
           value={label}
         />
-      </CreateFieldRow>
+      </View>
 
-      <CreateFieldRow
-        description="Select a category"
-        expanded={expandedField === 'category'}
-        icon="calendar-clear-outline"
-        onPress={() => onFieldToggle('category')}
-        title="Category"
-        value={selectedTemplate.title}>
-        <View style={styles.optionGrid}>
-          {CHECKPOINT_TEMPLATES.map((template) => (
-            <OptionChip
-              key={template.id}
-              onPress={() => onTemplateSelect(template.id)}
-              selected={template.id === selectedTemplate.id}
-              title={template.shortTitle}
+      <FlowPanel style={styles.corePanel}>
+        <CreateFieldRow
+          description={`${getRepeatLabel(repeatSchedule)} · complete within ${formatGracePeriodLabel(gracePreviewSeconds || 0)}`}
+          expanded={expandedField === 'schedule'}
+          icon="alarm-outline"
+          onPress={() => onFieldToggle('schedule')}
+          title="When"
+          value={formattedTime}>
+          <View style={[styles.pickerPanel, { backgroundColor: colors.panelMuted }]}>
+            <Text style={[TextPresets.label, { color: colors.text }]}>Time</Text>
+            <DateTimePicker
+              display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+              mode="time"
+              onChange={onTimeChange}
+              value={time}
             />
-          ))}
-        </View>
-      </CreateFieldRow>
+          </View>
+          <Text style={[styles.editorLabel, { color: colors.textSoft }]}>REPEATS</Text>
+          <View style={styles.optionGrid}>
+            {REPEAT_OPTIONS.map((option) => (
+              <OptionChip
+                key={option.value}
+                onPress={() => onRepeatScheduleChange(option.value)}
+                selected={repeatSchedule === option.value}
+                title={option.label}
+              />
+            ))}
+          </View>
+        </CreateFieldRow>
 
-      <CreateFieldRow
-        description="One-time or recurring"
-        expanded={expandedField === 'schedule'}
-        icon="alarm-outline"
-        onPress={() => onFieldToggle('schedule')}
-        title="Schedule"
-        value={formattedTime}>
-        <View style={[styles.pickerPanel, { backgroundColor: colors.panelMuted }]}>
-          <Text style={[TextPresets.label, { color: colors.text }]}>Trigger time</Text>
-          <DateTimePicker
-            display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-            mode="time"
-            onChange={onTimeChange}
-            value={time}
+        <CreateFieldRow
+          description="How long you have after the alarm"
+          expanded={expandedField === 'window'}
+          icon="timer-outline"
+          onPress={() => onFieldToggle('window')}
+          title="Complete within"
+          value={formatGracePeriodLabel(gracePreviewSeconds || 0)}>
+          <View style={styles.optionGrid}>
+            {GRACE_PRESET_OPTIONS.map((option) => (
+              <OptionChip
+                key={option.value}
+                onPress={() => onGracePeriodChange(String(option.value))}
+                selected={Number.parseInt(gracePeriodSeconds, 10) === option.value}
+                title={option.label}
+              />
+            ))}
+          </View>
+          <AppInput
+            error={errors.gracePeriodSeconds}
+            helper="Minimum 15 seconds"
+            keyboardType="number-pad"
+            label="Custom seconds"
+            onChangeText={onGracePeriodChange}
+            placeholder="120"
+            value={gracePeriodSeconds}
           />
-        </View>
-      </CreateFieldRow>
+        </CreateFieldRow>
 
-      <CreateFieldRow
-        description="Set the time window"
-        expanded={expandedField === 'window'}
-        icon="time-outline"
-        onPress={() => onFieldToggle('window')}
-        title="Due Window"
-        value={formatGracePeriodLabel(gracePreviewSeconds || 0)}>
-        <View style={styles.optionGrid}>
-          {GRACE_PRESET_OPTIONS.map((option) => (
-            <OptionChip
-              description={option.help}
-              key={option.value}
-              onPress={() => onGracePeriodChange(String(option.value))}
-              selected={Number.parseInt(gracePeriodSeconds, 10) === option.value}
-              title={option.label}
+        <CreateFieldRow
+          description={hasLinkedProofCode ? 'Ready to use' : 'Scan a QR code or barcode'}
+          expanded={false}
+          icon={hasLinkedProofCode ? 'checkmark-circle-outline' : 'qr-code-outline'}
+          onPress={onExpectedCodePress}
+          title="Proof code"
+          value={hasLinkedProofCode ? (proofCodeVerifiedAt ? 'Tested' : 'Linked') : 'Add'} />
+      </FlowPanel>
+
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded: showMoreOptions }}
+        onPress={() => setShowMoreOptions((currentValue) => !currentValue)}
+        style={({ pressed }) => [
+          styles.moreOptionsButton,
+          { backgroundColor: colors.panelMuted },
+          pressed && styles.pressed,
+        ]}>
+        <View style={styles.moreOptionsIcon}>
+          <Ionicons color={colors.textSoft} name="options-outline" size={18} />
+        </View>
+        <View style={styles.moreOptionsCopy}>
+          <Text style={[styles.moreOptionsTitle, { color: colors.text }]}>More options</Text>
+          <Text style={[styles.moreOptionsDescription, { color: colors.textSoft }]}>
+            Category, sharing, location, and notes
+          </Text>
+        </View>
+        <Ionicons color={colors.muted} name={showMoreOptions ? 'chevron-up' : 'chevron-down'} size={18} />
+      </Pressable>
+
+      {showMoreOptions ? (
+        <FlowPanel style={styles.optionalPanel}>
+          <CreateFieldRow
+            description="Helps personalize defaults"
+            expanded={expandedField === 'category'}
+            icon="shapes-outline"
+            onPress={() => onFieldToggle('category')}
+            title="Category"
+            value={selectedTemplate.title}>
+            <View style={styles.optionGrid}>
+              {CHECKPOINT_TEMPLATES.map((template) => (
+                <OptionChip
+                  key={template.id}
+                  onPress={() => onTemplateSelect(template.id)}
+                  selected={template.id === selectedTemplate.id}
+                  title={template.shortTitle}
+                />
+              ))}
+            </View>
+          </CreateFieldRow>
+
+          <CreateFieldRow
+            description={accountabilityDescription}
+            expanded={expandedField === 'accountability'}
+            icon="people-outline"
+            onPress={() => onFieldToggle('accountability')}
+            title="Accountability"
+            value={accountabilityValue}>
+            <AccountabilityEditor
+              circles={socialCircles}
+              colors={colors}
+              error={socialCirclesError}
+              onOpenAccount={onOpenAccount}
+              onOpenCircles={onOpenCircles}
+              onSelectedCircleChange={onSelectedCircleChange}
+              onShareMissesToggle={onShareMissesToggle}
+              onShareSuccessesToggle={onShareSuccessesToggle}
+              onSocialModeChange={onSocialModeChange}
+              selectedCircleId={selectedCircleId}
+              sessionState={socialSessionState}
+              shareMisses={shareMisses}
+              shareSuccesses={shareSuccesses}
+              socialMode={socialMode}
             />
-          ))}
-        </View>
-        <AppInput
-          error={errors.gracePeriodSeconds}
-          helper="Use 15 seconds or more."
-          keyboardType="number-pad"
-          label="Custom seconds"
-          onChangeText={onGracePeriodChange}
-          placeholder="120"
-          value={gracePeriodSeconds}
-        />
-      </CreateFieldRow>
+          </CreateFieldRow>
 
-      <CreateFieldRow
-        description="How often it repeats"
-        expanded={expandedField === 'recurrence'}
-        icon="repeat-outline"
-        onPress={() => onFieldToggle('recurrence')}
-        title="Recurrence"
-        value={getRepeatLabel(repeatSchedule)}>
-        <View style={styles.optionGrid}>
-          {REPEAT_OPTIONS.map((option) => (
-            <OptionChip
-              description={option.help}
-              key={option.value}
-              onPress={() => onRepeatScheduleChange(option.value)}
-              selected={repeatSchedule === option.value}
-              title={option.label}
+          <CreateFieldRow
+            description="Where the proof code lives"
+            expanded={expandedField === 'place'}
+            icon="location-outline"
+            onPress={() => onFieldToggle('place')}
+            title="Place or object"
+            value={placeObject.trim() || 'Optional'}>
+            <AppInput
+              autoCapitalize="words"
+              label="Place or object"
+              onChangeText={onPlaceObjectChange}
+              placeholder="Mailbox, front door..."
+              value={placeObject}
             />
-          ))}
-        </View>
-      </CreateFieldRow>
+          </CreateFieldRow>
 
-      <CreateFieldRow
-        description={accountabilityDescription}
-        expanded={expandedField === 'accountability'}
-        icon="people-outline"
-        onPress={() => onFieldToggle('accountability')}
-        title="Accountability"
-        value={accountabilityValue}>
-        <AccountabilityEditor
-          circles={socialCircles}
-          colors={colors}
-          error={socialCirclesError}
-          onOpenAccount={onOpenAccount}
-          onOpenCircles={onOpenCircles}
-          onSelectedCircleChange={onSelectedCircleChange}
-          onShareMissesToggle={onShareMissesToggle}
-          onShareSuccessesToggle={onShareSuccessesToggle}
-          onSocialModeChange={onSocialModeChange}
-          selectedCircleId={selectedCircleId}
-          sessionState={socialSessionState}
-          shareMisses={shareMisses}
-          shareSuccesses={shareSuccesses}
-          socialMode={socialMode}
-        />
-      </CreateFieldRow>
-
-      <CreateFieldRow
-        description={hasLinkedProofCode ? 'Tap to review or test' : 'Link a QR / Barcode'}
-        expanded={false}
-        icon="link-outline"
-        onPress={onExpectedCodePress}
-        title="Link Code"
-        value={hasLinkedProofCode ? (proofCodeVerifiedAt ? 'Tested' : 'Linked') : 'Next'} />
-
-      <CreateFieldRow
-        description="Describe where or what"
-        expanded={expandedField === 'place'}
-        icon="location-outline"
-        onPress={() => onFieldToggle('place')}
-        title="Place / Object"
-        value={placeObject.trim() || 'Add'}>
-        <AppInput
-          autoCapitalize="words"
-          label="Place / Object"
-          onChangeText={onPlaceObjectChange}
-          placeholder="Mailbox - Front Door"
-          value={placeObject}
-        />
-      </CreateFieldRow>
-
-      <CreateFieldRow
-        description="Add any helpful details"
-        expanded={expandedField === 'notes'}
-        icon="document-text-outline"
-        onPress={() => onFieldToggle('notes')}
-        title="Notes (Optional)"
-        value={notes.trim() ? 'Added' : 'None'}>
-        <AppInput
-          label="Notes"
-          multiline
-          onChangeText={onNotesChange}
-          placeholder="Outside by the front entrance."
-          value={notes}
-        />
-      </CreateFieldRow>
-
-    </FlowPanel>
+          <CreateFieldRow
+            description="Anything useful to remember"
+            expanded={expandedField === 'notes'}
+            icon="document-text-outline"
+            onPress={() => onFieldToggle('notes')}
+            title="Notes"
+            value={notes.trim() ? 'Added' : 'Optional'}>
+            <AppInput
+              label="Notes"
+              multiline
+              onChangeText={onNotesChange}
+              placeholder="Outside by the front entrance."
+              value={notes}
+            />
+          </CreateFieldRow>
+        </FlowPanel>
+      ) : null}
+    </View>
   );
 }
 
@@ -1445,7 +1488,14 @@ function LinkCodeStep({
               </Text>
               <Text style={[TextPresets.body, styles.smallBody, { color: colors.textSoft }]}>Hold the saved code inside the frame.</Text>
             </View>
-            <AppButton label="Hide" onPress={onHideScanner} size="compact" variant="ghost" />
+            <AppIconButton
+              accessibilityHint="Closes the camera preview"
+              accessibilityLabel="Hide scanner"
+              icon="close"
+              onPress={onHideScanner}
+              size="compact"
+              variant="ghost"
+            />
           </View>
           {permissionGranted ? (
             <CameraView
@@ -1468,9 +1518,22 @@ function LinkCodeStep({
               <Text style={[styles.savedBadge, { backgroundColor: colors.successSurface, color: colors.success }]}>
                 {proofCodeVerifiedAt ? 'Tested' : selectedSavedCodePreset ? 'Saved code' : 'Saved'}
               </Text>
-              <AppButton label="Clear" onPress={onClearCode} size="compact" variant="danger" />
+              <AppIconButton
+                accessibilityHint="Removes the linked proof code from this checkpoint"
+                accessibilityLabel="Clear saved code"
+                icon="trash-outline"
+                onPress={onClearCode}
+                size="compact"
+                variant="danger"
+              />
             </View>
-            <QrMosaic payload={expectedQrPayload} />
+            <View style={[styles.linkedCodeIcon, { backgroundColor: colors.panelMuted }]}>
+              <Ionicons
+                color={colors.text}
+                name={linkMode === 'scanBarcode' ? 'barcode-outline' : 'qr-code-outline'}
+                size={44}
+              />
+            </View>
             <Text style={[styles.codeId, { color: colors.text }]}>ID: {buildSavedCodeId(expectedQrPayload)}</Text>
             <Text style={[styles.codeTimestamp, { color: colors.textSoft }]}>
               {selectedSavedCodePreset
@@ -1794,52 +1857,6 @@ function LinkModeTile({
   );
 }
 
-function QrMosaic({ payload }: { payload: string }) {
-  const colors = getAppColors(useColorScheme());
-  const cells = useMemo(() => createQrCells(payload), [payload]);
-
-  return (
-    <View style={[styles.qrMosaic, { backgroundColor: colors.elevated }]}>
-      {cells.map((isActive, index) => (
-        <View
-          key={index}
-          style={[
-            styles.qrCell,
-            {
-              backgroundColor: isActive ? colors.text : 'transparent',
-            },
-          ]}
-        />
-      ))}
-    </View>
-  );
-}
-
-function createQrCells(payload: string) {
-  const size = 13;
-  let seed = 0;
-
-  for (let index = 0; index < payload.length; index += 1) {
-    seed = (seed * 33 + payload.charCodeAt(index)) >>> 0;
-  }
-
-  return Array.from({ length: size * size }).map((_, index) => {
-    const row = Math.floor(index / size);
-    const column = index % size;
-    const inTopLeft = row < 4 && column < 4;
-    const inTopRight = row < 4 && column > size - 5;
-    const inBottomLeft = row > size - 5 && column < 4;
-
-    if (inTopLeft || inTopRight || inBottomLeft) {
-      const localRow = row < 4 ? row : row - (size - 4);
-      const localColumn = column < 4 ? column : column - (size - 4);
-      return localRow === 0 || localRow === 3 || localColumn === 0 || localColumn === 3 || (localRow === 2 && localColumn === 2);
-    }
-
-    return ((seed >> ((row + column) % 24)) + row * 7 + column * 11) % 3 !== 0;
-  });
-}
-
 function alertNotificationPermission(onOpenSettings: () => void) {
   Alert.alert(
     'Turn notifications back on',
@@ -1859,9 +1876,9 @@ function alertNotificationPermission(onOpenSettings: () => void) {
 
 const styles = StyleSheet.create({
   screenContent: {
-    gap: 10,
+    gap: Spacing.md,
     paddingHorizontal: Spacing.lg,
-    paddingTop: 2,
+    paddingTop: Spacing.xs,
   },
   modeRow: {
     flexDirection: 'row',
@@ -1873,6 +1890,66 @@ const styles = StyleSheet.create({
     borderColor: 'transparent',
     gap: 7,
     padding: 0,
+  },
+  detailsLayout: {
+    gap: Spacing.md,
+  },
+  nameSection: {
+    gap: Spacing.sm,
+    paddingHorizontal: Spacing.xs,
+    paddingTop: Spacing.sm,
+  },
+  fieldLabel: {
+    ...TextPresets.eyebrow,
+    fontSize: 10,
+    letterSpacing: 0.55,
+    lineHeight: 14,
+  },
+  corePanel: {
+    backgroundColor: 'transparent',
+    borderColor: 'transparent',
+    gap: 6,
+    padding: 0,
+  },
+  optionalPanel: {
+    backgroundColor: 'transparent',
+    borderColor: 'transparent',
+    gap: 6,
+    padding: 0,
+  },
+  editorLabel: {
+    ...TextPresets.eyebrow,
+    fontSize: 10,
+    lineHeight: 14,
+  },
+  moreOptionsButton: {
+    alignItems: 'center',
+    borderRadius: Radius.md,
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    minHeight: 62,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+  },
+  moreOptionsIcon: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 28,
+  },
+  moreOptionsCopy: {
+    flex: 1,
+    gap: 1,
+    minWidth: 0,
+  },
+  moreOptionsTitle: {
+    ...TextPresets.label,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  moreOptionsDescription: {
+    ...TextPresets.body,
+    fontSize: 11,
+    lineHeight: 15,
   },
   fieldBlock: {
     gap: 7,
@@ -1992,18 +2069,12 @@ const styles = StyleSheet.create({
     gap: Spacing.sm,
     padding: Spacing.lg,
   },
-  qrMosaic: {
-    borderRadius: Radius.sm,
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    height: 118,
-    padding: 8,
-    width: 118,
-  },
-  qrCell: {
-    height: 6,
-    margin: 1,
-    width: 6,
+  linkedCodeIcon: {
+    alignItems: 'center',
+    borderRadius: Radius.md,
+    height: 96,
+    justifyContent: 'center',
+    width: 96,
   },
   codeId: {
     fontFamily: Fonts.rounded,

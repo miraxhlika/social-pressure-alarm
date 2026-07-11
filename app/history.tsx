@@ -8,23 +8,18 @@ import { EmptyState } from '@/components/ui/empty-state';
 import {
   FlowIconBadge,
   FlowPanel,
-  FlowSectionLabel,
   FlowTopBar,
 } from '@/components/ui/flow-primitives';
 import {
-  FlowCalendarDots,
-  FlowDelta,
-  FlowLegend,
-  FlowMetricCard,
   FlowProgressBar,
-  FlowTrendLine,
 } from '@/components/ui/flow-visuals';
 import { LoadingBlock } from '@/components/ui/loading-block';
-import { Fonts, Radius, Spacing, TextPresets, getAppColors, withAlpha } from '@/constants/theme';
+import { Fonts, Radius, Spacing, TextPresets, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { hydrateAlarmRuntimeForCurrentUser, readAlarmStore } from '@/lib/alarms';
-import { getProgressSummary, ProgressSummary, UseCaseReliability } from '@/lib/progress';
-import { AlarmStore, FailureHistoryEntry, SuccessHistoryEntry } from '@/types/alarm';
+import { getUseCaseLabel } from '@/lib/checkpoint-templates';
+import { getProgressSummary, ProgressSummary } from '@/lib/progress';
+import { AlarmStore, UseCaseType } from '@/types/alarm';
 
 type HistoryState = {
   store: AlarmStore | null;
@@ -32,8 +27,6 @@ type HistoryState = {
 };
 
 type AnalyticPeriod = 'thisWeek' | 'lastWeek' | 'thisMonth';
-type CalendarPeriod = 'thisMonth' | 'lastMonth';
-type CalendarDotTone = 'high' | 'medium' | 'low' | 'missed' | 'empty' | 'blank';
 type PeriodRange = {
   start: Date;
   end: Date;
@@ -48,6 +41,13 @@ type PeriodStats = {
   clearPoints: number[];
   missPoints: number[];
 };
+type PeriodCategory = {
+  attempts: number;
+  completionRate: number;
+  label: string;
+  successes: number;
+  useCaseType: UseCaseType;
+};
 
 const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 const ANALYTIC_PERIOD_LABELS: Record<AnalyticPeriod, string> = {
@@ -55,12 +55,7 @@ const ANALYTIC_PERIOD_LABELS: Record<AnalyticPeriod, string> = {
   thisMonth: 'This Month',
   thisWeek: 'This Week',
 };
-const CALENDAR_PERIOD_LABELS: Record<CalendarPeriod, string> = {
-  lastMonth: 'Last Month',
-  thisMonth: 'This Month',
-};
 const ANALYTIC_PERIOD_OPTIONS: AnalyticPeriod[] = ['thisWeek', 'lastWeek', 'thisMonth'];
-const CALENDAR_PERIOD_OPTIONS: CalendarPeriod[] = ['thisMonth', 'lastMonth'];
 const EMPTY_PERIOD_STATS: PeriodStats = {
   attempts: 0,
   clearPoints: [0, 0, 0, 0, 0, 0, 0],
@@ -141,21 +136,6 @@ function getPreviousPeriodRange(range: PeriodRange): PeriodRange {
   };
 }
 
-function getCalendarMonthStart(period: CalendarPeriod, day = new Date()) {
-  const thisMonthStart = getStartOfMonth(day);
-  return period === 'lastMonth' ? addMonths(thisMonthStart, -1) : thisMonthStart;
-}
-
-function isSameLocalDay(leftTimestamp: string, right: Date) {
-  const left = new Date(leftTimestamp);
-
-  return (
-    left.getFullYear() === right.getFullYear() &&
-    left.getMonth() === right.getMonth() &&
-    left.getDate() === right.getDate()
-  );
-}
-
 function isInRange(timestamp: string, range: PeriodRange) {
   const time = new Date(timestamp).getTime();
   return time >= range.start.getTime() && time < range.end.getTime();
@@ -191,48 +171,35 @@ function getPeriodStats(store: AlarmStore, range: PeriodRange): PeriodStats {
   };
 }
 
-function getMonthCalendarDots(
-  successes: SuccessHistoryEntry[],
-  failures: FailureHistoryEntry[],
-  period: CalendarPeriod,
-  day = new Date()
-): CalendarDotTone[] {
-  const monthStart = getCalendarMonthStart(period, day);
-  const nextMonthStart = addMonths(monthStart, 1);
-  const daysInMonth = Math.round((nextMonthStart.getTime() - monthStart.getTime()) / (24 * 60 * 60 * 1000));
-  const leadingBlankDays = monthStart.getDay();
-  const totalCells = leadingBlankDays + daysInMonth <= 35 ? 35 : 42;
+function getPeriodCategories(store: AlarmStore, range: PeriodRange): PeriodCategory[] {
+  const alarmTypes = new Map(store.alarms.map((alarm) => [alarm.id, alarm.useCaseType]));
+  const groups = new Map<UseCaseType, { attempts: number; successes: number }>();
 
-  return Array.from({ length: totalCells }, (_, index) => {
-    const dayOfMonth = index - leadingBlankDays + 1;
+  const recordAttempt = (alarmId: string, didSucceed: boolean) => {
+    const useCaseType = alarmTypes.get(alarmId) ?? 'custom';
+    const current = groups.get(useCaseType) ?? { attempts: 0, successes: 0 };
+    groups.set(useCaseType, {
+      attempts: current.attempts + 1,
+      successes: current.successes + (didSucceed ? 1 : 0),
+    });
+  };
 
-    if (dayOfMonth < 1 || dayOfMonth > daysInMonth) {
-      return 'blank';
-    }
+  store.successHistory
+    .filter((entry) => isInRange(entry.confirmedAt, range))
+    .forEach((entry) => recordAttempt(entry.alarmId, true));
+  store.failureHistory
+    .filter((entry) => isInRange(entry.failedAt, range))
+    .forEach((entry) => recordAttempt(entry.alarmId, false));
 
-    const date = new Date(monthStart);
-    date.setDate(dayOfMonth);
-    const clearCount = successes.filter((entry) => isSameLocalDay(entry.confirmedAt, date)).length;
-    const missCount = failures.filter((entry) => isSameLocalDay(entry.failedAt, date)).length;
-
-    if (missCount > 0 && clearCount === 0) {
-      return 'missed';
-    }
-
-    if (clearCount >= 2) {
-      return 'high';
-    }
-
-    if (clearCount === 1 && missCount === 0) {
-      return 'medium';
-    }
-
-    if (clearCount > 0 || missCount > 0) {
-      return 'low';
-    }
-
-    return 'empty';
-  });
+  return [...groups.entries()]
+    .map(([useCaseType, stats]) => ({
+      ...stats,
+      completionRate: Math.round((stats.successes / stats.attempts) * 100),
+      label: getUseCaseLabel(useCaseType),
+      useCaseType,
+    }))
+    .sort((left, right) => right.attempts - left.attempts || left.completionRate - right.completionRate)
+    .slice(0, 4);
 }
 
 function getInsight(summary: ProgressSummary | null) {
@@ -267,28 +234,6 @@ function getReliabilityDelta(current: PeriodStats, previous: PeriodStats, compar
   };
 }
 
-function getCountDelta(currentCount: number, previous: PeriodStats, previousCount: number, comparisonLabel: string, lowerIsBetter = false) {
-  if (previous.attempts === 0) {
-    return {
-      tone: 'warning' as const,
-      value: currentCount === 0 ? 'No scans in this period yet' : 'First baseline for this period',
-    };
-  }
-
-  const delta = currentCount - previousCount;
-
-  if (delta === 0) {
-    return { tone: 'warning' as const, value: `No change vs ${comparisonLabel}` };
-  }
-
-  const isPositiveOutcome = lowerIsBetter ? delta < 0 : delta > 0;
-
-  return {
-    tone: isPositiveOutcome ? ('success' as const) : ('danger' as const),
-    value: `${Math.abs(delta)} ${delta > 0 ? 'more' : 'fewer'} than ${comparisonLabel}`,
-  };
-}
-
 export default function HistoryScreen() {
   const router = useRouter();
   const colors = getAppColors(useColorScheme());
@@ -296,8 +241,6 @@ export default function HistoryScreen() {
   const loadHistoryRequestRef = useRef(0);
   const [isLoading, setIsLoading] = useState(true);
   const [analyticPeriod, setAnalyticPeriod] = useState<AnalyticPeriod>('thisWeek');
-  const [calendarPeriod, setCalendarPeriod] = useState<CalendarPeriod>('thisMonth');
-  const [openDropdown, setOpenDropdown] = useState<'analytics' | 'calendar' | null>(null);
   const [state, setState] = useState<HistoryState>({ store: null, summary: null });
 
   const loadHistory = useCallback(async () => {
@@ -338,17 +281,28 @@ export default function HistoryScreen() {
     () => (state.store ? getPeriodStats(state.store, previousPeriodRange) : EMPTY_PERIOD_STATS),
     [previousPeriodRange, state.store]
   );
-  const calendarDots = useMemo(
-    () => (state.store ? getMonthCalendarDots(state.store.successHistory, state.store.failureHistory, calendarPeriod) : []),
-    [calendarPeriod, state.store]
+  const periodCategories = useMemo(
+    () => (state.store ? getPeriodCategories(state.store, periodRange) : []),
+    [periodRange, state.store]
   );
   const reliability = periodStats.completionRate;
   const clears = periodStats.successes;
   const misses = periodStats.failures;
   const reliabilityDelta = getReliabilityDelta(periodStats, previousPeriodStats, periodRange.comparisonLabel);
-  const clearDelta = getCountDelta(clears, previousPeriodStats, previousPeriodStats.successes, periodRange.comparisonLabel);
-  const missDelta = getCountDelta(misses, previousPeriodStats, previousPeriodStats.failures, periodRange.comparisonLabel, true);
-  const categoryPerformance = state.summary?.useCaseReliability.slice(0, 3) ?? [];
+  const averageClearSeconds = useMemo(() => {
+    if (!state.store) {
+      return null;
+    }
+
+    const clearTimes = state.store.successHistory
+      .filter((entry) => isInRange(entry.confirmedAt, periodRange))
+      .map((entry) => entry.timeToScanSeconds);
+
+    return clearTimes.length === 0
+      ? null
+      : Math.round(clearTimes.reduce((total, value) => total + value, 0) / clearTimes.length);
+  }, [periodRange, state.store]);
+  const recoveryCategory = analyticPeriod === 'thisWeek' ? state.summary?.weeklyReview.recoveryUseCase ?? null : null;
 
   if (isLoading) {
     return (
@@ -367,9 +321,9 @@ export default function HistoryScreen() {
       <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
         <FlowTopBar
           leftAccessibilityLabel="Go back"
-          leftLabel="Back"
+          leftIcon="chevron-back"
           onLeftPress={() => router.back()}
-          title="History & Analytics"
+          title="Progress"
         />
         <EmptyState
           actionLabel="Back to today"
@@ -386,241 +340,502 @@ export default function HistoryScreen() {
     <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
       <FlowTopBar
         leftAccessibilityLabel="Go back"
-        leftLabel="Back"
+        leftIcon="chevron-back"
         onLeftPress={() => router.back()}
-        title="History & Analytics"
+        title="Progress"
       />
 
-      <FlowPanel style={[styles.reliabilityPanel, openDropdown === 'analytics' && styles.dropdownPanelOpen]}>
-        <View style={styles.panelHeader}>
-          <FlowSectionLabel>WEEKLY RELIABILITY</FlowSectionLabel>
-          <Pressable
-            accessibilityLabel="Change analytics period"
-            accessibilityRole="button"
-            onPress={() => setOpenDropdown((current) => (current === 'analytics' ? null : 'analytics'))}
-            style={({ pressed }) => [styles.headerFilter, pressed && styles.pressed]}>
-            <Text style={[styles.headerFilterText, { color: colors.textSoft }]}>
-              {ANALYTIC_PERIOD_LABELS[analyticPeriod]}
-            </Text>
-            <Ionicons color={colors.textSoft} name="chevron-down" size={12} />
-          </Pressable>
-        </View>
-        {openDropdown === 'analytics' ? (
-          <PeriodMenu
-            activeValue={analyticPeriod}
-            getLabel={(value) => ANALYTIC_PERIOD_LABELS[value]}
-            onSelect={(value) => {
-              setAnalyticPeriod(value);
-              setOpenDropdown(null);
-            }}
-            options={ANALYTIC_PERIOD_OPTIONS}
-          />
-        ) : null}
+      <View style={[styles.periodTabs, { backgroundColor: colors.panelMuted }]}>
+        {ANALYTIC_PERIOD_OPTIONS.map((period) => {
+          const isSelected = period === analyticPeriod;
 
-        <View style={styles.reliabilityContent}>
-          <View style={styles.reliabilityCopy}>
-            <Text style={[styles.reliabilityValue, { color: colors.text }]}>{reliability}%</Text>
-            <FlowDelta tone={reliabilityDelta.tone} value={reliabilityDelta.value} />
-          </View>
-          <ReliabilityRing progress={reliability / 100} />
-        </View>
-      </FlowPanel>
-
-      <View style={styles.metricGrid}>
-        <FlowMetricCard
-          footer={<FlowDelta tone={clearDelta.tone} value={clearDelta.value} />}
-          label="Clear Scans"
-          tone="success"
-          value={`${clears}`}>
-          <FlowTrendLine points={periodStats.clearPoints} tone="success" />
-        </FlowMetricCard>
-        <FlowMetricCard
-          footer={<FlowDelta tone={missDelta.tone} value={missDelta.value} />}
-          label="Missed Scans"
-          tone={misses > 0 ? 'danger' : 'success'}
-          value={`${misses}`}>
-          <FlowTrendLine points={periodStats.missPoints} tone={misses > 0 ? 'danger' : 'success'} />
-        </FlowMetricCard>
+          return (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityState={{ selected: isSelected }}
+              key={period}
+              onPress={() => setAnalyticPeriod(period)}
+              style={({ pressed }) => [
+                styles.periodTab,
+                isSelected && { backgroundColor: colors.elevated },
+                pressed && styles.pressed,
+              ]}>
+              <Text style={[styles.periodTabLabel, { color: isSelected ? colors.text : colors.textSoft }]}>
+                {ANALYTIC_PERIOD_LABELS[period]}
+              </Text>
+            </Pressable>
+          );
+        })}
       </View>
 
-      <FlowPanel style={[styles.calendarPanel, openDropdown === 'calendar' && styles.dropdownPanelOpen]}>
-        <View style={styles.panelHeader}>
-          <FlowSectionLabel>ACTIVITY CALENDAR</FlowSectionLabel>
-          <Pressable
-            accessibilityLabel="Change activity calendar month"
-            accessibilityRole="button"
-            onPress={() => setOpenDropdown((current) => (current === 'calendar' ? null : 'calendar'))}
-            style={({ pressed }) => [styles.headerFilter, pressed && styles.pressed]}>
-            <Text style={[styles.headerFilterText, { color: colors.textSoft }]}>
-              {CALENDAR_PERIOD_LABELS[calendarPeriod]}
-            </Text>
-            <Ionicons color={colors.textSoft} name="chevron-down" size={12} />
-          </Pressable>
-        </View>
-        {openDropdown === 'calendar' ? (
-          <PeriodMenu
-            activeValue={calendarPeriod}
-            getLabel={(value) => CALENDAR_PERIOD_LABELS[value]}
-            onSelect={(value) => {
-              setCalendarPeriod(value);
-              setOpenDropdown(null);
-            }}
-            options={CALENDAR_PERIOD_OPTIONS}
-          />
-        ) : null}
-        <View style={styles.weekdayRow}>
-          {WEEKDAY_LABELS.map((label, index) => (
-            <View key={`${label}-${index}`} style={styles.weekdayCell}>
-              <Text style={[styles.weekdayLabel, { color: colors.textSoft }]}>{label}</Text>
+      <FlowPanel style={styles.progressHero}>
+        <Text style={[styles.heroEyebrow, { color: colors.textSoft }]}>COMPLETION RATE</Text>
+        <View style={styles.heroMetricRow}>
+          <Text style={[styles.reliabilityValue, { color: colors.text }]}>{reliability}%</Text>
+          <View style={styles.heroSummary}>
+            <View style={styles.summaryLine}>
+              <View style={[styles.summaryDot, { backgroundColor: colors.success }]} />
+              <Text style={[styles.summaryText, { color: colors.textSoft }]}>{clears} completed</Text>
             </View>
-          ))}
+            <View style={styles.summaryLine}>
+              <View style={[styles.summaryDot, { backgroundColor: misses > 0 ? colors.danger : colors.line }]} />
+              <Text style={[styles.summaryText, { color: colors.textSoft }]}>{misses} missed</Text>
+            </View>
+          </View>
         </View>
-        <FlowCalendarDots dots={calendarDots} />
-        <FlowLegend
-          items={[
-            { label: 'High', tone: 'high' },
-            { label: 'Medium', tone: 'medium' },
-            { label: 'Low', tone: 'low' },
-            { label: 'Missed', tone: 'missed' },
-          ]}
-        />
+        <FlowProgressBar progress={reliability / 100} tone={reliability >= 70 ? 'success' : 'warning'} />
+        <View style={styles.trendRow}>
+          <Ionicons
+            color={
+              reliabilityDelta.tone === 'success'
+                ? colors.success
+                : reliabilityDelta.tone === 'danger'
+                  ? colors.danger
+                  : colors.warning
+            }
+            name={
+              reliabilityDelta.tone === 'success'
+                ? 'trending-up'
+                : reliabilityDelta.tone === 'danger'
+                  ? 'trending-down'
+                  : 'remove'
+            }
+            size={15}
+          />
+          <Text
+            style={[
+              styles.trendText,
+              {
+                color:
+                  reliabilityDelta.tone === 'success'
+                    ? colors.success
+                    : reliabilityDelta.tone === 'danger'
+                      ? colors.danger
+                      : colors.textSoft,
+              },
+            ]}>
+            {reliabilityDelta.value}
+          </Text>
+        </View>
+        <Text style={[styles.heroMessage, { color: colors.textSoft }]}>
+          {periodStats.attempts === 0
+            ? 'Complete a checkpoint to start tracking this period.'
+            : reliability === 100
+              ? 'Every checkpoint completed. Keep the rhythm going.'
+              : `${clears} of ${periodStats.attempts} checkpoints completed this period.`}
+        </Text>
       </FlowPanel>
 
-      <FlowPanel style={styles.categoryPanel}>
-        <FlowSectionLabel>CATEGORY PERFORMANCE</FlowSectionLabel>
-        {categoryPerformance.length > 0 ? (
-          <View style={styles.categoryRows}>
-            {categoryPerformance.map((entry) => (
-              <CategoryRow entry={entry} key={entry.useCaseType} />
+      <View style={styles.activitySection}>
+        <View style={styles.sectionHeader}>
+          <Text style={[styles.sectionTitle, { color: colors.text }]}>Your rhythm</Text>
+          <Text style={[styles.sectionCount, { color: colors.textSoft }]}>
+            {analyticPeriod === 'thisMonth' ? 'This month' : '7-day view'}
+          </Text>
+        </View>
+        <FlowPanel style={styles.rhythmPanel}>
+          <RhythmChart
+            clearPoints={periodStats.clearPoints}
+            missPoints={periodStats.missPoints}
+            period={analyticPeriod}
+          />
+          <View style={styles.rhythmLegend}>
+            <View style={styles.legendItem}>
+              <View style={[styles.legendDot, { backgroundColor: colors.success }]} />
+              <Text style={[styles.legendLabel, { color: colors.textSoft }]}>Completed</Text>
+            </View>
+            <View style={styles.legendItem}>
+              <View style={[styles.legendDot, { backgroundColor: colors.danger }]} />
+              <Text style={[styles.legendLabel, { color: colors.textSoft }]}>Missed</Text>
+            </View>
+          </View>
+        </FlowPanel>
+      </View>
+
+      <View style={styles.metricGrid}>
+        <ProgressStat
+          helper={state.store.currentStreak === 1 ? 'consecutive clear' : 'consecutive clears'}
+          icon="flame-outline"
+          label="Current streak"
+          value={`${state.store.currentStreak}`}
+        />
+        <ProgressStat
+          helper={averageClearSeconds === null ? 'Complete one to measure' : 'average completion time'}
+          icon="timer-outline"
+          label="Clear speed"
+          value={averageClearSeconds === null ? '—' : `${averageClearSeconds}s`}
+        />
+      </View>
+
+      <Pressable
+        accessibilityLabel="Review checkpoints based on this insight"
+        accessibilityRole="button"
+        onPress={() => router.push('/alarms')}
+        style={({ pressed }) => [
+          styles.insightPanel,
+          {
+            backgroundColor: colors.primarySurface,
+            borderColor: colors.ring,
+          },
+          pressed && styles.pressed,
+        ]}>
+        <FlowIconBadge icon={recoveryCategory ? 'build-outline' : 'sparkles-outline'} size="small" tone="primary" />
+        <View style={styles.insightCopy}>
+          <Text style={[styles.insightTitle, { color: colors.text }]}>
+            {recoveryCategory ? `${recoveryCategory.label} needs attention` : 'Pattern spotted'}
+          </Text>
+          <Text style={[styles.insightBody, { color: colors.textSoft }]}>
+            {recoveryCategory
+              ? `${recoveryCategory.failures} of ${recoveryCategory.attempts} attempts were missed. Review its time or proof setup.`
+              : analyticPeriod === 'thisWeek'
+                ? getInsight(state.summary)
+                : reliabilityDelta.value}
+          </Text>
+        </View>
+        <Ionicons color={colors.primary} name="chevron-forward" size={18} />
+      </Pressable>
+
+      {periodCategories.length > 1 ? (
+        <View style={styles.activitySection}>
+          <View style={styles.sectionHeader}>
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>By category</Text>
+            <Text style={[styles.sectionCount, { color: colors.textSoft }]}>Most active</Text>
+          </View>
+          <View style={styles.categoryGrid}>
+            {periodCategories.map((entry) => (
+              <CategoryTile entry={entry} key={entry.useCaseType} />
             ))}
           </View>
-        ) : (
-          <Text style={[styles.emptyCopy, { color: colors.textSoft }]}>
-            Category performance appears after at least one checkpoint resolves this week.
-          </Text>
-        )}
-      </FlowPanel>
-
-      <FlowPanel style={styles.insightPanel}>
-        <FlowIconBadge icon="star" size="small" tone="warning" />
-        <View style={styles.insightCopy}>
-          <Text style={[styles.insightTitle, { color: colors.text }]}>Insight</Text>
-          <Text style={[styles.insightBody, { color: colors.textSoft }]}>{getInsight(state.summary)}</Text>
         </View>
-      </FlowPanel>
+      ) : null}
+
     </AppScreen>
   );
 }
 
-function PeriodMenu<TValue extends string>({
-  activeValue,
-  getLabel,
-  onSelect,
-  options,
+function RhythmChart({
+  clearPoints,
+  missPoints,
+  period,
 }: {
-  activeValue: TValue;
-  getLabel: (value: TValue) => string;
-  onSelect: (value: TValue) => void;
-  options: TValue[];
+  clearPoints: number[];
+  missPoints: number[];
+  period: AnalyticPeriod;
 }) {
   const colors = getAppColors(useColorScheme());
+  const totals = clearPoints.map((value, index) => value + (missPoints[index] ?? 0));
+  const maximum = Math.max(1, ...totals);
+  const range = getAnalyticPeriodRange(period);
+  const bucketDuration = (range.end.getTime() - range.start.getTime()) / clearPoints.length;
+  const labels =
+    period === 'thisMonth'
+      ? clearPoints.map((_, index) =>
+          new Date(range.start.getTime() + index * bucketDuration).toLocaleDateString([], { day: 'numeric' })
+        )
+      : WEEKDAY_LABELS;
 
   return (
-    <View style={[styles.periodMenu, { backgroundColor: colors.elevated, borderColor: colors.line }]} role="menu">
-      {options.map((option) => {
-        const isActive = option === activeValue;
+    <View
+      accessibilityLabel={`${clearPoints.reduce((total, value) => total + value, 0)} completed and ${missPoints.reduce((total, value) => total + value, 0)} missed across this period`}
+      style={styles.rhythmChart}>
+      {clearPoints.map((clearCount, index) => {
+        const missCount = missPoints[index] ?? 0;
+        const total = clearCount + missCount;
+        const stackHeight = total === 0 ? 4 : Math.max(12, Math.round((total / maximum) * 58));
 
         return (
-          <Pressable
-            accessibilityRole="menuitem"
-            key={option}
-            onPress={() => onSelect(option)}
-            style={({ pressed }) => [
-              styles.periodOption,
-              {
-                backgroundColor: isActive ? colors.panelMuted : 'transparent',
-                opacity: pressed ? 0.78 : 1,
-              },
-            ]}>
-            <Text style={[styles.periodOptionText, { color: isActive ? colors.text : colors.textSoft }]}>
-              {getLabel(option)}
+          <View
+            accessibilityLabel={`${labels[index]}. ${clearCount} completed, ${missCount} missed`}
+            key={`${labels[index]}-${index}`}
+            style={styles.rhythmColumn}>
+            <View style={styles.rhythmTrack}>
+              {total === 0 ? (
+                <View style={[styles.emptyRhythmBar, { backgroundColor: colors.line }]} />
+              ) : (
+                <View style={[styles.rhythmStack, { height: stackHeight }]}>
+                  {missCount > 0 ? (
+                    <View style={{ backgroundColor: colors.danger, flex: missCount }} />
+                  ) : null}
+                  {clearCount > 0 ? (
+                    <View style={{ backgroundColor: colors.success, flex: clearCount }} />
+                  ) : null}
+                </View>
+              )}
+            </View>
+            <Text style={[styles.rhythmLabel, { color: total > 0 ? colors.text : colors.muted }]}>
+              {labels[index]}
             </Text>
-            {isActive ? <Ionicons color={colors.primary} name="checkmark" size={14} /> : null}
-          </Pressable>
+          </View>
         );
       })}
     </View>
   );
 }
 
-function ReliabilityRing({ progress }: { progress: number }) {
+function ProgressStat({
+  helper,
+  icon,
+  label,
+  value,
+}: {
+  helper: string;
+  icon: keyof typeof Ionicons.glyphMap;
+  label: string;
+  value: string;
+}) {
   const colors = getAppColors(useColorScheme());
-  const clampedProgress = Math.max(0, Math.min(1, progress));
-  const mutedRing = withAlpha(colors.success, '2A');
-  const activeRing = colors.success;
 
   return (
-    <View
-      accessibilityLabel={`${Math.round(clampedProgress * 100)}% weekly reliability`}
-      accessibilityRole="progressbar"
-      accessibilityValue={{ min: 0, max: 100, now: Math.round(clampedProgress * 100) }}
-      style={[
-        styles.reliabilityRing,
-        {
-          borderColor: activeRing,
-          borderLeftColor: clampedProgress > 0.25 ? activeRing : mutedRing,
-          borderTopColor: clampedProgress > 0.5 ? activeRing : mutedRing,
-          borderRightColor: clampedProgress > 0.75 ? activeRing : mutedRing,
-        },
-      ]}>
-      <View style={[styles.ringHole, { backgroundColor: colors.elevated }]} />
-    </View>
+    <FlowPanel style={styles.progressStat}>
+      <View style={styles.progressStatHeader}>
+        <Ionicons color={colors.primary} name={icon} size={17} />
+        <Text style={[styles.progressStatLabel, { color: colors.textSoft }]}>{label}</Text>
+      </View>
+      <Text style={[styles.progressStatValue, { color: colors.text }]}>{value}</Text>
+      <Text style={[styles.progressStatHelper, { color: colors.muted }]}>{helper}</Text>
+    </FlowPanel>
   );
 }
 
-function CategoryRow({ entry }: { entry: UseCaseReliability }) {
+function getCategoryIcon(useCaseType: UseCaseType): keyof typeof Ionicons.glyphMap {
+  switch (useCaseType) {
+    case 'wake_up':
+      return 'sunny-outline';
+    case 'medication':
+      return 'medical-outline';
+    case 'study_start':
+      return 'book-outline';
+    case 'deep_work':
+      return 'layers-outline';
+    case 'leave_home':
+      return 'exit-outline';
+    case 'workout':
+      return 'barbell-outline';
+    default:
+      return 'shapes-outline';
+  }
+}
+
+function CategoryTile({ entry }: { entry: PeriodCategory }) {
   const colors = getAppColors(useColorScheme());
+  const tone = entry.completionRate >= 70 ? 'success' : entry.completionRate >= 40 ? 'warning' : 'danger';
+  const accentColor = tone === 'success' ? colors.success : tone === 'warning' ? colors.warning : colors.danger;
+  const accentSurface =
+    tone === 'success' ? colors.successSurface : tone === 'warning' ? colors.warningSurface : colors.dangerSurface;
 
   return (
-    <View
-      accessibilityLabel={`${entry.label}. ${entry.completionRate}% reliable.`}
-      style={styles.categoryRow}>
-      <FlowIconBadge icon={getCategoryIcon(entry.label)} size="small" tone="muted" />
-      <View style={styles.categoryCopy}>
-        <Text numberOfLines={1} style={[styles.categoryTitle, { color: colors.text }]}>
+    <FlowPanel style={styles.categoryTile}>
+      <View style={styles.categoryTileHeader}>
+        <View style={[styles.categoryTileIcon, { backgroundColor: accentSurface }]}>
+          <Ionicons color={accentColor} name={getCategoryIcon(entry.useCaseType)} size={18} />
+        </View>
+        <Text style={[styles.categoryTileValue, { color: accentColor }]}>{entry.completionRate}%</Text>
+      </View>
+      <View style={styles.categoryTileCopy}>
+        <Text numberOfLines={1} style={[styles.categoryTileTitle, { color: colors.text }]}>
           {entry.label}
         </Text>
-        <FlowProgressBar progress={entry.completionRate / 100} tone="success" />
+        <Text style={[styles.categoryTileHelper, { color: colors.textSoft }]}>
+          {entry.successes} of {entry.attempts} completed
+        </Text>
       </View>
-      <Text style={[styles.categoryValue, { color: colors.textSoft }]}>{entry.completionRate}%</Text>
-    </View>
+      <FlowProgressBar progress={entry.completionRate / 100} tone={tone} />
+    </FlowPanel>
   );
-}
-
-function getCategoryIcon(label: string): keyof typeof Ionicons.glyphMap {
-  const normalizedLabel = label.toLowerCase();
-
-  if (normalizedLabel.includes('home') || normalizedLabel.includes('leave')) {
-    return 'home-outline';
-  }
-
-  if (normalizedLabel.includes('work') || normalizedLabel.includes('study')) {
-    return 'briefcase-outline';
-  }
-
-  if (normalizedLabel.includes('medication')) {
-    return 'medical-outline';
-  }
-
-  return 'fitness-outline';
 }
 
 const styles = StyleSheet.create({
   screenContent: {
-    gap: 8,
+    gap: Spacing.lg,
     paddingBottom: 36,
     paddingHorizontal: Spacing.lg,
-    paddingTop: 2,
+    paddingTop: Spacing.xs,
+  },
+  periodTabs: {
+    borderRadius: Radius.md,
+    flexDirection: 'row',
+    gap: 3,
+    padding: 3,
+  },
+  periodTab: {
+    alignItems: 'center',
+    borderRadius: Radius.md - 3,
+    flex: 1,
+    justifyContent: 'center',
+    minHeight: 38,
+    paddingHorizontal: 6,
+  },
+  periodTabLabel: {
+    ...TextPresets.label,
+    fontSize: 11,
+    lineHeight: 15,
+    textAlign: 'center',
+  },
+  progressHero: {
+    borderRadius: Radius.lg,
+    gap: Spacing.md,
+    padding: Spacing.lg,
+  },
+  heroEyebrow: {
+    ...TextPresets.eyebrow,
+    fontSize: 10,
+    lineHeight: 14,
+  },
+  heroMetricRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: Spacing.xl,
+    justifyContent: 'space-between',
+  },
+  heroSummary: {
+    gap: Spacing.sm,
+  },
+  summaryLine: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 7,
+  },
+  summaryDot: {
+    borderRadius: Radius.pill,
+    height: 7,
+    width: 7,
+  },
+  summaryText: {
+    ...TextPresets.body,
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  heroMessage: {
+    ...TextPresets.body,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  trendRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 6,
+  },
+  trendText: {
+    ...TextPresets.label,
+    flex: 1,
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  activitySection: {
+    gap: Spacing.md,
+  },
+  sectionHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: Spacing.xs,
+  },
+  sectionTitle: {
+    fontFamily: Fonts.rounded,
+    fontSize: 16,
+    fontWeight: '800',
+    lineHeight: 21,
+  },
+  sectionCount: {
+    ...TextPresets.body,
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  activityPanel: {
+    gap: 0,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: 0,
+  },
+  activityRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    minHeight: 66,
+    paddingVertical: Spacing.sm,
+  },
+  activityIcon: {
+    alignItems: 'center',
+    borderRadius: Radius.pill,
+    height: 32,
+    justifyContent: 'center',
+    width: 32,
+  },
+  activityCopy: {
+    flex: 1,
+    gap: 2,
+    minWidth: 0,
+  },
+  activityTitle: {
+    ...TextPresets.label,
+    fontSize: 13,
+    lineHeight: 17,
+  },
+  activityDetail: {
+    ...TextPresets.body,
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  activityOutcome: {
+    ...TextPresets.label,
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  rhythmPanel: {
+    gap: Spacing.md,
+    padding: Spacing.lg,
+  },
+  rhythmChart: {
+    alignItems: 'flex-end',
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    height: 86,
+    justifyContent: 'space-between',
+  },
+  rhythmColumn: {
+    alignItems: 'center',
+    flex: 1,
+    gap: 7,
+  },
+  rhythmTrack: {
+    alignItems: 'center',
+    height: 62,
+    justifyContent: 'flex-end',
+  },
+  rhythmStack: {
+    borderRadius: Radius.pill,
+    overflow: 'hidden',
+    width: 16,
+  },
+  emptyRhythmBar: {
+    borderRadius: Radius.pill,
+    height: 4,
+    width: 16,
+  },
+  rhythmLabel: {
+    fontFamily: Fonts.rounded,
+    fontSize: 10,
+    fontWeight: '700',
+    lineHeight: 13,
+  },
+  rhythmLegend: {
+    flexDirection: 'row',
+    gap: Spacing.lg,
+    justifyContent: 'center',
+  },
+  legendItem: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 6,
+  },
+  legendDot: {
+    borderRadius: Radius.pill,
+    height: 6,
+    width: 6,
+  },
+  legendLabel: {
+    ...TextPresets.body,
+    fontSize: 10,
+    lineHeight: 14,
   },
   reliabilityPanel: {
     gap: 8,
@@ -678,6 +893,35 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: Spacing.sm,
   },
+  progressStat: {
+    flex: 1,
+    gap: 6,
+    minWidth: 0,
+    padding: Spacing.md,
+  },
+  progressStatHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 6,
+  },
+  progressStatLabel: {
+    ...TextPresets.eyebrow,
+    flex: 1,
+    fontSize: 9,
+    lineHeight: 12,
+  },
+  progressStatValue: {
+    fontFamily: Fonts.rounded,
+    fontSize: 28,
+    fontWeight: '800',
+    letterSpacing: -0.6,
+    lineHeight: 32,
+  },
+  progressStatHelper: {
+    ...TextPresets.body,
+    fontSize: 10,
+    lineHeight: 14,
+  },
   calendarPanel: {
     gap: 8,
     position: 'relative',
@@ -734,38 +978,58 @@ const styles = StyleSheet.create({
     lineHeight: 13,
     textAlign: 'center',
   },
-  categoryPanel: {
-    gap: 8,
+  categoryGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.sm,
   },
-  categoryRows: {
-    gap: 7,
+  categoryTile: {
+    flexBasis: '47%',
+    flexGrow: 1,
+    gap: Spacing.sm,
+    minWidth: 0,
+    padding: Spacing.md,
   },
-  categoryRow: {
+  categoryTileHeader: {
     alignItems: 'center',
     flexDirection: 'row',
-    gap: 8,
-    minHeight: 34,
+    justifyContent: 'space-between',
   },
-  categoryCopy: {
-    flex: 1,
-    gap: 5,
-    minWidth: 0,
+  categoryTileIcon: {
+    alignItems: 'center',
+    borderRadius: Radius.sm,
+    height: 34,
+    justifyContent: 'center',
+    width: 34,
   },
-  categoryTitle: {
+  categoryTileValue: {
+    fontFamily: Fonts.rounded,
+    fontSize: 18,
+    fontWeight: '800',
+    letterSpacing: -0.3,
+    lineHeight: 22,
+  },
+  categoryTileCopy: {
+    gap: 1,
+  },
+  categoryTileTitle: {
+    ...TextPresets.label,
+    fontSize: 12,
+    fontWeight: '800',
+    lineHeight: 16,
+  },
+  categoryTileHelper: {
     ...TextPresets.body,
-    fontSize: 11,
-    fontWeight: '700',
-    lineHeight: 14,
-  },
-  categoryValue: {
-    ...TextPresets.body,
-    fontSize: 11,
+    fontSize: 10,
     lineHeight: 14,
   },
   insightPanel: {
     alignItems: 'center',
+    borderRadius: Radius.lg,
+    borderWidth: 1,
     flexDirection: 'row',
     gap: Spacing.md,
+    padding: Spacing.md,
   },
   insightCopy: {
     flex: 1,

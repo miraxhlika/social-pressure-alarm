@@ -14,6 +14,8 @@ type FlowTopBarProps = {
   subtitle?: string;
   leftLabel?: string;
   rightLabel?: string;
+  leftIcon?: IconName;
+  rightIcon?: IconName;
   onLeftPress?: () => void;
   onRightPress?: () => void;
   leftAccessibilityLabel?: string;
@@ -25,6 +27,8 @@ export function FlowTopBar({
   subtitle,
   leftLabel,
   rightLabel,
+  leftIcon,
+  rightIcon,
   onLeftPress,
   onRightPress,
   leftAccessibilityLabel,
@@ -37,13 +41,17 @@ export function FlowTopBar({
   return (
     <View style={styles.topBar}>
       <View style={styles.topBarActionSlot}>
-        {leftLabel && onLeftPress ? (
+        {(leftIcon || leftLabel) && onLeftPress ? (
           <Pressable
             accessibilityLabel={leftActionLabel}
             accessibilityRole="button"
             onPress={onLeftPress}
-            style={({ pressed }) => [styles.topBarAction, pressed && styles.pressed]}>
-            <Text style={[styles.topBarActionText, { color: colors.text }]}>{leftLabel}</Text>
+            style={({ pressed }) => [styles.topBarAction, leftIcon && styles.topBarIconAction, pressed && styles.pressed]}>
+            {leftIcon ? (
+              <Ionicons color={colors.text} name={leftIcon} size={22} />
+            ) : (
+              <Text style={[styles.topBarActionText, { color: colors.text }]}>{leftLabel}</Text>
+            )}
           </Pressable>
         ) : null}
       </View>
@@ -54,13 +62,17 @@ export function FlowTopBar({
       </View>
 
       <View style={[styles.topBarActionSlot, styles.topBarActionSlotEnd]}>
-        {rightLabel && onRightPress ? (
+        {(rightIcon || rightLabel) && onRightPress ? (
           <Pressable
             accessibilityLabel={rightActionLabel}
             accessibilityRole="button"
             onPress={onRightPress}
-            style={({ pressed }) => [styles.topBarAction, pressed && styles.pressed]}>
-            <Text style={[styles.topBarActionText, { color: colors.text }]}>{rightLabel}</Text>
+            style={({ pressed }) => [styles.topBarAction, rightIcon && styles.topBarIconAction, pressed && styles.pressed]}>
+            {rightIcon ? (
+              <Ionicons color={colors.text} name={rightIcon} size={21} />
+            ) : (
+              <Text style={[styles.topBarActionText, { color: colors.text }]}>{rightLabel}</Text>
+            )}
           </Pressable>
         ) : null}
       </View>
@@ -221,6 +233,7 @@ export function FlowFooterButton({
 
   return (
     <Pressable
+      accessibilityLabel={label}
       accessibilityRole="button"
       disabled={disabled}
       onPress={onPress}
@@ -229,10 +242,8 @@ export function FlowFooterButton({
         { backgroundColor: colors.text, borderColor: colors.text, opacity: disabled ? 0.45 : 1 },
         pressed && styles.pressed,
       ]}>
-      <Text style={[styles.footerButtonLabel, { color: colors.elevated }]}>
-        {icon === 'add' ? '+  ' : ''}
-        {label}
-      </Text>
+      <Ionicons color={colors.elevated} name={icon} size={19} />
+      <Text style={[styles.footerButtonLabel, { color: colors.elevated }]}>{label}</Text>
     </Pressable>
   );
 }
@@ -282,6 +293,14 @@ const styles = StyleSheet.create({
     borderRadius: Radius.pill,
     paddingHorizontal: 10,
     paddingVertical: 8,
+  },
+  topBarIconAction: {
+    alignItems: 'center',
+    height: 40,
+    justifyContent: 'center',
+    paddingHorizontal: 0,
+    paddingVertical: 0,
+    width: 40,
   },
   topBarActionText: {
     ...TextPresets.label,
@@ -393,6 +412,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     borderRadius: Radius.lg,
     borderWidth: 1,
+    flexDirection: 'row',
+    gap: Spacing.sm,
     justifyContent: 'center',
     minHeight: 46,
     paddingHorizontal: Spacing.lg,
