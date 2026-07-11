@@ -1,12 +1,13 @@
+import { Ionicons } from '@expo/vector-icons';
 import { memo, useCallback } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { AppCard } from '@/components/ui/app-card';
 import { AppButton } from '@/components/ui/app-button';
 import { StatusPill } from '@/components/ui/status-pill';
-import { Fonts, getAppColors, Spacing, TextPresets } from '@/constants/theme';
-import { formatGracePeriodLabel, getUseCaseShortLabel } from '@/lib/checkpoint-templates';
-import { getAlarmPhase, formatAlarmTime, formatRepeatSchedule, formatScheduledFor } from '@/lib/alarms';
+import { Fonts, getAppColors, Radius, Spacing, TextPresets } from '@/constants/theme';
+import { formatGracePeriodLabel } from '@/lib/checkpoint-templates';
+import { getAlarmPhase, formatAlarmRuntimeTime, formatRepeatSchedule, formatScheduledFor } from '@/lib/alarms';
 import {
   getCheckpointSocialDescription,
   getCheckpointSocialLabel,
@@ -43,7 +44,15 @@ const STATUS_TONES = {
 } as const;
 
 function getPrimaryActionLabel(phase: keyof typeof STATUS_COPY) {
-  return phase === 'missed' || phase === 'inactive' ? 'Reschedule' : phase === 'ringing' ? 'Open live run' : 'Adjust';
+  return phase === 'missed' || phase === 'inactive' ? 'Reschedule' : phase === 'ringing' ? 'Open live run' : 'Edit schedule';
+}
+
+function getPrimaryActionIcon(phase: keyof typeof STATUS_COPY): keyof typeof Ionicons.glyphMap {
+  return phase === 'missed' || phase === 'inactive'
+    ? 'calendar-outline'
+    : phase === 'ringing'
+      ? 'scan-outline'
+      : 'create-outline';
 }
 
 function getLastOutcomeCopy(alarm: Alarm) {
@@ -63,6 +72,7 @@ function AlarmCardComponent({ alarm, circleName, onDelete, onDetails, onEdit, on
   const phase = getAlarmPhase(alarm);
   const sharesToCircle = isCheckpointShared(alarm.socialSettings);
   const primaryActionLabel = getPrimaryActionLabel(phase);
+  const primaryActionIcon = getPrimaryActionIcon(phase);
   const primaryAction = useCallback(() => {
     if (phase === 'missed' || phase === 'inactive') {
       onReschedule(alarm);
@@ -76,18 +86,12 @@ function AlarmCardComponent({ alarm, circleName, onDelete, onDetails, onEdit, on
 
     onEdit(alarm);
   }, [alarm, onEdit, onOpen, onReschedule, phase]);
-  const secondaryActionLabel = phase === 'ringing' ? 'Adjust' : 'Reuse';
-  const secondaryAction = useCallback(() => {
-    if (phase === 'ringing') {
-      onEdit(alarm);
-      return;
-    }
-
-    onReuse(alarm);
-  }, [alarm, onEdit, onReuse, phase]);
   const handleDetailsPress = useCallback(() => {
     onDetails(alarm);
   }, [alarm, onDetails]);
+  const handleReusePress = useCallback(() => {
+    onReuse(alarm);
+  }, [alarm, onReuse]);
   const handleDeletePress = useCallback(() => {
     onDelete(alarm);
   }, [alarm, onDelete]);
@@ -97,52 +101,76 @@ function AlarmCardComponent({ alarm, circleName, onDelete, onDetails, onEdit, on
 
   return (
     <AppCard elevated style={styles.card}>
-      <View style={styles.header}>
-        <Text style={[styles.time, { color: colors.text }]}>{formatAlarmTime(alarm.hour, alarm.minute)}</Text>
-        <StatusPill label={STATUS_COPY[phase]} tone={STATUS_TONES[phase]} />
-      </View>
+      <Pressable
+        accessibilityHint="Opens schedule, proof, and result details."
+        accessibilityLabel={`View details for ${alarm.label}`}
+        accessibilityRole="button"
+        onPress={handleDetailsPress}
+        style={({ pressed }) => [styles.detailsLink, pressed && styles.contentPressed]}>
+        <View style={styles.header}>
+          <Text numberOfLines={1} style={[styles.label, { color: colors.text }]}>{alarm.label}</Text>
+          <View style={styles.headerTrailing}>
+            <StatusPill label={STATUS_COPY[phase]} tone={STATUS_TONES[phase]} />
+            <Ionicons color={colors.muted} name="chevron-forward" size={17} />
+          </View>
+        </View>
 
-      <View style={styles.copy}>
-        <Text style={[styles.label, { color: colors.text }]}>{alarm.label}</Text>
-        {alarm.placeObject ? (
-          <Text style={[styles.placeObject, { color: colors.primary }]}>Proof place: {alarm.placeObject}</Text>
-        ) : null}
-        <Text style={[TextPresets.body, { color: colors.textSoft }]}>
-          {getUseCaseShortLabel(alarm.useCaseType)} · {formatRepeatSchedule(alarm.repeatSchedule)}
-        </Text>
-        <Text style={[styles.scheduleText, { color: colors.muted }]}>Next run {formatScheduledFor(alarm.scheduledFor)}</Text>
-      </View>
+        <View style={styles.scheduleHero}>
+          <Text style={[styles.time, { color: colors.text }]}>{formatAlarmRuntimeTime(alarm)}</Text>
+          <View style={styles.scheduleCopy}>
+            <Text style={[styles.repeatText, { color: colors.textSoft }]}>
+              {formatRepeatSchedule(alarm.repeatSchedule)}
+            </Text>
+            <Text style={[styles.nextRunText, { color: colors.muted }]}>
+              {alarm.isActive ? `Next ${formatScheduledFor(alarm.scheduledFor)}` : 'Ready to schedule again'}
+            </Text>
+          </View>
+        </View>
 
-      <View style={styles.metaRow}>
-        <Text style={[styles.metaText, { color: colors.muted }]}>
-          {formatGracePeriodLabel(alarm.gracePeriodSeconds)} reach window · {getLastOutcomeCopy(alarm)}
-        </Text>
-        <Text style={[styles.circleMeta, { color: sharesToCircle ? colors.primary : colors.muted }]}>{accountabilityCopy}</Text>
-      </View>
+        <View style={[styles.detailsPanel, { backgroundColor: colors.panelMuted }]}>
+          {alarm.placeObject && alarm.placeObject.trim().toLocaleLowerCase() !== alarm.label.trim().toLocaleLowerCase() ? (
+            <MetaItem color={colors.textSoft} icon="location-outline" text={alarm.placeObject} />
+          ) : null}
+          <MetaItem
+            color={colors.textSoft}
+            icon="timer-outline"
+            text={`${formatGracePeriodLabel(alarm.gracePeriodSeconds)} window`}
+          />
+          <MetaItem
+            color={sharesToCircle ? colors.primary : colors.textSoft}
+            icon={sharesToCircle ? 'people-outline' : 'lock-closed-outline'}
+            text={accountabilityCopy}
+          />
+          <MetaItem color={colors.textSoft} icon="checkmark-circle-outline" text={getLastOutcomeCopy(alarm)} />
+        </View>
+      </Pressable>
 
       <View style={styles.actionRow}>
-        <AppButton label={primaryActionLabel} onPress={primaryAction} size="compact" style={styles.primaryAction} />
         <AppButton
-          label={secondaryActionLabel}
-          onPress={secondaryAction}
+          icon={primaryActionIcon}
+          label={primaryActionLabel}
+          onPress={primaryAction}
           size="compact"
-          style={styles.secondaryAction}
-          variant="secondary"
+          style={styles.primaryAction}
+          variant={phase === 'ringing' ? 'primary' : phase === 'missed' || phase === 'inactive' ? 'tonal' : 'secondary'}
         />
       </View>
 
       <View style={[styles.utilityRow, { borderTopColor: colors.line ?? colors.border }]}>
         <UtilityAction
-          accessibilityHint={`Opens schedule, proof, and history details for ${alarm.label}.`}
-          accessibilityLabel={`View details for ${alarm.label}`}
-          color={colors.primary}
-          label="Details"
-          onPress={handleDetailsPress}
+          accessibilityHint={`Creates a new checkpoint from ${alarm.label}.`}
+          accessibilityLabel={`Duplicate ${alarm.label}`}
+          color={colors.textSoft}
+          icon="copy-outline"
+          label="Duplicate"
+          onPress={handleReusePress}
         />
+        <View style={[styles.utilityDivider, { backgroundColor: colors.line }]} />
         <UtilityAction
           accessibilityHint={`Deletes ${alarm.label}. This action cannot be undone.`}
           accessibilityLabel={`Delete ${alarm.label}`}
           color={colors.danger}
+          icon="trash-outline"
           label="Delete"
           onPress={handleDeletePress}
         />
@@ -153,26 +181,46 @@ function AlarmCardComponent({ alarm, circleName, onDelete, onDetails, onEdit, on
 
 export const AlarmCard = memo(AlarmCardComponent);
 
+function MetaItem({
+  color,
+  icon,
+  text,
+}: {
+  color: string;
+  icon: keyof typeof Ionicons.glyphMap;
+  text: string;
+}) {
+  return (
+    <View style={styles.metaItem}>
+      <Ionicons color={color} name={icon} size={15} />
+      <Text numberOfLines={1} style={[styles.metaText, { color }]}>{text}</Text>
+    </View>
+  );
+}
+
 function UtilityAction({
   accessibilityHint,
   accessibilityLabel,
   label,
+  icon,
   onPress,
   color,
 }: {
   accessibilityHint?: string;
-  accessibilityLabel?: string;
+  accessibilityLabel: string;
   label: string;
+  icon: keyof typeof Ionicons.glyphMap;
   onPress: () => void;
   color: string;
 }) {
   return (
     <Pressable
       accessibilityHint={accessibilityHint}
-      accessibilityLabel={accessibilityLabel ?? label}
+      accessibilityLabel={accessibilityLabel}
       accessibilityRole="button"
       onPress={onPress}
-      style={styles.utilityAction}>
+      style={({ pressed }) => [styles.utilityAction, pressed && styles.pressed]}>
+      <Ionicons color={color} name={icon} size={17} />
       <Text style={[styles.utilityLabel, { color }]}>{label}</Text>
     </Pressable>
   );
@@ -181,81 +229,113 @@ function UtilityAction({
 const styles = StyleSheet.create({
   card: {
     gap: Spacing.md,
+    padding: Spacing.lg,
+  },
+  detailsLink: {
+    gap: Spacing.lg,
+  },
+  contentPressed: {
+    opacity: 0.82,
   },
   header: {
     alignItems: 'center',
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.md,
+    gap: Spacing.sm,
     justifyContent: 'space-between',
   },
-  copy: {
+  headerTrailing: {
+    alignItems: 'center',
+    flexDirection: 'row',
     gap: Spacing.xs,
+  },
+  label: {
+    flex: 1,
+    fontFamily: Fonts.rounded,
+    fontSize: 19,
+    fontWeight: '800',
+    letterSpacing: -0.25,
+    lineHeight: 24,
     minWidth: 0,
+  },
+  scheduleHero: {
+    alignItems: 'flex-end',
+    flexDirection: 'row',
+    gap: Spacing.md,
   },
   time: {
     fontFamily: Fonts.rounded,
-    fontSize: 34,
+    fontSize: 38,
     fontWeight: '800',
-    lineHeight: 38,
+    letterSpacing: -1,
+    lineHeight: 42,
   },
-  label: {
-    fontFamily: Fonts.rounded,
-    fontSize: 22,
-    fontWeight: '700',
-    lineHeight: 28,
+  scheduleCopy: {
+    flex: 1,
+    gap: 1,
+    paddingBottom: 3,
   },
-  scheduleText: {
+  repeatText: {
     ...TextPresets.label,
     fontSize: 13,
-    lineHeight: 18,
+    lineHeight: 17,
   },
-  placeObject: {
-    ...TextPresets.label,
-    fontSize: 14,
-    lineHeight: 20,
+  nextRunText: {
+    ...TextPresets.body,
+    fontSize: 11,
+    lineHeight: 15,
   },
-  metaRow: {
-    alignItems: 'center',
+  detailsPanel: {
+    borderRadius: Radius.md,
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: Spacing.sm,
+    gap: 10,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: 10,
+  },
+  metaItem: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 5,
+    maxWidth: '100%',
   },
   metaText: {
     ...TextPresets.body,
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  circleMeta: {
-    ...TextPresets.label,
-    fontSize: 13,
+    fontSize: 11,
+    lineHeight: 15,
   },
   actionRow: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
     gap: Spacing.sm,
   },
   primaryAction: {
-    flexBasis: 160,
-    flex: 1.2,
-  },
-  secondaryAction: {
-    flexBasis: 132,
     flex: 1,
   },
   utilityRow: {
     borderTopWidth: 1,
+    alignItems: 'center',
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.lg,
-    justifyContent: 'flex-end',
-    paddingTop: Spacing.xs,
+    paddingTop: Spacing.md,
   },
   utilityAction: {
-    paddingVertical: 6,
+    alignItems: 'center',
+    flex: 1,
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    height: 38,
+    justifyContent: 'center',
+    paddingHorizontal: Spacing.md,
+  },
+  utilityDivider: {
+    height: 20,
+    width: 1,
   },
   utilityLabel: {
     ...TextPresets.label,
-    fontSize: 13,
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  pressed: {
+    opacity: 0.82,
+    transform: [{ scale: 0.99 }],
   },
 });

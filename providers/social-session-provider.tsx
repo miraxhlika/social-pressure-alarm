@@ -12,6 +12,7 @@ import {
 import { getSupabaseClient, getSocialSession } from '@/lib/social/client';
 import { hasSocialBackendConfig } from '@/lib/social/config';
 import { getMySocialProfile, upsertMySocialProfile } from '@/lib/social/profile';
+import { unregisterSignedInDevicePushToken } from '@/lib/social/push';
 import { SocialProfile, UpsertSocialProfileInput } from '@/lib/social/types';
 
 type SocialAuthProvider = 'google' | 'apple';
@@ -177,6 +178,7 @@ export function SocialSessionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const handleSignOut = useCallback(async () => {
+    await unregisterSignedInDevicePushToken();
     await signOutSocialSession();
   }, []);
 

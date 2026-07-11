@@ -9,7 +9,7 @@ import { AppScreen } from '@/components/ui/app-screen';
 import { LoadingBlock } from '@/components/ui/loading-block';
 import { Fonts, Radius, Spacing, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { formatAlarmTime, readAlarmStore } from '@/lib/alarms';
+import { formatAlarmRuntimeTime, readAlarmStore } from '@/lib/alarms';
 import { getPrimaryAlarm } from '@/lib/dashboard';
 import { ProgressSummary, getProgressSummary } from '@/lib/progress';
 import { listMySocialCircles } from '@/lib/social/circles';
@@ -107,7 +107,7 @@ function getNextDueLabel(nextAlarm: Alarm | null) {
     return `Due around ${new Date(nextAlarm.scheduledFor).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
   }
 
-  return `Due around ${formatAlarmTime(nextAlarm.hour, nextAlarm.minute)}`;
+  return `Due around ${formatAlarmRuntimeTime(nextAlarm)}`;
 }
 
 async function triggerSuccessArrival() {

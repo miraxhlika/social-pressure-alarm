@@ -24,6 +24,17 @@ export type NotificationPreferences = {
 
 export type NotificationPermissionState = 'granted' | 'provisional' | 'denied' | 'undetermined';
 
+export class NotificationPermissionRequiredError extends Error {
+  constructor() {
+    super('Notifications are off. Enable them in device settings before scheduling this checkpoint.');
+    this.name = 'NotificationPermissionRequiredError';
+  }
+}
+
+export function isNotificationPermissionRequiredError(error: unknown) {
+  return error instanceof NotificationPermissionRequiredError;
+}
+
 export const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
   urgencyRemindersEnabled: false,
   eveningReadinessRemindersEnabled: false,
@@ -56,7 +67,7 @@ export async function configureNotificationsAsync() {
     importance: Notifications.AndroidImportance.HIGH,
     sound: 'default',
     vibrationPattern: [0, 250, 200, 250],
-    lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+    lockscreenVisibility: Notifications.AndroidNotificationVisibility.PRIVATE,
   });
 }
 
@@ -229,6 +240,12 @@ export async function scheduleAlarmNotificationAsync(
     scheduledFor?: string;
   }
 ) {
+  const permissionState = await getNotificationPermissionState();
+
+  if (!isNotificationPermissionEnabled(permissionState)) {
+    throw new NotificationPermissionRequiredError();
+  }
+
   const preferences = await readNotificationPreferences();
   const scheduledFor = options?.scheduledFor
     ? new Date(options.scheduledFor)
@@ -244,7 +261,7 @@ export async function scheduleAlarmNotificationAsync(
   const primaryNotificationId = await Notifications.scheduleNotificationAsync({
     identifier: primaryNotificationIdentifier,
     content: {
-      title: `${triggerContent.title} · ${formatAlarmTime(alarm.hour, alarm.minute)}`,
+      title: `${triggerContent.title} · ${formatAlarmTime(scheduledFor.getHours(), scheduledFor.getMinutes())}`,
       body: triggerContent.body,
       sound: 'default',
       data: {

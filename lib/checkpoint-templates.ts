@@ -33,7 +33,7 @@ const CHECKPOINT_TEMPLATE_MAP: Record<UseCaseType, CheckpointTemplate> = {
     description: 'Force yourself out of bed and all the way to a real checkpoint.',
     defaultLabel: 'Bathroom sink',
     repeatSchedule: 'weekdays',
-    gracePeriodSeconds: 90,
+    gracePeriodSeconds: 180,
     coaching: 'Best when the code is far enough away that you must stand up and move.',
   },
   medication: {
@@ -43,8 +43,8 @@ const CHECKPOINT_TEMPLATE_MAP: Record<UseCaseType, CheckpointTemplate> = {
     description: 'Make the proof happen where the medication actually lives.',
     defaultLabel: 'Medicine cabinet',
     repeatSchedule: 'daily',
-    gracePeriodSeconds: 60,
-    coaching: 'Keep the checkpoint near the pills so the proof matches the action.',
+    gracePeriodSeconds: 180,
+    coaching: 'A scan only confirms a check-in near the medication; it does not confirm that a dose was taken.',
   },
   study_start: {
     id: 'study_start',
@@ -73,7 +73,7 @@ const CHECKPOINT_TEMPLATE_MAP: Record<UseCaseType, CheckpointTemplate> = {
     description: 'Use the front door or bag area so leaving becomes the proof moment.',
     defaultLabel: 'Front door',
     repeatSchedule: 'weekdays',
-    gracePeriodSeconds: 45,
+    gracePeriodSeconds: 120,
     coaching: 'Short reach times work best when the checkpoint is at the exit.',
   },
   workout: {
@@ -102,7 +102,6 @@ const VALID_USE_CASE_TYPES = new Set<UseCaseType>(Object.keys(CHECKPOINT_TEMPLAT
 
 export const CHECKPOINT_TEMPLATES = [
   CHECKPOINT_TEMPLATE_MAP.wake_up,
-  CHECKPOINT_TEMPLATE_MAP.medication,
   CHECKPOINT_TEMPLATE_MAP.study_start,
   CHECKPOINT_TEMPLATE_MAP.deep_work,
   CHECKPOINT_TEMPLATE_MAP.leave_home,

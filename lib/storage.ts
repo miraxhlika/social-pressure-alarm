@@ -8,6 +8,14 @@ function getScopedStorageKey(baseKey: string, scope: string) {
   return `${baseKey}/${scope}`;
 }
 
+export async function readDeviceStorageValue(key: string) {
+  return AsyncStorage.getItem(key);
+}
+
+export async function writeDeviceStorageValue(key: string, value: string) {
+  await AsyncStorage.setItem(key, value);
+}
+
 export async function getActiveStorageScope() {
   const session = await getSocialSession().catch(() => null);
   return session?.user.id ?? GUEST_STORAGE_SCOPE;

@@ -1,28 +1,24 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useCallback, useMemo, useRef, useState } from 'react';
-import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 
 import { AppScreen } from '@/components/ui/app-screen';
 import { EmptyState } from '@/components/ui/empty-state';
 import {
-  FlowIconBadge,
   FlowPanel,
-  FlowSectionLabel,
   FlowTopBar,
 } from '@/components/ui/flow-primitives';
 import {
-  FlowBarcodePreview,
-  FlowCodePreview,
-  FlowInfoLine,
   FlowProgressBar,
 } from '@/components/ui/flow-visuals';
 import { LoadingBlock } from '@/components/ui/loading-block';
 import { StatusPill } from '@/components/ui/status-pill';
-import { Fonts, Radius, Spacing, TextPresets, getAppColors, withAlpha } from '@/constants/theme';
+import { Fonts, Radius, Spacing, TextPresets, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import {
   deleteAlarm,
+  formatAlarmRuntimeTime,
   formatAlarmTime,
   formatRepeatSchedule,
   getAlarmById,
@@ -32,10 +28,11 @@ import {
   rescheduleAlarm,
   updateAlarm,
 } from '@/lib/alarms';
-import { getUseCaseLabel } from '@/lib/checkpoint-templates';
+import { formatGracePeriodLabel, getUseCaseLabel } from '@/lib/checkpoint-templates';
 import { cancelAlarmNotificationAsync } from '@/lib/notifications';
 import { getProgressSummary, ProgressSummary } from '@/lib/progress';
 import { getCheckpointSocialDescription } from '@/lib/social/settings';
+import { useAppDialog } from '@/providers/app-dialog-provider';
 import { Alarm, AlarmProofCodeType, FailureHistoryEntry, SuccessHistoryEntry } from '@/types/alarm';
 
 type CheckpointDetailsState = {
@@ -124,7 +121,22 @@ function formatScheduleLine(alarm: Alarm) {
     return `Every day · ${time}`;
   }
 
-  return alarm.scheduledFor ? formatScheduledForCompact(alarm.scheduledFor) : `One-time · ${time}`;
+  return alarm.isActive && alarm.scheduledFor
+    ? formatScheduledForCompact(alarm.scheduledFor)
+    : `One-time · ${time}`;
+}
+
+function getHeroCategory(phase: ReturnType<typeof getAlarmPhase>) {
+  switch (phase) {
+    case 'ringing':
+      return 'LIVE NOW';
+    case 'missed':
+      return 'MISSED RUN';
+    case 'scheduled':
+      return 'NEXT RUN';
+    default:
+      return 'SAVED TIME';
+  }
 }
 
 function formatScheduledForCompact(timestamp: string) {
@@ -138,11 +150,13 @@ function formatScheduledForCompact(timestamp: string) {
 
 export default function CheckpointDetailsScreen() {
   const router = useRouter();
+  const { alert, confirm } = useAppDialog();
   const params = useLocalSearchParams<{ id?: string }>();
   const colors = getAppColors(useColorScheme());
   const loadedDetailsIdRef = useRef<string | null>(null);
   const loadDetailsRequestRef = useRef(0);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [state, setState] = useState<CheckpointDetailsState>({
     alarm: null,
     progressSummary: null,
@@ -160,6 +174,7 @@ export default function CheckpointDetailsScreen() {
 
     if (!checkpointId) {
       loadedDetailsIdRef.current = null;
+      setLoadError('');
       setState({
         alarm: null,
         progressSummary: null,
@@ -177,10 +192,11 @@ export default function CheckpointDetailsScreen() {
     }
 
     try {
-      await hydrateAlarmRuntimeForCurrentUser().catch(() => null);
+      await hydrateAlarmRuntimeForCurrentUser();
       const [store, alarm] = await Promise.all([readAlarmStore(), getAlarmById(checkpointId)]);
 
       if (loadDetailsRequestRef.current === requestId) {
+        setLoadError('');
         setState({
           alarm,
           progressSummary: getProgressSummary(store),
@@ -189,6 +205,10 @@ export default function CheckpointDetailsScreen() {
           currentStreak: store.currentStreak,
           longestStreak: store.longestStreak,
         });
+      }
+    } catch (error) {
+      if (loadDetailsRequestRef.current === requestId) {
+        setLoadError(error instanceof Error ? error.message : 'Checkpoint details could not be loaded right now.');
       }
     } finally {
       if (loadDetailsRequestRef.current === requestId) {
@@ -210,44 +230,51 @@ export default function CheckpointDetailsScreen() {
   const proofCodeLabel = proofCodeType === 'barcode' ? 'Barcode' : 'QR Code';
   const attemptCount = state.successes.length + state.failures.length;
   const clearRateValue = attemptCount === 0 ? 0 : Math.round((state.successes.length / attemptCount) * 100);
-  const weeklyRate = state.progressSummary?.weeklyStats.completionRate ?? clearRateValue;
+  const alarmPhase = alarm ? getAlarmPhase(alarm) : 'unscheduled';
 
-  const handlePause = useCallback(() => {
+  const handlePause = useCallback(async () => {
     if (!alarm) {
       return;
     }
 
-    Alert.alert('Pause checkpoint?', `${alarm.label} will stay saved, but no future notifications will fire.`, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Pause',
-        onPress: async () => {
-          await cancelAlarmNotificationAsync(alarm.notificationIds);
-          await updateAlarm({ ...alarm, isActive: false, notificationIds: undefined, scheduledFor: undefined });
-          await loadDetails();
-        },
-      },
-    ]);
-  }, [alarm, loadDetails]);
+    const shouldPause = await confirm({
+      confirmLabel: 'Pause checkpoint',
+      description: `${alarm.label} will stay saved with its history, but future notifications will stop.`,
+      icon: 'pause-outline',
+      title: 'Pause checkpoint?',
+      tone: 'warning',
+    });
 
-  const handleDelete = useCallback(() => {
+    if (!shouldPause) {
+      return;
+    }
+
+    await cancelAlarmNotificationAsync(alarm.notificationIds);
+    await updateAlarm({ ...alarm, isActive: false, notificationIds: undefined, scheduledFor: undefined });
+    await loadDetails();
+  }, [alarm, confirm, loadDetails]);
+
+  const handleDelete = useCallback(async () => {
     if (!alarm) {
       return;
     }
 
-    Alert.alert('Delete checkpoint?', `Remove ${alarm.label}? This does not erase past history.`, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: async () => {
-          await cancelAlarmNotificationAsync(alarm.notificationIds);
-          await deleteAlarm(alarm.id);
-          router.replace('/(tabs)/alarms');
-        },
-      },
-    ]);
-  }, [alarm, router]);
+    const shouldDelete = await confirm({
+      confirmLabel: 'Delete checkpoint',
+      description: `Remove ${alarm.label} from your saved checkpoints? Past results will remain in your history.`,
+      icon: 'trash-outline',
+      title: 'Delete checkpoint?',
+      tone: 'danger',
+    });
+
+    if (!shouldDelete) {
+      return;
+    }
+
+    await cancelAlarmNotificationAsync(alarm.notificationIds);
+    await deleteAlarm(alarm.id);
+    router.replace('/(tabs)/alarms');
+  }, [alarm, confirm, router]);
 
   const handleEdit = useCallback(
     (recoveryFocus?: 'time' | 'code') => {
@@ -273,9 +300,18 @@ export default function CheckpointDetailsScreen() {
       return;
     }
 
-    await rescheduleAlarm(alarm);
-    await loadDetails();
-  }, [alarm, loadDetails]);
+    try {
+      await rescheduleAlarm(alarm);
+      await loadDetails();
+    } catch (error) {
+      await alert({
+        description: error instanceof Error ? error.message : 'The reminder could not be scheduled right now.',
+        icon: 'cloud-offline-outline',
+        title: 'Unable to reschedule',
+        tone: 'warning',
+      });
+    }
+  }, [alarm, alert, loadDetails]);
 
   if (isLoading) {
     return (
@@ -289,14 +325,34 @@ export default function CheckpointDetailsScreen() {
     );
   }
 
+  if (loadError) {
+    return (
+      <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
+        <FlowTopBar
+          leftAccessibilityLabel="Go back"
+          leftIcon="chevron-back"
+          onLeftPress={() => router.back()}
+          title="Checkpoint"
+        />
+        <EmptyState
+          actionLabel="Try again"
+          description={loadError}
+          onAction={() => void loadDetails()}
+          title="Checkpoint could not be loaded"
+          tone="danger"
+        />
+      </AppScreen>
+    );
+  }
+
   if (!alarm) {
     return (
       <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
         <FlowTopBar
           leftAccessibilityLabel="Go back"
-          leftLabel="Back"
+          leftIcon="chevron-back"
           onLeftPress={() => router.back()}
-          title="Checkpoint Details"
+          title="Checkpoint"
         />
         <EmptyState
           actionLabel="Back to checkpoints"
@@ -313,98 +369,140 @@ export default function CheckpointDetailsScreen() {
     <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
       <FlowTopBar
         leftAccessibilityLabel="Go back"
-        leftLabel="Back"
+        leftIcon="chevron-back"
         onLeftPress={() => router.back()}
-        title="Checkpoint Details"
+        onRightPress={() => handleEdit()}
+        rightAccessibilityLabel="Edit checkpoint"
+        rightIcon="create-outline"
+        subtitle={getUseCaseLabel(alarm.useCaseType)}
+        title={alarm.label}
       />
 
-      <FlowPanel style={styles.identityPanel}>
-        <View style={styles.identityRow}>
-          <FlowIconBadge icon="fitness-outline" size="large" tone="muted" />
-          <View style={styles.identityCopy}>
-            <Text style={[styles.checkpointTitle, { color: colors.text }]}>{alarm.label}</Text>
-            <Text style={[styles.checkpointSubtitle, { color: colors.textSoft }]}>{getUseCaseLabel(alarm.useCaseType)}</Text>
-          </View>
+      <View style={[styles.heroPanel, { backgroundColor: colors.panelMuted }]}>
+        <View style={styles.heroHeader}>
+          <Text style={[styles.heroCategory, { color: colors.textSoft }]}>{getHeroCategory(alarmPhase)}</Text>
           <StatusPill label={phase.label} tone={phase.tone} />
         </View>
-      </FlowPanel>
+        <Text style={[styles.heroTime, { color: colors.text }]}>{formatAlarmRuntimeTime(alarm)}</Text>
+        <View style={styles.heroMeta}>
+          <Ionicons color={colors.primary} name="repeat-outline" size={15} />
+          <Text style={[styles.heroMetaText, { color: colors.textSoft }]}>
+            {formatRepeatSchedule(alarm.repeatSchedule)} · {formatGracePeriodLabel(alarm.gracePeriodSeconds)} to complete
+          </Text>
+        </View>
+        {alarmPhase === 'ringing' || alarmPhase === 'missed' || alarmPhase === 'inactive' ? (
+          <Pressable
+            accessibilityRole="button"
+            onPress={alarmPhase === 'ringing' ? () => router.push(`/ringing?alarmId=${alarm.id}`) : handleReschedule}
+            style={({ pressed }) => [styles.primaryAction, { backgroundColor: colors.text }, pressed && styles.pressed]}>
+            <Text style={[styles.primaryActionText, { color: colors.elevated }]}>
+              {alarmPhase === 'ringing' ? 'Open live run' : alarmPhase === 'missed' ? 'Reschedule' : 'Resume checkpoint'}
+            </Text>
+            <Ionicons color={colors.elevated} name="arrow-forward" size={16} />
+          </Pressable>
+        ) : null}
+      </View>
 
-      <FlowPanel style={styles.tightPanel}>
-        <FlowInfoLine icon="calendar-outline" label="Schedule" value={formatScheduleLine(alarm)} />
-        <FlowInfoLine icon="repeat-outline" label="Recurrence" value={formatRepeatSchedule(alarm.repeatSchedule)} />
-        <FlowInfoLine icon="time-outline" label="Due window" value={formatDueWindow(alarm)} />
-      </FlowPanel>
+      <View style={styles.section}>
+        <Text style={[styles.sectionTitle, { color: colors.text }]}>Setup</Text>
+        <View style={[styles.setupPanel, { backgroundColor: colors.panelMuted }]}>
+          <SetupRow
+            icon="calendar-outline"
+            label="Schedule"
+            value={formatScheduleLine(alarm)}
+          />
+          <SetupRow
+            icon="qr-code-outline"
+            label="Proof"
+            value={`${proofCodeLabel}${alarm.placeObject && alarm.placeObject !== alarm.label ? ` · ${alarm.placeObject}` : ''}`}
+          />
+          <SetupRow
+            icon="people-outline"
+            label="Accountability"
+            showDivider={false}
+            value={getCheckpointSocialDescription(alarm.socialSettings)}
+          />
+        </View>
+      </View>
 
-      <FlowPanel style={styles.linkedCodePanel}>
-        <FlowSectionLabel>LINKED CODE</FlowSectionLabel>
-        <View style={styles.codeRow}>
-          {proofCodeType === 'barcode' ? <FlowBarcodePreview /> : <FlowCodePreview />}
-          <View style={styles.codeCopy}>
-            <Text style={[styles.codeTitle, { color: colors.text }]}>{proofCodeLabel}</Text>
-            <Text style={[styles.codeSubtitle, { color: colors.textSoft }]}>{getSavedCodeId(alarm.expectedQrPayload)}</Text>
-            <Text numberOfLines={1} style={[styles.codePreviewText, { color: colors.muted }]}>
-              {getProofPreview(alarm.expectedQrPayload)}
+      <View style={styles.section}>
+        <Text style={[styles.sectionTitle, { color: colors.text }]}>Results</Text>
+        <View style={[styles.reliabilityPanel, { backgroundColor: colors.panelMuted }]}>
+          <View style={styles.reliabilityHeader}>
+            <View>
+              <Text style={[styles.reliabilityValue, { color: colors.text }]}>{clearRateValue}%</Text>
+              <Text style={[styles.reliabilityTitle, { color: colors.textSoft }]}>completion rate</Text>
+            </View>
+            <Text style={[styles.resultCount, { color: colors.textSoft }]}>
+              {state.successes.length} of {attemptCount} completed
             </Text>
           </View>
+          <FlowProgressBar progress={clearRateValue / 100} tone="success" />
+          <Text style={[styles.progressHelper, { color: colors.textSoft }]}>
+            {attemptCount === 0
+              ? 'Results will appear after the first run.'
+              : `${state.failures.length} missed · based on this checkpoint only`}
+          </Text>
         </View>
-      </FlowPanel>
-
-      <FlowPanel style={styles.placePanel}>
-        <FlowInfoLine icon="location-outline" label="Place / Object" value={alarm.placeObject || alarm.label} />
-        <FlowInfoLine
-          icon="people-outline"
-          label="Accountability"
-          multilineValue
-          value={getCheckpointSocialDescription(alarm.socialSettings)}
-        />
-      </FlowPanel>
-
-      <View style={styles.streakGrid}>
-        <MiniStat
-          icon="flame"
-          label="Current streak"
-          tone="warning"
-          value={`${state.currentStreak} day${state.currentStreak === 1 ? '' : 's'}`}
-        />
-        <MiniStat
-          icon="trophy"
-          label="Best streak"
-          tone="warning"
-          value={`${state.longestStreak} day${state.longestStreak === 1 ? '' : 's'}`}
-        />
       </View>
 
-      <FlowPanel style={styles.reliabilityPanel}>
-        <View style={styles.reliabilityHeader}>
-          <Text style={[styles.reliabilityTitle, { color: colors.text }]}>Weekly reliability</Text>
-          <Text style={[styles.reliabilityValue, { color: colors.text }]}>{weeklyRate}%</Text>
+      {alarm.notes ? (
+        <View style={styles.section}>
+          <Text style={[styles.sectionTitle, { color: colors.text }]}>Notes</Text>
+          <Text style={[styles.notesText, { color: colors.textSoft }]}>{alarm.notes}</Text>
         </View>
-        <FlowProgressBar progress={weeklyRate / 100} tone="success" />
-      </FlowPanel>
+      ) : null}
 
-      <FlowPanel style={styles.notesPanel}>
-        <FlowSectionLabel>NOTES</FlowSectionLabel>
-        <Text style={[styles.notesText, { color: colors.textSoft }]}>
-          {alarm.notes || 'No notes added.'}
-        </Text>
-      </FlowPanel>
-
-      <View style={styles.buttonGrid}>
-        <DetailButton icon="create-outline" label="Edit" onPress={() => handleEdit()} />
-        <DetailButton icon="pause" label="Pause" onPress={handlePause} />
-        <DetailButton icon="qr-code-outline" label="Relink code" onPress={() => handleEdit('code')} />
-        <DetailButton destructive icon="trash-outline" label="Delete" onPress={handleDelete} />
+      <View style={styles.optionsSection}>
+        <Text style={[styles.sectionTitle, { color: colors.text }]}>Manage checkpoint</Text>
+        <View style={[styles.optionsPanel, { backgroundColor: colors.panelMuted, borderColor: colors.line }]}>
+          {alarm.isActive ? (
+            <DetailActionRow
+              accessibilityHint="Stops scheduled runs until resumed"
+              description="Stop future alerts while keeping its setup and history."
+              icon="pause-outline"
+              label="Pause checkpoint"
+              onPress={handlePause}
+              showDivider
+            />
+          ) : null}
+          <DetailActionRow
+            accessibilityHint="Deletes this checkpoint but keeps its past history"
+            description="Remove this checkpoint while preserving past results."
+            destructive
+            icon="trash-outline"
+            label="Delete checkpoint"
+            onPress={handleDelete}
+          />
+        </View>
       </View>
-
-      <Pressable
-        accessibilityRole="button"
-        onPress={getAlarmPhase(alarm) === 'ringing' ? () => router.push(`/ringing?alarmId=${alarm.id}`) : handleReschedule}
-        style={({ pressed }) => [styles.primaryAction, { backgroundColor: colors.text }, pressed && styles.pressed]}>
-        <Text style={[styles.primaryActionText, { color: colors.elevated }]}>
-          {getAlarmPhase(alarm) === 'ringing' ? 'Open live run' : alarm.isActive ? 'Reschedule next run' : 'Resume checkpoint'}
-        </Text>
-      </Pressable>
     </AppScreen>
+  );
+}
+
+function SetupRow({
+  icon,
+  label,
+  showDivider = true,
+  value,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  label: string;
+  showDivider?: boolean;
+  value: string;
+}) {
+  const colors = getAppColors(useColorScheme());
+
+  return (
+    <View style={[styles.setupRow, showDivider && { borderBottomColor: colors.line, borderBottomWidth: 1 }]}>
+      <View style={[styles.setupIcon, { backgroundColor: colors.primarySurface }]}>
+        <Ionicons color={colors.primary} name={icon} size={17} />
+      </View>
+      <View style={styles.setupCopy}>
+        <Text style={[styles.setupLabel, { color: colors.textSoft }]}>{label}</Text>
+        <Text numberOfLines={2} style={[styles.setupValue, { color: colors.text }]}>{value}</Text>
+      </View>
+    </View>
   );
 }
 
@@ -435,45 +533,132 @@ function MiniStat({
   );
 }
 
-function DetailButton({
+function DetailActionRow({
+  accessibilityHint,
+  description,
   destructive,
   icon,
   label,
   onPress,
+  showDivider,
 }: {
+  accessibilityHint?: string;
+  description: string;
   destructive?: boolean;
   icon: keyof typeof Ionicons.glyphMap;
   label: string;
   onPress: () => void;
+  showDivider?: boolean;
 }) {
   const colors = getAppColors(useColorScheme());
   const color = destructive ? colors.danger : colors.text;
 
   return (
     <Pressable
+      accessibilityHint={accessibilityHint}
       accessibilityLabel={label}
       accessibilityRole="button"
       onPress={onPress}
       style={({ pressed }) => [
-        styles.detailButton,
-        {
-          backgroundColor: colors.elevated,
-          borderColor: destructive ? withAlpha(colors.danger, '35') : colors.line,
-        },
+        styles.detailActionRow,
+        showDivider && { borderBottomColor: colors.line, borderBottomWidth: 1 },
         pressed && styles.pressed,
       ]}>
-      <Ionicons color={color} name={icon} size={15} />
-      <Text style={[styles.detailButtonText, { color }]}>{label}</Text>
+      <View style={[styles.detailActionIcon, { backgroundColor: destructive ? colors.dangerSurface : colors.elevated }]}>
+        <Ionicons color={color} name={icon} size={19} />
+      </View>
+      <View style={styles.detailActionCopy}>
+        <Text style={[styles.detailActionLabel, { color }]}>{label}</Text>
+        <Text style={[styles.detailActionDescription, { color: colors.textSoft }]}>{description}</Text>
+      </View>
     </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
   screenContent: {
-    gap: 8,
+    gap: Spacing.lg,
     paddingBottom: 36,
     paddingHorizontal: Spacing.lg,
-    paddingTop: 2,
+    paddingTop: Spacing.xs,
+  },
+  heroPanel: {
+    borderRadius: Radius.lg,
+    gap: Spacing.sm,
+    padding: Spacing.xl,
+  },
+  heroHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: Spacing.sm,
+  },
+  heroCategory: {
+    ...TextPresets.eyebrow,
+    fontSize: 10,
+    lineHeight: 14,
+  },
+  heroTime: {
+    fontFamily: Fonts.rounded,
+    fontSize: 40,
+    fontWeight: '800',
+    letterSpacing: -1,
+    lineHeight: 44,
+  },
+  heroMeta: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 6,
+  },
+  heroMetaText: {
+    ...TextPresets.body,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  section: {
+    gap: Spacing.md,
+  },
+  sectionTitle: {
+    fontFamily: Fonts.rounded,
+    fontSize: 16,
+    fontWeight: '800',
+    lineHeight: 21,
+    paddingHorizontal: Spacing.xs,
+  },
+  setupPanel: {
+    borderRadius: Radius.md,
+    gap: 0,
+    overflow: 'hidden',
+    paddingHorizontal: Spacing.md,
+  },
+  setupRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: Spacing.md,
+    minHeight: 66,
+    paddingVertical: Spacing.sm,
+  },
+  setupIcon: {
+    alignItems: 'center',
+    borderRadius: Radius.sm,
+    height: 36,
+    justifyContent: 'center',
+    width: 36,
+  },
+  setupCopy: {
+    flex: 1,
+    gap: 2,
+    minWidth: 0,
+  },
+  setupLabel: {
+    ...TextPresets.body,
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  setupValue: {
+    ...TextPresets.label,
+    fontSize: 14,
+    lineHeight: 19,
   },
   identityPanel: {
     padding: 10,
@@ -489,11 +674,11 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   checkpointTitle: {
-    fontFamily: Fonts.serif,
-    fontSize: 18,
+    fontFamily: Fonts.rounded,
+    fontSize: 21,
     fontWeight: '800',
-    letterSpacing: -0.2,
-    lineHeight: 23,
+    letterSpacing: -0.35,
+    lineHeight: 27,
   },
   checkpointSubtitle: {
     ...TextPresets.body,
@@ -569,7 +754,9 @@ const styles = StyleSheet.create({
     lineHeight: 17,
   },
   reliabilityPanel: {
-    gap: 7,
+    borderRadius: Radius.md,
+    gap: Spacing.sm,
+    padding: Spacing.lg,
   },
   reliabilityHeader: {
     alignItems: 'center',
@@ -577,15 +764,41 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   reliabilityTitle: {
-    ...TextPresets.label,
-    fontSize: 13,
-    lineHeight: 17,
+    ...TextPresets.body,
+    fontSize: 11,
+    lineHeight: 15,
   },
   reliabilityValue: {
     fontFamily: Fonts.rounded,
-    fontSize: 16,
+    fontSize: 24,
     fontWeight: '800',
-    lineHeight: 20,
+    letterSpacing: -0.5,
+    lineHeight: 28,
+  },
+  streakSummary: {
+    alignItems: 'flex-end',
+    gap: 1,
+  },
+  streakValue: {
+    fontFamily: Fonts.rounded,
+    fontSize: 18,
+    fontWeight: '800',
+    lineHeight: 22,
+  },
+  streakLabel: {
+    ...TextPresets.body,
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  progressHelper: {
+    ...TextPresets.body,
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  resultCount: {
+    ...TextPresets.label,
+    fontSize: 12,
+    lineHeight: 16,
   },
   notesPanel: {
     gap: 6,
@@ -595,33 +808,53 @@ const styles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 16,
   },
-  buttonGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
+  optionsSection: {
     gap: Spacing.sm,
   },
-  detailButton: {
-    alignItems: 'center',
-    borderRadius: 10,
+  optionsPanel: {
+    borderRadius: Radius.lg,
     borderWidth: 1,
-    flexBasis: 138,
-    flexDirection: 'row',
-    flexGrow: 1,
-    gap: 7,
-    justifyContent: 'center',
-    minHeight: 44,
-    paddingHorizontal: 10,
+    overflow: 'hidden',
+    paddingHorizontal: Spacing.sm,
   },
-  detailButtonText: {
+  detailActionRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: Spacing.md,
+    minHeight: 68,
+    paddingHorizontal: Spacing.xs,
+    paddingVertical: Spacing.sm,
+  },
+  detailActionIcon: {
+    alignItems: 'center',
+    borderRadius: Radius.md,
+    height: 40,
+    justifyContent: 'center',
+    width: 40,
+  },
+  detailActionCopy: {
+    flex: 1,
+    gap: 2,
+    minWidth: 0,
+  },
+  detailActionLabel: {
     ...TextPresets.label,
-    fontSize: 12,
+    fontSize: 13,
+    lineHeight: 17,
+  },
+  detailActionDescription: {
+    ...TextPresets.body,
+    fontSize: 11,
     lineHeight: 15,
   },
   primaryAction: {
     alignItems: 'center',
     borderRadius: Radius.md,
+    flexDirection: 'row',
+    gap: Spacing.sm,
     minHeight: 44,
     justifyContent: 'center',
+    marginTop: Spacing.md,
     paddingHorizontal: Spacing.lg,
   },
   primaryActionText: {

@@ -1,10 +1,9 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
-import * as Clipboard from 'expo-clipboard';
 import { useCameraPermissions } from 'expo-camera';
 import type { User } from '@supabase/supabase-js';
 import { useRouter } from 'expo-router';
-import { Alert, Animated, Easing, Linking, Pressable, Share, StyleSheet, Switch, Text, View } from 'react-native';
+import { Animated, Easing, Linking, Pressable, Share, StyleSheet, Switch, Text, View } from 'react-native';
 
 import { AppButton } from '@/components/ui/app-button';
 import { AppCard } from '@/components/ui/app-card';
@@ -28,9 +27,11 @@ import {
   syncNotificationStrategyAsync,
   syncWeeklyReviewReminderAsync,
 } from '@/lib/notifications';
+import { clearMyRemoteCheckpointData } from '@/lib/social/alarms';
 import { registerSignedInDevicePushToken } from '@/lib/social/push';
 import { resetSocialSyncState } from '@/lib/social/queue';
 import { getActiveStorageScope } from '@/lib/storage';
+import { useAppDialog } from '@/providers/app-dialog-provider';
 import { useSocialSession } from '@/providers/social-session-provider';
 
 type FormFeedbackTone = 'success' | 'danger' | 'warning';
@@ -236,6 +237,7 @@ function getCameraPermissionLabel(permission: ReturnType<typeof useCameraPermiss
 
 export default function AccountScreen() {
   const router = useRouter();
+  const { confirm } = useAppDialog();
   const colors = getAppColors(useColorScheme());
   const {
     configured,
@@ -395,24 +397,18 @@ export default function AccountScreen() {
     }
   };
 
-  const handleSignOut = () => {
-    Alert.alert(
-      'Sign out?',
-      'This disconnects sync and circles on this device. Your local checkpoints stay on the device.',
-      [
-        {
-          text: 'Cancel',
-          style: 'cancel',
-        },
-        {
-          text: 'Sign out',
-          style: 'destructive',
-          onPress: () => {
-            void signOutAccount();
-          },
-        },
-      ]
-    );
+  const handleSignOut = async () => {
+    const shouldSignOut = await confirm({
+      confirmLabel: 'Sign out',
+      description: 'Sync and circles will disconnect on this device. Your local checkpoints will stay here.',
+      icon: 'log-out-outline',
+      title: 'Sign out?',
+      tone: 'warning',
+    });
+
+    if (shouldSignOut) {
+      await signOutAccount();
+    }
   };
 
   const handleRequestCameraAccess = async () => {
@@ -429,7 +425,7 @@ export default function AccountScreen() {
       tone: nextPermission.granted ? 'success' : 'warning',
       message: nextPermission.granted
         ? 'Camera access is ready for proof-code scanning.'
-        : 'Camera access is still unavailable. Manual entry remains available for setup and recovery.',
+        : 'Camera access is still unavailable. Enable it in device settings before linking or clearing a checkpoint.',
     });
   };
 
@@ -496,14 +492,13 @@ export default function AccountScreen() {
       };
       const serializedData = JSON.stringify(exportedData, null, 2);
 
-      await Clipboard.setStringAsync(serializedData);
       await Share.share({
-        title: 'QR Checkpoint Alarm export',
+        title: 'Checkpoint Alarm export',
         message: serializedData,
       });
       setDataFeedback({
         tone: 'success',
-        message: 'Data export prepared and copied to the clipboard.',
+        message: 'Data export prepared. It was not copied to the clipboard.',
       });
     } catch (error) {
       setDataFeedback({
@@ -521,6 +516,9 @@ export default function AccountScreen() {
 
     try {
       const store = await readAlarmStore();
+      if (user) {
+        await clearMyRemoteCheckpointData();
+      }
       await Promise.all(store.alarms.map((alarm) => cancelAlarmNotificationAsync(alarm.notificationIds)));
       await Promise.all([resetAlarmStore(), resetSocialSyncState()]);
       await loadReminderSettings();
@@ -540,26 +538,20 @@ export default function AccountScreen() {
     }
   };
 
-  const handleDeleteData = () => {
-    Alert.alert(
-      'Delete checkpoint data?',
-      user
-        ? 'This clears saved checkpoints, proof history, queued social sync state, and scheduled notifications for the signed-in account on this device. Synced checkpoint backups are cleared when the backend is reachable.'
-        : 'This clears saved checkpoints, proof history, queued sync state, and scheduled notifications from this device.',
-      [
-        {
-          text: 'Cancel',
-          style: 'cancel',
-        },
-        {
-          text: 'Delete data',
-          style: 'destructive',
-          onPress: () => {
-            void deleteCheckpointData();
-          },
-        },
-      ]
-    );
+  const handleDeleteData = async () => {
+    const shouldDelete = await confirm({
+      confirmLabel: 'Delete checkpoint data',
+      description: user
+        ? 'Permanently clear checkpoints, history, sync state, and notifications from this device and account. Your profile and circle memberships will remain.'
+        : 'Permanently clear checkpoints, proof history, sync state, and notifications from this device.',
+      icon: 'trash-outline',
+      title: 'Delete checkpoint data?',
+      tone: 'danger',
+    });
+
+    if (shouldDelete) {
+      await deleteCheckpointData();
+    }
   };
 
   const handleSaveReminderPreferences = async () => {
@@ -610,16 +602,17 @@ export default function AccountScreen() {
   return (
     <AppScreen backgroundColor={colors.elevated} contentStyle={styles.flowContent} keyboardAware>
       <FlowTopBar
-        subtitle="Transparent. Secure. Yours."
-        title="Settings & Privacy"
+        subtitle="Private by default."
+        title="Settings"
       />
 
-      <View style={styles.settingsList}>
+      <SettingsSectionLabel>ACCOUNT</SettingsSectionLabel>
+      <View style={[styles.settingsList, { backgroundColor: colors.panel, borderColor: colors.line }]}>
         <SettingsRow
           icon={user ? 'person-circle-outline' : 'person-outline'}
           isExpanded={user ? activeSettingsPanel === 'account' : undefined}
-          subtitle={user ? signedInAccountLabel : 'Enable sync, backup, and circles'}
-          title={user ? 'Signed In' : 'Optional Sign In'}
+          subtitle={user ? signedInAccountLabel : 'Optional · backup, sync, and circles'}
+          title={user ? 'Signed in' : 'Sync & account'}
           value={user ? 'Manage' : configured ? undefined : 'Unavailable'}
           onPress={() => {
             if (user) {
@@ -654,77 +647,113 @@ export default function AccountScreen() {
                 />
               ) : (
                 <>
-                  <SettingsPanelHeader
-                    title={profile?.displayName || suggestedDisplayName || 'Your account'}
-                    description={profile?.handle ? `@${profile.handle} - ${signedInAccountLabel}` : signedInAccountLabel}
-                  />
-                  <AppInput
-                    autoCapitalize="words"
-                    error={hasAttemptedProfileSubmit ? profileErrors.displayName : undefined}
-                    helper="The readable name your circles see."
-                    label="Display name"
-                    onChangeText={(value) => {
-                      setDisplayName(value);
-                      setProfileFeedback(null);
-                    }}
-                    placeholder="Early Riser"
-                    value={displayName}
-                  />
-                  <AppInput
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    error={hasAttemptedProfileSubmit ? profileErrors.handle : undefined}
-                    helper={hasAttemptedProfileSubmit && profileErrors.handle ? undefined : handleHelper}
-                    label="Handle"
-                    onChangeText={(value) => {
-                      setHandle(normalizeHandle(value));
-                      setProfileFeedback(null);
-                    }}
-                    placeholder="early_riser"
-                    value={handle}
-                  />
-                  <PreferenceSwitch
-                    label="Circle notifications"
-                    description="Updates for circles, invites, and shared progress."
-                    value={allowCircleNotifications}
-                    onValueChange={(value) => {
-                      setAllowCircleNotifications(value);
-                      setProfileFeedback(null);
-                    }}
-                  />
-                  <PreferenceSwitch
-                    label="Missed-checkpoint alerts"
-                    description="Alerts when circle members miss a checkpoint they chose to share."
-                    value={allowMissedAlarmAlerts}
-                    onValueChange={(value) => {
-                      setAllowMissedAlarmAlerts(value);
-                      setProfileFeedback(null);
-                    }}
-                  />
+                  <AccountSettingsGroup
+                    description="Choose how people recognize you in shared circles."
+                    icon="person-outline"
+                    title="Public profile">
+                    <AppInput
+                      autoCapitalize="words"
+                      containerStyle={styles.profileField}
+                      error={hasAttemptedProfileSubmit ? profileErrors.displayName : undefined}
+                      helper="Shown to people in your circles."
+                      inputStyle={styles.profileInput}
+                      label="Display name"
+                      onChangeText={(value) => {
+                        setDisplayName(value);
+                        setProfileFeedback(null);
+                      }}
+                      placeholder="Early Riser"
+                      value={displayName}
+                    />
+                    <AppInput
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      containerStyle={styles.profileField}
+                      error={hasAttemptedProfileSubmit ? profileErrors.handle : undefined}
+                      helper={hasAttemptedProfileSubmit && profileErrors.handle ? undefined : handleHelper}
+                      inputStyle={styles.profileInput}
+                      label="Handle"
+                      onChangeText={(value) => {
+                        setHandle(normalizeHandle(value));
+                        setProfileFeedback(null);
+                      }}
+                      placeholder="early_riser"
+                      value={handle}
+                    />
+                  </AccountSettingsGroup>
+
+                  <AccountSettingsGroup
+                    description="Control which circle activity reaches this device."
+                    icon="notifications-outline"
+                    title="Circle alerts">
+                    <PreferenceSwitch
+                      label="Circle activity"
+                      description="Invites, shared progress, and circle updates."
+                      value={allowCircleNotifications}
+                      onValueChange={(value) => {
+                        setAllowCircleNotifications(value);
+                        setProfileFeedback(null);
+                      }}
+                    />
+                    <PreferenceSwitch
+                      label="Missed checkpoints"
+                      description="Alerts when a member shares a missed checkpoint."
+                      value={allowMissedAlarmAlerts}
+                      onValueChange={(value) => {
+                        setAllowMissedAlarmAlerts(value);
+                        setProfileFeedback(null);
+                      }}
+                    />
+                  </AccountSettingsGroup>
                   {profileError ? <Text style={[TextPresets.body, { color: colors.danger }]}>{profileError}</Text> : null}
                   {profileFeedback && profileFeedbackColors ? (
                     <FeedbackMessage colors={profileFeedbackColors} message={profileFeedback.message} />
                   ) : null}
                   <AppButton
                     disabled={isProfileSubmitting || isProfileLoading}
-                    label={isProfileSubmitting || isProfileLoading ? 'Saving...' : 'Save profile'}
+                    label={isProfileSubmitting || isProfileLoading ? 'Saving...' : 'Save changes'}
                     onPress={handleSaveProfile}
+                    variant="tonal"
                   />
-                  <AppButton
+                  <Pressable
+                    accessibilityLabel={isSigningOut ? 'Signing out' : 'Sign out'}
+                    accessibilityRole="button"
                     disabled={isSigningOut}
-                    label={isSigningOut ? 'Signing out...' : 'Sign out'}
                     onPress={handleSignOut}
-                    variant="danger"
-                  />
+                    style={({ pressed }) => [
+                      styles.signOutAction,
+                      {
+                        backgroundColor: colors.dangerSurface,
+                        borderColor: colors.danger,
+                        opacity: isSigningOut ? 0.5 : pressed ? 0.82 : 1,
+                      },
+                    ]}>
+                    <View style={[styles.signOutIcon, { backgroundColor: colors.elevated }]}>
+                      <Ionicons color={colors.danger} name="log-out-outline" size={18} />
+                    </View>
+                    <View style={styles.signOutCopy}>
+                      <Text style={[styles.signOutTitle, { color: colors.danger }]}>
+                        {isSigningOut ? 'Signing out…' : 'Sign out'}
+                      </Text>
+                      <Text style={[styles.signOutDescription, { color: colors.textSoft }]}>
+                        Disconnect sync and circles on this device.
+                      </Text>
+                    </View>
+                    <Ionicons color={colors.danger} name="chevron-forward" size={17} />
+                  </Pressable>
                 </>
               )}
             </AppCard>
           </View>
         ) : null}
+      </View>
+
+      <SettingsSectionLabel>APP PERMISSIONS</SettingsSectionLabel>
+      <View style={[styles.settingsList, { backgroundColor: colors.panel, borderColor: colors.line }]}>
         <SettingsRow
           icon="notifications-outline"
           isExpanded={activeSettingsPanel === 'notifications'}
-          subtitle="Required for checkpoint alarms"
+          subtitle="Alarm alerts and reminders"
           title="Notifications"
           value={notificationPermissionLabel}
           onPress={() => {
@@ -764,7 +793,7 @@ export default function AccountScreen() {
         <SettingsRow
           icon="camera-outline"
           isExpanded={activeSettingsPanel === 'camera'}
-          subtitle="Required for QR proof scans"
+          subtitle="Scan QR and barcode proof"
           title="Camera"
           value={cameraPermissionLabel}
           onPress={() => {
@@ -801,11 +830,15 @@ export default function AccountScreen() {
             </AppCard>
           </View>
         ) : null}
+      </View>
+
+      <SettingsSectionLabel>PREFERENCES</SettingsSectionLabel>
+      <View style={[styles.settingsList, { backgroundColor: colors.panel, borderColor: colors.line }]}>
         <SettingsRow
           icon="time-outline"
           isExpanded={activeSettingsPanel === 'reminders'}
-          subtitle="Urgency, evening prep, and weekly review"
-          title="Reminder Behavior"
+          subtitle="Extra nudges and weekly review"
+          title="Reminder behavior"
           onPress={() => setActiveSettingsPanel(activeSettingsPanel === 'reminders' ? null : 'reminders')}
         />
         {activeSettingsPanel === 'reminders' ? (
@@ -858,18 +891,19 @@ export default function AccountScreen() {
         ) : null}
       </View>
 
-      <View style={styles.settingsList}>
+      <SettingsSectionLabel>YOUR DATA</SettingsSectionLabel>
+      <View style={[styles.settingsList, { backgroundColor: colors.panel, borderColor: colors.line }]}>
         <SettingsRow
           icon="download-outline"
           subtitle="Save or transfer your data"
-          title="Export Data"
+          title="Export data"
           value={isExportingData ? 'Working' : undefined}
           onPress={handleExportData}
         />
         <SettingsRow
           icon="trash-outline"
           subtitle="Permanently delete your data"
-          title="Delete Data"
+          title="Delete data"
           value={isDeletingData ? 'Working' : undefined}
           onPress={handleDeleteData}
         />
@@ -879,13 +913,19 @@ export default function AccountScreen() {
         <FeedbackMessage colors={dataFeedbackColors} message={dataFeedback.message} />
       ) : null}
       <View style={[styles.localFooter, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
-        <Ionicons color={colors.textSoft} name="lock-closed-outline" size={20} />
+        <Ionicons color={colors.primary} name="lock-closed-outline" size={18} />
         <Text style={[styles.helperCaption, styles.localFooterText, { color: colors.textSoft }]}>
-          Your data stays on your device. You are always in control.
+          Stored on this device unless you choose to sync.
         </Text>
       </View>
     </AppScreen>
   );
+}
+
+function SettingsSectionLabel({ children }: { children: ReactNode }) {
+  const colors = getAppColors(useColorScheme());
+
+  return <Text style={[styles.sectionLabel, { color: colors.textSoft }]}>{children}</Text>;
 }
 
 function SettingsPanelHeader({
@@ -951,13 +991,13 @@ function SettingsRow({
       style={({ pressed }) => [
         styles.settingsRow,
         {
-          backgroundColor: colors.elevated,
+          backgroundColor: 'transparent',
           borderColor: colors.line,
         },
         pressed ? styles.rowPressed : null,
       ]}>
-      <View style={[styles.settingsIcon, { backgroundColor: colors.panelMuted }]}>
-        <Ionicons color={colors.text} name={icon} size={22} />
+      <View style={[styles.settingsIcon, { backgroundColor: colors.primarySurface }]}>
+        <Ionicons color={colors.primary} name={icon} size={19} />
       </View>
       <View style={styles.settingsCopy}>
         <Text style={[styles.settingsTitle, { color: colors.text }]}>{title}</Text>
@@ -968,6 +1008,35 @@ function SettingsRow({
         <Ionicons color={colors.muted} name="chevron-forward" size={19} />
       </Animated.View>
     </Pressable>
+  );
+}
+
+function AccountSettingsGroup({
+  children,
+  description,
+  icon,
+  title,
+}: {
+  children: ReactNode;
+  description: string;
+  icon: keyof typeof Ionicons.glyphMap;
+  title: string;
+}) {
+  const colors = getAppColors(useColorScheme());
+
+  return (
+    <View style={[styles.accountSettingsGroup, { backgroundColor: colors.panelMuted, borderColor: colors.line }]}>
+      <View style={styles.accountSettingsGroupHeader}>
+        <View style={[styles.accountSettingsGroupIcon, { backgroundColor: colors.primarySurface }]}>
+          <Ionicons color={colors.primary} name={icon} size={18} />
+        </View>
+        <View style={styles.accountSettingsGroupCopy}>
+          <Text style={[styles.accountSettingsGroupTitle, { color: colors.text }]}>{title}</Text>
+          <Text style={[styles.accountSettingsGroupDescription, { color: colors.textSoft }]}>{description}</Text>
+        </View>
+      </View>
+      <View style={styles.accountSettingsGroupBody}>{children}</View>
+    </View>
   );
 }
 
@@ -987,13 +1056,14 @@ function PreferenceSwitch({
   return (
     <View style={[styles.preferenceRow, { borderColor: colors.border }]}>
       <View style={styles.preferenceCopy}>
-        <Text style={[TextPresets.label, { color: colors.text }]}>{label}</Text>
-        <Text style={[TextPresets.body, { color: colors.muted }]}>{description}</Text>
+        <Text style={[styles.preferenceLabel, { color: colors.text }]}>{label}</Text>
+        <Text style={[styles.preferenceDescription, { color: colors.textSoft }]}>{description}</Text>
       </View>
       <Switch
         accessibilityHint={`Turns ${label.toLowerCase()} on or off.`}
         accessibilityLabel={label}
         onValueChange={onValueChange}
+        style={styles.preferenceSwitch}
         trackColor={{ false: colors.border, true: colors.primary }}
         value={value}
       />
@@ -1028,10 +1098,18 @@ function FeedbackMessage({
 
 const styles = StyleSheet.create({
   flowContent: {
-    gap: Spacing.md,
+    gap: Spacing.sm,
     paddingHorizontal: Spacing.lg,
     paddingBottom: 88,
-    paddingTop: 2,
+    paddingTop: Spacing.xs,
+  },
+  sectionLabel: {
+    ...TextPresets.eyebrow,
+    fontSize: 10,
+    letterSpacing: 0.55,
+    lineHeight: 14,
+    marginTop: Spacing.md,
+    paddingHorizontal: Spacing.xs,
   },
   syncCard: {
     gap: Spacing.md,
@@ -1071,16 +1149,98 @@ const styles = StyleSheet.create({
     gap: 2,
   },
   settingsList: {
-    borderRadius: Radius.lg,
+    borderRadius: Radius.md,
+    borderWidth: 1,
     overflow: 'hidden',
   },
   settingsDetailSlot: {
     backgroundColor: 'transparent',
-    paddingHorizontal: Spacing.sm,
+    paddingHorizontal: Spacing.xs,
     paddingVertical: Spacing.xs,
   },
   settingsDetailCard: {
+    backgroundColor: 'transparent',
+    borderColor: 'transparent',
+    gap: Spacing.lg,
+    paddingHorizontal: Spacing.sm,
+  },
+  accountSettingsGroup: {
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    gap: Spacing.lg,
+    padding: Spacing.md,
+  },
+  accountSettingsGroupHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
     gap: Spacing.md,
+  },
+  accountSettingsGroupIcon: {
+    alignItems: 'center',
+    borderRadius: Radius.sm,
+    height: 38,
+    justifyContent: 'center',
+    width: 38,
+  },
+  accountSettingsGroupCopy: {
+    flex: 1,
+    gap: 2,
+    minWidth: 0,
+  },
+  accountSettingsGroupTitle: {
+    ...TextPresets.label,
+    fontSize: 14,
+    fontWeight: '800',
+    lineHeight: 19,
+  },
+  accountSettingsGroupDescription: {
+    ...TextPresets.body,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  accountSettingsGroupBody: {
+    gap: Spacing.md,
+  },
+  profileField: {
+    gap: 6,
+  },
+  profileInput: {
+    borderRadius: Radius.md,
+    minHeight: 50,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: 12,
+  },
+  signOutAction: {
+    alignItems: 'center',
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: Spacing.md,
+    minHeight: 66,
+    padding: Spacing.md,
+  },
+  signOutIcon: {
+    alignItems: 'center',
+    borderRadius: Radius.sm,
+    height: 38,
+    justifyContent: 'center',
+    width: 38,
+  },
+  signOutCopy: {
+    flex: 1,
+    gap: 1,
+    minWidth: 0,
+  },
+  signOutTitle: {
+    ...TextPresets.label,
+    fontSize: 13,
+    fontWeight: '800',
+    lineHeight: 17,
+  },
+  signOutDescription: {
+    ...TextPresets.body,
+    fontSize: 11,
+    lineHeight: 15,
   },
   settingsPanelHeader: {
     alignItems: 'flex-start',
@@ -1111,19 +1271,19 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     flexDirection: 'row',
     gap: Spacing.md,
-    minHeight: 68,
+    minHeight: 64,
     paddingHorizontal: Spacing.md,
-    paddingVertical: 10,
+    paddingVertical: Spacing.sm,
   },
   rowPressed: {
     opacity: 0.88,
   },
   settingsIcon: {
     alignItems: 'center',
-    borderRadius: Radius.md,
-    height: 38,
+    borderRadius: Radius.sm,
+    height: 34,
     justifyContent: 'center',
-    width: 38,
+    width: 34,
   },
   settingsCopy: {
     flex: 1,
@@ -1149,14 +1309,13 @@ const styles = StyleSheet.create({
   localFooter: {
     alignItems: 'center',
     alignSelf: 'center',
-    borderRadius: Radius.lg,
-    borderWidth: 1,
+    borderRadius: Radius.md,
     flexDirection: 'row',
     gap: Spacing.sm,
-    marginTop: Spacing.sm,
+    marginTop: Spacing.md,
     maxWidth: 360,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.xs,
+    paddingVertical: Spacing.xs,
     width: '100%',
   },
   localFooterText: {
@@ -1252,14 +1411,30 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   preferenceRow: {
-    alignItems: 'flex-start',
+    alignItems: 'center',
     borderTopWidth: 1,
     flexDirection: 'row',
     gap: Spacing.md,
-    paddingTop: Spacing.sm,
+    minHeight: 62,
+    paddingTop: Spacing.md,
   },
   preferenceCopy: {
     flex: 1,
-    gap: Spacing.xs,
+    gap: 2,
+  },
+  preferenceLabel: {
+    ...TextPresets.label,
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 17,
+  },
+  preferenceDescription: {
+    ...TextPresets.body,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  preferenceSwitch: {
+    marginRight: -3,
+    transform: [{ scale: 0.9 }],
   },
 });

@@ -1,4 +1,8 @@
-import { readScopedStorageValue, writeScopedStorageValue } from '@/lib/storage';
+import {
+  readDeviceStorageValue,
+  readScopedStorageValue,
+  writeDeviceStorageValue,
+} from '@/lib/storage';
 
 const ONBOARDING_STORAGE_KEY = 'social-pressure-alarm/onboarding';
 
@@ -50,14 +54,16 @@ function normalizeOptionalIsoString(value: unknown) {
 }
 
 export async function readOnboardingState() {
-  const scopedValue = await readScopedStorageValue(ONBOARDING_STORAGE_KEY);
+  const deviceValue = await readDeviceStorageValue(ONBOARDING_STORAGE_KEY);
+  const scopedValue = deviceValue === null ? await readScopedStorageValue(ONBOARDING_STORAGE_KEY) : null;
+  const storedValue = deviceValue ?? scopedValue?.value ?? null;
 
-  if (!scopedValue.value) {
+  if (!storedValue) {
     return createDefaultOnboardingState();
   }
 
   try {
-    const parsed = JSON.parse(scopedValue.value);
+    const parsed = JSON.parse(storedValue);
 
     if (!isRecord(parsed)) {
       return createDefaultOnboardingState();
@@ -65,12 +71,18 @@ export async function readOnboardingState() {
 
     const status = normalizeOnboardingStatus(parsed.status);
 
-    return {
+    const normalizedState = {
       status,
       currentStep: normalizeOnboardingStep(parsed.currentStep),
       returnToPermissionsAfterSettings: normalizeBoolean(parsed.returnToPermissionsAfterSettings),
       updatedAt: normalizeOptionalIsoString(parsed.updatedAt),
     };
+
+    if (deviceValue === null && scopedValue?.value) {
+      await writeDeviceStorageValue(ONBOARDING_STORAGE_KEY, JSON.stringify(normalizedState));
+    }
+
+    return normalizedState;
   } catch {
     return createDefaultOnboardingState();
   }
@@ -88,7 +100,7 @@ export async function writeOnboardingState(
     updatedAt: new Date().toISOString(),
   };
 
-  await writeScopedStorageValue(ONBOARDING_STORAGE_KEY, JSON.stringify(nextState));
+  await writeDeviceStorageValue(ONBOARDING_STORAGE_KEY, JSON.stringify(nextState));
 
   return nextState;
 }

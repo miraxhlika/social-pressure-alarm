@@ -697,16 +697,6 @@ function mergeAlarmWithRuntimeMetadata(alarm: AlarmDefinition, runtimeMetadata?:
   };
 }
 
-async function writeAlarmStore(store: AlarmStore) {
-  await writeScopedStorageValue(
-    STORAGE_KEY,
-    JSON.stringify({
-      ...store,
-      alarms: store.alarms.map(stripAlarmRuntimeMetadata),
-    })
-  );
-}
-
 async function writeAlarmStoreForScope(scope: string, store: AlarmStore) {
   await writeScopedStorageValueForScope(
     STORAGE_KEY,
@@ -995,7 +985,29 @@ async function reconcileOverdueAlarmOutcomesForState(store: AlarmStore, runtimeS
 }
 
 async function reconcileAlarmOutcomesAndSchedules(store: AlarmStore, runtimeStore: AlarmRuntimeStore) {
-  const outcomeState = await reconcileOverdueAlarmOutcomesForState(store, runtimeStore);
+  // A checkpoint is semantically unique by its proof, time, and recurrence. Repair
+  // older duplicate creations before reconciling notifications so the discarded
+  // checkpoint's scheduled notifications are cancelled as orphans below.
+  const deduplicatedAlarms = mergeAlarmDefinitions([], store.alarms, []).alarms;
+  const retainedAlarmIds = new Set(deduplicatedAlarms.map((alarm) => alarm.id));
+  const duplicateAlarmIds = store.alarms
+    .filter((alarm) => !retainedAlarmIds.has(alarm.id))
+    .map((alarm) => alarm.id);
+  const normalizedStore =
+    deduplicatedAlarms.length === store.alarms.length
+      ? store
+      : {
+          ...store,
+          alarms: deduplicatedAlarms,
+        };
+  const normalizedRuntimeStore =
+    duplicateAlarmIds.length === 0 || !shouldSyncRemoteAlarms()
+      ? runtimeStore
+      : {
+          ...runtimeStore,
+          pendingDeletes: [...new Set([...runtimeStore.pendingDeletes, ...duplicateAlarmIds])],
+        };
+  const outcomeState = await reconcileOverdueAlarmOutcomesForState(normalizedStore, normalizedRuntimeStore);
 
   if (outcomeState.resolvedCount > 0) {
     await writeLocalAlarmState(outcomeState.store, outcomeState.runtimeStore);
@@ -1008,6 +1020,7 @@ async function reconcileAlarmSchedules(store: AlarmStore, runtimeStore: AlarmRun
   const {
     cancelAlarmNotificationAsync,
     getAlarmNotificationStrategyKey,
+    isNotificationPermissionRequiredError,
     readNotificationPreferences,
     scheduleAlarmNotificationAsync,
   } = await import('@/lib/notifications');
@@ -1068,9 +1081,20 @@ async function reconcileAlarmSchedules(store: AlarmStore, runtimeStore: AlarmRun
       await cancelAlarmNotificationAsync(runtimeMetadata.notificationIds);
     }
 
-    const scheduled = await scheduleAlarmNotificationAsync(alarm, {
-      scheduledFor: alarm.scheduledFor,
-    });
+    let scheduled: Awaited<ReturnType<typeof scheduleAlarmNotificationAsync>>;
+
+    try {
+      scheduled = await scheduleAlarmNotificationAsync(alarm, {
+        scheduledFor: alarm.scheduledFor,
+      });
+    } catch (error) {
+      if (isNotificationPermissionRequiredError(error)) {
+        delete nextRuntimeStore.alarms[alarm.id];
+        continue;
+      }
+
+      throw error;
+    }
 
     nextRuntimeStore.alarms[alarm.id] = {
       notificationIds: scheduled.notificationIds,
@@ -1656,11 +1680,23 @@ export async function saveNewAlarm(alarm: Alarm) {
     clientId: alarm.clientId ?? alarm.id,
     updatedAt: alarm.updatedAt ?? now,
   };
+  const isExistingCreation = store.alarms.some(
+    (candidate) =>
+      candidate.id === alarmToSave.id ||
+      (candidate.clientId !== undefined && candidate.clientId === alarmToSave.clientId)
+  );
 
   const nextStore: AlarmStore = {
     ...store,
-    alarms: sortAlarms([stripAlarmRuntimeMetadata(alarmToSave), ...store.alarms]),
-    lifetimeAlarmCreations: store.lifetimeAlarmCreations + 1,
+    alarms: sortAlarms([
+      stripAlarmRuntimeMetadata(alarmToSave),
+      ...store.alarms.filter(
+        (candidate) =>
+          candidate.id !== alarmToSave.id &&
+          (candidate.clientId === undefined || candidate.clientId !== alarmToSave.clientId)
+      ),
+    ]),
+    lifetimeAlarmCreations: store.lifetimeAlarmCreations + (isExistingCreation ? 0 : 1),
     checkpointPresets: upsertCheckpointPreset(store.checkpointPresets, alarmToSave),
   };
   let nextRuntimeStore: AlarmRuntimeStore = {
@@ -1988,6 +2024,23 @@ export function formatAlarmTime(hour: number, minute: number) {
     hour: 'numeric',
     minute: '2-digit',
   });
+}
+
+export function formatAlarmRuntimeTime(
+  alarm: Pick<Alarm, 'hour' | 'minute' | 'isActive' | 'scheduledFor'>
+) {
+  if (alarm.isActive && alarm.scheduledFor) {
+    const scheduledDate = new Date(alarm.scheduledFor);
+
+    if (!Number.isNaN(scheduledDate.getTime())) {
+      return scheduledDate.toLocaleTimeString([], {
+        hour: 'numeric',
+        minute: '2-digit',
+      });
+    }
+  }
+
+  return formatAlarmTime(alarm.hour, alarm.minute);
 }
 
 export function formatScheduledFor(scheduledFor?: string) {

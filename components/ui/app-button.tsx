@@ -1,13 +1,15 @@
+import { Ionicons } from '@expo/vector-icons';
 import { Pressable, StyleProp, StyleSheet, Text, TextStyle, ViewStyle } from 'react-native';
 
 import { Fonts, getAppColors, Radius, Spacing, TextPresets } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 
-type AppButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger';
+type AppButtonVariant = 'primary' | 'tonal' | 'secondary' | 'ghost' | 'danger';
 type AppButtonSize = 'default' | 'compact';
 
 type AppButtonProps = {
   label: string;
+  icon?: keyof typeof Ionicons.glyphMap;
   onPress: () => void;
   variant?: AppButtonVariant;
   size?: AppButtonSize;
@@ -18,6 +20,16 @@ type AppButtonProps = {
 
 function getVariantStyles(variant: AppButtonVariant, colors: ReturnType<typeof getAppColors>) {
   switch (variant) {
+    case 'tonal':
+      return {
+        container: {
+          backgroundColor: colors.panelMuted,
+          borderColor: colors.ring,
+        },
+        label: {
+          color: colors.primary,
+        },
+      };
     case 'secondary':
       return {
         container: {
@@ -63,6 +75,7 @@ function getVariantStyles(variant: AppButtonVariant, colors: ReturnType<typeof g
 
 export function AppButton({
   label,
+  icon,
   onPress,
   variant = 'primary',
   size = 'default',
@@ -76,6 +89,7 @@ export function AppButton({
   return (
     <Pressable
       android_ripple={{ color: colors.ring }}
+      accessibilityLabel={label}
       accessibilityRole="button"
       accessibilityState={{ disabled }}
       disabled={disabled}
@@ -88,6 +102,13 @@ export function AppButton({
         pressed ? styles.pressed : null,
         style,
       ]}>
+      {icon ? (
+        <Ionicons
+          color={variantStyles.label.color}
+          name={icon}
+          size={size === 'compact' ? 17 : 19}
+        />
+      ) : null}
       <Text style={[styles.label, size === 'compact' ? styles.compactLabel : null, variantStyles.label, textStyle]}>
         {label}
       </Text>
@@ -100,6 +121,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     borderRadius: Radius.lg,
     borderWidth: 1,
+    flexDirection: 'row',
+    gap: Spacing.sm,
     flexShrink: 1,
     justifyContent: 'center',
     minHeight: 52,

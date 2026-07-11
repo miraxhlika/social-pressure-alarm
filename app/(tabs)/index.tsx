@@ -7,11 +7,8 @@ import { AppScreen } from '@/components/ui/app-screen';
 import { EmptyState } from '@/components/ui/empty-state';
 import {
   FlowFooterButton,
-  FlowIconBadge,
   FlowListRow,
-  FlowMetricTile,
   FlowPanel,
-  FlowSectionLabel,
   FlowTopBar,
 } from '@/components/ui/flow-primitives';
 import { LoadingBlock } from '@/components/ui/loading-block';
@@ -19,8 +16,7 @@ import { Fonts, Radius, Spacing, TextPresets, getAppColors } from '@/constants/t
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import {
   ALARM_RUNTIME_CACHE_MAX_AGE_MS,
-  formatAlarmTime,
-  formatScheduledFor,
+  formatAlarmRuntimeTime,
   hydrateAlarmRuntimeForCurrentUser,
 } from '@/lib/alarms';
 import {
@@ -30,6 +26,7 @@ import {
   getSocialStatusLabel,
   getSocialStatusTone,
 } from '@/lib/dashboard';
+import { getNotificationPermissionState, isNotificationPermissionEnabled } from '@/lib/notifications';
 import { ProgressSummary, getProgressSummary } from '@/lib/progress';
 import { SOCIAL_CIRCLES_CACHE_MAX_AGE_MS, listMySocialCircles } from '@/lib/social/circles';
 import { getSocialRuntimeSnapshot } from '@/lib/social/queue';
@@ -48,6 +45,7 @@ type HomeState = {
   failureHistory: FailureHistoryEntry[];
   latestSuccess: SuccessHistoryEntry | null;
   latestFailure: FailureHistoryEntry | null;
+  notificationsEnabled: boolean;
 };
 
 type TimelineItem = {
@@ -393,6 +391,7 @@ export default function TodayScreen() {
   const hasLoadedHomeRef = useRef(false);
   const loadHomeRequestRef = useRef(0);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [state, setState] = useState<HomeState>({
     alarms: [],
     currentStreak: 0,
@@ -404,6 +403,7 @@ export default function TodayScreen() {
     failureHistory: [],
     latestSuccess: null,
     latestFailure: null,
+    notificationsEnabled: true,
   });
 
   const loadHome = useCallback(async () => {
@@ -416,15 +416,17 @@ export default function TodayScreen() {
     }
 
     try {
-      const [store, socialRuntime, circles] = await Promise.all([
+      const [store, socialRuntime, circles, notificationPermissionState] = await Promise.all([
         hydrateAlarmRuntimeForCurrentUser({ maxAgeMs: ALARM_RUNTIME_CACHE_MAX_AGE_MS }),
         getSocialRuntimeSnapshot(),
         shouldLoadCircles
           ? listMySocialCircles({ maxAgeMs: SOCIAL_CIRCLES_CACHE_MAX_AGE_MS }).catch(() => [])
           : Promise.resolve([]),
+        getNotificationPermissionState(),
       ]);
 
       if (loadHomeRequestRef.current === requestId) {
+        setLoadError('');
         setState({
           alarms: store.alarms,
           currentStreak: store.currentStreak,
@@ -436,7 +438,12 @@ export default function TodayScreen() {
           failureHistory: store.failureHistory,
           latestSuccess: store.successHistory[0] ?? null,
           latestFailure: store.failureHistory[0] ?? null,
+          notificationsEnabled: isNotificationPermissionEnabled(notificationPermissionState),
         });
+      }
+    } catch (error) {
+      if (loadHomeRequestRef.current === requestId) {
+        setLoadError(error instanceof Error ? error.message : 'Today could not be loaded right now.');
       }
     } finally {
       if (loadHomeRequestRef.current === requestId) {
@@ -493,7 +500,7 @@ export default function TodayScreen() {
       backgroundColor={colors.elevated}
       contentStyle={styles.screenContent}
       footer={
-        isLoading ? null : (
+        isLoading || loadError ? null : (
           <View style={styles.createCtaFooter}>
             <FlowFooterButton label="Create Checkpoint" onPress={handleCreateCheckpoint} />
           </View>
@@ -504,6 +511,17 @@ export default function TodayScreen() {
         title="Today"
       />
 
+      {!isLoading && !loadError && state.alarms.length > 0 && !state.notificationsEnabled ? (
+        <FlowListRow
+          description="Active checkpoints cannot remind you until notifications are enabled in device settings."
+          leading={<Ionicons color={colors.danger} name="notifications-off-outline" size={20} />}
+          onPress={() => router.push('/account')}
+          statusLabel="Fix"
+          statusTone="danger"
+          title="Checkpoint reminders are off"
+        />
+      ) : null}
+
       {isLoading ? (
         <LoadingBlock
           description="Checking your next checkpoint and latest proof."
@@ -512,10 +530,19 @@ export default function TodayScreen() {
           title="Loading today"
           tone="canvas"
         />
+      ) : loadError ? (
+        <EmptyState
+          actionLabel="Try again"
+          description={loadError}
+          icon="alert-circle-outline"
+          onAction={() => void loadHome()}
+          title="Today could not be loaded"
+          tone="danger"
+        />
       ) : state.alarms.length === 0 ? (
         <EmptyState
           actionLabel="Create your first checkpoint"
-          description="Start with one checkpoint tied to something real: waking up, medication, study, training, or leaving on time."
+          description="Start with one checkpoint tied to something real: waking up, study, training, or leaving on time."
           eyebrow="Today"
           icon="scan-outline"
           onAction={() => router.push({ pathname: '/create', params: { returnTo: '/' } })}
@@ -524,35 +551,80 @@ export default function TodayScreen() {
         />
       ) : (
         <>
-          <FlowPanel style={styles.duePanel}>
-            <View style={styles.dueRow}>
-              <FlowIconBadge icon="bandage-outline" size="large" tone="muted" />
-              <View style={styles.dueCopy}>
-                <Text style={[styles.dueKicker, { color: colors.primary }]}>
-                  {primaryPhaseLabel === 'Scan now' ? 'DUE NOW' : 'NEXT UP'}
+          <FlowPanel style={styles.heroPanel}>
+            <View style={styles.heroHeader}>
+              <Text style={[styles.dueKicker, { color: colors.primary }]}>
+                {primaryPhaseLabel === 'Scan now'
+                  ? 'READY TO CHECK IN'
+                  : primaryPhaseLabel === 'Cleared'
+                    ? 'COMPLETED'
+                    : 'UP NEXT'}
+              </Text>
+              <View
+                style={[
+                  styles.heroStatus,
+                  {
+                    backgroundColor:
+                      primaryPhaseLabel === 'Cleared' ? colors.successSurface : colors.primarySurface,
+                  },
+                ]}>
+                <View
+                  style={[
+                    styles.heroStatusDot,
+                    { backgroundColor: primaryPhaseLabel === 'Cleared' ? colors.success : colors.primary },
+                  ]}
+                />
+                <Text
+                  style={[
+                    styles.heroStatusText,
+                    { color: primaryPhaseLabel === 'Cleared' ? colors.success : colors.primary },
+                  ]}>
+                  {primaryPhaseLabel}
                 </Text>
-                <Text style={[styles.dueTitle, { color: colors.text }]}>
-                  {primaryAlarm ? primaryAlarm.label : 'Create checkpoint'}
-                </Text>
-                <Text style={[styles.dueBody, { color: colors.textSoft }]}>
-                  {formatDueWindow(primaryAlarm)}
-                </Text>
-                <Pressable
-                  accessibilityLabel={primaryPhaseLabel === 'Scan now' ? 'Check in now' : 'Open checkpoint'}
-                  accessibilityRole="button"
-                  onPress={handlePrimaryPress}
-                  style={({ pressed }) => [styles.checkInButton, { backgroundColor: colors.text }, pressed && styles.pressed]}>
-                  <Text style={[styles.checkInLabel, { color: colors.elevated }]}>
-                    {primaryPhaseLabel === 'Scan now' ? 'Check In Now' : 'Open Checkpoint'}
-                  </Text>
-                  <Ionicons color={colors.elevated} name="chevron-forward" size={16} />
-                </Pressable>
               </View>
             </View>
+
+            <Text style={[styles.heroTime, { color: colors.text }]}>
+              {primaryAlarm ? formatAlarmRuntimeTime(primaryAlarm) : '—'}
+            </Text>
+            <Text style={[styles.heroTitle, { color: colors.text }]}>
+              {primaryAlarm ? primaryAlarm.label : 'Create checkpoint'}
+            </Text>
+            <Text style={[styles.heroBody, { color: colors.textSoft }]}>
+              {primaryPhaseLabel === 'Cleared' ? 'You completed this checkpoint today.' : formatDueWindow(primaryAlarm)}
+            </Text>
+
+            <Pressable
+              accessibilityLabel={primaryPhaseLabel === 'Scan now' ? 'Check in now' : 'Open checkpoint'}
+              accessibilityRole="button"
+              onPress={handlePrimaryPress}
+              style={({ pressed }) => [
+                styles.checkInButton,
+                { backgroundColor: primaryPhaseLabel === 'Scan now' ? colors.text : colors.panelMuted },
+                pressed && styles.pressed,
+              ]}>
+              <Text
+                style={[
+                  styles.checkInLabel,
+                  { color: primaryPhaseLabel === 'Scan now' ? colors.elevated : colors.text },
+                ]}>
+                {primaryPhaseLabel === 'Scan now' ? 'Check in now' : 'View checkpoint'}
+              </Text>
+              <Ionicons
+                color={primaryPhaseLabel === 'Scan now' ? colors.elevated : colors.text}
+                name="arrow-forward"
+                size={16}
+              />
+            </Pressable>
           </FlowPanel>
 
-          <FlowPanel>
-            <FlowSectionLabel>TODAY&apos;S TIMELINE</FlowSectionLabel>
+          <View style={styles.todaySection}>
+            <View style={styles.sectionHeader}>
+              <Text style={[styles.sectionTitle, { color: colors.text }]}>Today&apos;s plan</Text>
+              <Text style={[styles.sectionCount, { color: colors.textSoft }]}>
+                {todayTimeline.length} {todayTimeline.length === 1 ? 'checkpoint' : 'checkpoints'}
+              </Text>
+            </View>
             <View style={styles.timelineList}>
               {todayTimeline.length > 0 ? (
                 todayTimeline.map((item, index) => (
@@ -562,76 +634,92 @@ export default function TodayScreen() {
                 <Text style={[styles.emptyCopy, { color: colors.textSoft }]}>Proof events will appear here as the day unfolds.</Text>
               )}
             </View>
-          </FlowPanel>
-
-          <View style={styles.metricGrid}>
-            <Pressable
-              accessibilityLabel="Open history and analytics"
-              accessibilityRole="button"
-              onPress={() => router.push('/history')}
-              style={({ pressed }) => [styles.metricAction, pressed && styles.pressed]}>
-              <FlowMetricTile helper={weeklyReliability.helper} label="WEEKLY RELIABILITY" value={weeklyReliability.value}>
-                <WeekBars days={weeklyDayStats} />
-              </FlowMetricTile>
-            </Pressable>
-            <FlowMetricTile helper={currentRun.helper} label="CURRENT STREAK" tone="warning" value={`🔥 ${currentRun.value}`}>
-              <StreakDots activeDots={currentRun.activeDots} />
-            </FlowMetricTile>
           </View>
 
-          <FlowPanel>
-            <View style={styles.compactSectionHeader}>
-              <FlowSectionLabel>UPCOMING</FlowSectionLabel>
-              <Text style={[styles.sectionCount, { color: colors.textSoft }]}>
-                {upcomingAlarms.length} next
+          <Pressable
+            accessibilityLabel="Open progress history"
+            accessibilityRole="button"
+            onPress={() => router.push('/history')}
+            style={({ pressed }) => [
+              styles.progressStrip,
+              { backgroundColor: colors.panelMuted },
+              pressed && styles.pressed,
+            ]}>
+            <View style={styles.progressItem}>
+              <Text style={[styles.progressValue, { color: colors.primary }]}>{weeklyReliability.value}</Text>
+              <Text style={[styles.progressLabel, { color: colors.textSoft }]}>this week</Text>
+            </View>
+            <View style={[styles.progressDivider, { backgroundColor: colors.line }]} />
+            <View style={styles.progressItem}>
+              <Text style={[styles.progressValue, { color: colors.text }]}>🔥 {currentRun.value}</Text>
+              <Text style={[styles.progressLabel, { color: colors.textSoft }]}>
+                day streak
               </Text>
             </View>
-            {upcomingAlarms.length > 0 ? (
-              upcomingAlarms.slice(0, 2).map((alarm) => (
-                <FlowListRow
-                  description={alarm.scheduledFor ? formatScheduledFor(alarm.scheduledFor) : formatAlarmTime(alarm.hour, alarm.minute)}
-                  key={alarm.id}
-                  onPress={() => router.push(`/checkpoint/${alarm.id}`)}
-                  style={styles.inlineFlowRow}
-                  title={alarm.label}
-                  trailing={<Text style={[styles.trailingTime, { color: colors.textSoft }]}>{formatAlarmTime(alarm.hour, alarm.minute)}</Text>}
-                />
-              ))
-            ) : (
-              <Text style={[styles.emptyCopy, { color: colors.textSoft }]}>No other checkpoints queued.</Text>
-            )}
-          </FlowPanel>
+            <Ionicons color={colors.muted} name="chevron-forward" size={17} />
+          </Pressable>
 
-          <FlowPanel>
-            <FlowListRow
-              description={`${todayClears.length} checkpoint${todayClears.length === 1 ? '' : 's'} cleared today`}
-              onPress={() => router.push('/today-activity')}
-              statusLabel={`${todayMisses.length} missed`}
-              statusTone={todayMisses.length > 0 ? 'danger' : 'success'}
-              style={styles.inlineFlowRow}
-              title="Cleared today"
-            />
-            <FlowListRow
-              description={getCircleSummary(state.circleCount, state.socialRuntime?.queue.lastSuccessfulSyncAt)}
-              onPress={() => router.push('/circles')}
-              statusLabel={socialStatusLabel}
-              statusTone={socialStatusTone}
-              style={styles.inlineFlowRow}
-              title={state.circleCount === 0 ? 'Accountability' : `${state.circleCount} circle${state.circleCount === 1 ? '' : 's'}`}
-            />
-            <FlowListRow
-              description={latestOutcome ? latestOutcome.detail : 'No completed run yet'}
-              onPress={() => router.push('/today-activity')}
-              statusLabel={latestOutcome ? (latestOutcome.tone === 'success' ? 'Saved' : 'Missed') : 'Waiting'}
-              statusTone={latestOutcome ? latestOutcome.tone : 'default'}
-              style={styles.inlineFlowRow}
-              title={latestOutcome ? latestOutcome.title : 'Latest proof'}
-            />
-          </FlowPanel>
+          {upcomingAlarms.length > 0 ? (
+            <View style={styles.todaySection}>
+              <View style={styles.sectionHeader}>
+                <Text style={[styles.sectionTitle, { color: colors.text }]}>Coming up</Text>
+              <Text style={[styles.sectionCount, { color: colors.textSoft }]}>
+                  {upcomingAlarms.length} next
+              </Text>
+              </View>
+              <View style={styles.upcomingList}>
+                {upcomingAlarms.slice(0, 2).map((alarm) => (
+                  <UpcomingCheckpointCard
+                    alarm={alarm}
+                    key={alarm.id}
+                    onPress={() => router.push(`/checkpoint/${alarm.id}`)}
+                  />
+                ))}
+              </View>
+            </View>
+          ) : null}
 
         </>
       )}
     </AppScreen>
+  );
+}
+
+function UpcomingCheckpointCard({ alarm, onPress }: { alarm: Alarm; onPress: () => void }) {
+  const colors = getAppColors(useColorScheme());
+  const dateLabel = alarm.scheduledFor
+    ? new Date(alarm.scheduledFor).toLocaleDateString([], {
+        day: 'numeric',
+        month: 'short',
+        weekday: 'short',
+      })
+    : 'Next run';
+
+  return (
+    <Pressable
+      accessibilityLabel={`${alarm.label}. ${dateLabel} at ${formatAlarmRuntimeTime(alarm)}`}
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.upcomingCard,
+        { backgroundColor: colors.panelMuted },
+        pressed && styles.pressed,
+      ]}>
+      <View style={[styles.upcomingIcon, { backgroundColor: colors.primarySurface }]}>
+        <Ionicons color={colors.primary} name="alarm-outline" size={19} />
+      </View>
+      <View style={styles.upcomingCopy}>
+        <Text numberOfLines={1} style={[styles.upcomingTitle, { color: colors.text }]}>{alarm.label}</Text>
+        <View style={styles.upcomingMeta}>
+          <View style={[styles.upcomingDot, { backgroundColor: colors.primary }]} />
+          <Text style={[styles.upcomingDate, { color: colors.textSoft }]}>{dateLabel}</Text>
+        </View>
+      </View>
+      <View style={styles.upcomingTimeWrap}>
+        <Text style={[styles.upcomingTime, { color: colors.text }]}>{formatAlarmRuntimeTime(alarm)}</Text>
+        <Ionicons color={colors.muted} name="chevron-forward" size={16} />
+      </View>
+    </Pressable>
   );
 }
 
@@ -726,72 +814,168 @@ function StreakDots({ activeDots }: { activeDots: number }) {
 
 const styles = StyleSheet.create({
   screenContent: {
-    gap: 10,
+    gap: Spacing.xl,
     paddingBottom: Spacing.lg,
     paddingHorizontal: Spacing.lg,
-    paddingTop: 2,
+    paddingTop: Spacing.xs,
   },
   createCtaFooter: {
-    marginBottom: 56,
+    marginBottom: 68,
   },
   loadingHero: {
     minHeight: 188,
   },
-  duePanel: {
-    padding: 12,
+  heroPanel: {
+    borderRadius: Radius.lg,
+    gap: Spacing.xs,
+    padding: Spacing.lg,
   },
-  dueRow: {
+  heroHeader: {
     alignItems: 'center',
     flexDirection: 'row',
-    gap: Spacing.md,
+    justifyContent: 'space-between',
+    marginBottom: Spacing.sm,
   },
-  dueCopy: {
-    flex: 1,
-    gap: Spacing.xs,
-    minWidth: 0,
+  heroStatus: {
+    alignItems: 'center',
+    borderRadius: Radius.pill,
+    flexDirection: 'row',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  heroStatusDot: {
+    borderRadius: Radius.pill,
+    height: 6,
+    width: 6,
+  },
+  heroStatusText: {
+    ...TextPresets.eyebrow,
+    fontSize: 9,
+    lineHeight: 12,
   },
   dueKicker: {
     ...TextPresets.eyebrow,
     fontSize: 10,
     lineHeight: 13,
   },
-  dueTitle: {
-    ...TextPresets.title,
-    fontSize: 16,
-    lineHeight: 20,
+  heroTime: {
+    fontFamily: Fonts.rounded,
+    fontSize: 42,
+    fontWeight: '800',
+    letterSpacing: -1.2,
+    lineHeight: 46,
   },
-  dueBody: {
+  heroTitle: {
+    fontFamily: Fonts.rounded,
+    fontSize: 20,
+    fontWeight: '800',
+    letterSpacing: -0.25,
+    lineHeight: 26,
+  },
+  heroBody: {
     ...TextPresets.body,
-    fontSize: 12,
-    lineHeight: 16,
+    fontSize: 13,
+    lineHeight: 18,
   },
   checkInButton: {
     alignItems: 'center',
-    borderRadius: 7,
+    borderRadius: Radius.md,
     flexDirection: 'row',
     gap: Spacing.xs,
     justifyContent: 'center',
-    marginTop: Spacing.xs,
-    minHeight: 34,
+    marginTop: Spacing.md,
+    minHeight: 44,
     paddingHorizontal: Spacing.md,
   },
   checkInLabel: {
     ...TextPresets.label,
-    fontSize: 13,
-    lineHeight: 17,
+    fontSize: 14,
+    lineHeight: 19,
   },
   pressed: {
     opacity: 0.85,
     transform: [{ scale: 0.99 }],
   },
   timelineList: {
+    gap: Spacing.md,
+    paddingHorizontal: Spacing.xs,
+  },
+  todaySection: {
+    gap: Spacing.md,
+  },
+  sectionHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: Spacing.xs,
+  },
+  sectionTitle: {
+    fontFamily: Fonts.rounded,
+    fontSize: 16,
+    fontWeight: '800',
+    lineHeight: 21,
+  },
+  upcomingList: {
     gap: Spacing.sm,
+  },
+  upcomingCard: {
+    alignItems: 'center',
+    borderRadius: Radius.md,
+    flexDirection: 'row',
+    gap: Spacing.md,
+    minHeight: 76,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: 10,
+  },
+  upcomingIcon: {
+    alignItems: 'center',
+    borderRadius: Radius.sm,
+    height: 40,
+    justifyContent: 'center',
+    width: 40,
+  },
+  upcomingCopy: {
+    flex: 1,
+    gap: 4,
+    minWidth: 0,
+  },
+  upcomingTitle: {
+    ...TextPresets.label,
+    fontSize: 14,
+    lineHeight: 19,
+  },
+  upcomingMeta: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 6,
+  },
+  upcomingDot: {
+    borderRadius: Radius.pill,
+    height: 5,
+    width: 5,
+  },
+  upcomingDate: {
+    ...TextPresets.body,
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  upcomingTimeWrap: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 5,
+  },
+  upcomingTime: {
+    fontFamily: Fonts.rounded,
+    fontSize: 16,
+    fontWeight: '800',
+    lineHeight: 20,
   },
   timelineRow: {
     alignItems: 'flex-start',
     flexDirection: 'row',
     gap: Spacing.sm,
-    minHeight: 44,
+    minHeight: 42,
   },
   timelineTimeColumn: {
     alignItems: 'flex-end',
@@ -838,13 +1022,35 @@ const styles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 15,
   },
-  metricGrid: {
+  progressStrip: {
+    alignItems: 'center',
+    borderRadius: Radius.md,
     flexDirection: 'row',
-    gap: Spacing.md,
+    gap: Spacing.lg,
+    minHeight: 72,
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.md,
   },
-  metricAction: {
+  progressItem: {
     flex: 1,
+    gap: 1,
     minWidth: 0,
+  },
+  progressDivider: {
+    height: 32,
+    width: 1,
+  },
+  progressValue: {
+    fontFamily: Fonts.rounded,
+    fontSize: 19,
+    fontWeight: '800',
+    letterSpacing: -0.3,
+    lineHeight: 23,
+  },
+  progressLabel: {
+    ...TextPresets.body,
+    fontSize: 11,
+    lineHeight: 15,
   },
   inlineFlowRow: {
     backgroundColor: 'transparent',

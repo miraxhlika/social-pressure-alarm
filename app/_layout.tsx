@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import { Stack, useRouter, useSegments } from 'expo-router';
+import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import * as SystemUI from 'expo-system-ui';
 import 'react-native-reanimated';
@@ -11,7 +12,10 @@ import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useSocialRuntime } from '@/hooks/use-social-runtime';
 import { readLocalAlarmStore } from '@/lib/alarms';
 import { markOnboardingCompleted, readOnboardingState } from '@/lib/onboarding';
+import { AppDialogProvider } from '@/providers/app-dialog-provider';
 import { SocialSessionProvider } from '@/providers/social-session-provider';
+
+void SplashScreen.preventAutoHideAsync().catch(() => null);
 
 export default function RootLayout() {
   const router = useRouter();
@@ -39,6 +43,12 @@ export default function RootLayout() {
   useEffect(() => {
     void SystemUI.setBackgroundColorAsync(colors.canvas);
   }, [colors.canvas]);
+
+  useEffect(() => {
+    if (isOnboardingGateReady) {
+      void SplashScreen.hideAsync().catch(() => null);
+    }
+  }, [isOnboardingGateReady]);
 
   useEffect(() => {
     let isMounted = true;
@@ -84,75 +94,76 @@ export default function RootLayout() {
   return (
     <SocialSessionProvider>
       <ThemeProvider value={navigationTheme}>
-        <Stack
-          screenOptions={{
-            animation: 'fade_from_bottom',
-            headerBackButtonMenuEnabled: false,
-            headerShown: false,
-            contentStyle: {
-              backgroundColor: colors.canvas,
-            },
-          }}>
-          <Stack.Screen name="(tabs)" />
-          <Stack.Screen
-            name="create"
-            options={{
-              animation: 'slide_from_bottom',
-              presentation: 'modal',
-            }}
-          />
-          <Stack.Screen
-            name="ringing"
-            options={{
-              animation: 'fade',
-              gestureEnabled: false,
-            }}
-          />
-          <Stack.Screen
-            name="success"
-            options={{
-              animation: 'slide_from_right',
-            }}
-          />
-          <Stack.Screen
-            name="missed"
-            options={{
-              animation: 'slide_from_right',
-            }}
-          />
-          <Stack.Screen
-            name="checkpoint/[id]"
-            options={{
-              animation: 'slide_from_right',
-            }}
-          />
-          <Stack.Screen
-            name="history"
-            options={{
-              animation: 'slide_from_right',
-            }}
-          />
-          <Stack.Screen
-            name="today-activity"
-            options={{
-              animation: 'slide_from_right',
-            }}
-          />
-          <Stack.Screen
-            name="onboarding"
-            options={{
-              animation: 'slide_from_right',
-            }}
-          />
-          <Stack.Screen
-            name="sync"
-            options={{
-              animation: 'slide_from_right',
-            }}
-          />
-          <Stack.Screen name="paywall" />
-        </Stack>
-        <StatusBar style={colorScheme === 'dark' ? 'light' : 'dark'} />
+        <AppDialogProvider>
+          <Stack
+            screenOptions={{
+              animation: 'fade_from_bottom',
+              headerBackButtonMenuEnabled: false,
+              headerShown: false,
+              contentStyle: {
+                backgroundColor: colors.canvas,
+              },
+            }}>
+            <Stack.Screen name="(tabs)" />
+            <Stack.Screen
+              name="create"
+              options={{
+                animation: 'slide_from_bottom',
+                presentation: 'modal',
+              }}
+            />
+            <Stack.Screen
+              name="ringing"
+              options={{
+                animation: 'fade',
+                gestureEnabled: false,
+              }}
+            />
+            <Stack.Screen
+              name="success"
+              options={{
+                animation: 'slide_from_right',
+              }}
+            />
+            <Stack.Screen
+              name="missed"
+              options={{
+                animation: 'slide_from_right',
+              }}
+            />
+            <Stack.Screen
+              name="checkpoint/[id]"
+              options={{
+                animation: 'slide_from_right',
+              }}
+            />
+            <Stack.Screen
+              name="history"
+              options={{
+                animation: 'slide_from_right',
+              }}
+            />
+            <Stack.Screen
+              name="today-activity"
+              options={{
+                animation: 'slide_from_right',
+              }}
+            />
+            <Stack.Screen
+              name="onboarding"
+              options={{
+                animation: 'slide_from_right',
+              }}
+            />
+            <Stack.Screen
+              name="sync"
+              options={{
+                animation: 'slide_from_right',
+              }}
+            />
+          </Stack>
+          <StatusBar style={colorScheme === 'dark' ? 'light' : 'dark'} />
+        </AppDialogProvider>
       </ThemeProvider>
     </SocialSessionProvider>
   );
