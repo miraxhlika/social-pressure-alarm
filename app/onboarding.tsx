@@ -9,6 +9,7 @@ import {
   Linking,
   NativeScrollEvent,
   NativeSyntheticEvent,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -21,7 +22,11 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Fonts, Radius, Spacing } from '@/constants/theme';
 import { trackAnalyticsEvent } from '@/lib/analytics';
 import {
-  ensureNotificationPermissionsAsync,
+  ExactAlarmAccessState,
+  getExactAlarmAccessState,
+  openExactAlarmSettingsAsync,
+} from '@/lib/exact-alarm-access';
+import {
   getNotificationPermissionState,
   isNotificationPermissionEnabled,
   NotificationPermissionState,
@@ -95,7 +100,8 @@ export default function OnboardingScreen() {
   const [activeStep, setActiveStep] = useState<OnboardingStep>('welcome');
   const [isOnboardingReady, setIsOnboardingReady] = useState(false);
   const [notificationState, setNotificationState] = useState<NotificationPermissionState>('undetermined');
-  const [cameraPermission, requestCameraPermission, getCameraPermission] = useCameraPermissions();
+  const [exactAlarmState, setExactAlarmState] = useState<ExactAlarmAccessState>('unsupported');
+  const [cameraPermission, , getCameraPermission] = useCameraPermissions();
   const cameraState: CameraPermissionState = cameraPermission?.granted
     ? 'granted'
     : cameraPermission?.canAskAgain === false
@@ -103,10 +109,12 @@ export default function OnboardingScreen() {
       : 'undetermined';
 
   const refreshNotificationPermission = useCallback(async () => {
-    const permissionState = await getNotificationPermissionState().catch(
-      () => 'undetermined' as NotificationPermissionState
-    );
+    const [permissionState, exactState] = await Promise.all([
+      getNotificationPermissionState().catch(() => 'undetermined' as NotificationPermissionState),
+      getExactAlarmAccessState().catch(() => 'unsupported' as const),
+    ]);
     setNotificationState(permissionState);
+    setExactAlarmState(exactState);
     return permissionState;
   }, []);
 
@@ -155,9 +163,10 @@ export default function OnboardingScreen() {
     let isMounted = true;
 
     const beginOnboarding = async () => {
-      const [onboardingState, permissionState] = await Promise.all([
+      const [onboardingState, permissionState, exactState] = await Promise.all([
         readOnboardingState(),
         getNotificationPermissionState().catch(() => 'undetermined' as NotificationPermissionState),
+        getExactAlarmAccessState().catch(() => 'unsupported' as const),
       ]);
 
       if (!isMounted) {
@@ -172,6 +181,7 @@ export default function OnboardingScreen() {
       activeStepRef.current = restoredStep;
       setActiveStep(restoredStep);
       setNotificationState(permissionState);
+      setExactAlarmState(exactState);
       setIsOnboardingReady(true);
 
       if (onboardingState.returnToPermissionsAfterSettings) {
@@ -284,32 +294,19 @@ export default function OnboardingScreen() {
     });
   };
 
-  const handleRequestNotifications = async () => {
-    const currentState = await refreshNotificationPermission();
-
-    if (currentState === 'denied') {
-      await markOnboardingReturningFromSettings();
-      await openNotificationSettingsAsync().catch(() => null);
-      return;
-    }
-
-    const granted = await ensureNotificationPermissionsAsync().catch(() => false);
-    const nextState = granted
-      ? await getNotificationPermissionState().catch(() => 'granted' as NotificationPermissionState)
-      : await getNotificationPermissionState().catch(() => 'denied' as NotificationPermissionState);
-    setNotificationState(nextState);
+  const handleOpenNotificationSettings = async () => {
+    await markOnboardingReturningFromSettings();
+    await openNotificationSettingsAsync().catch(() => null);
   };
 
-  const handleRequestCamera = async () => {
-    const currentState = await refreshCameraPermission();
+  const handleOpenExactAlarmSettings = async () => {
+    await markOnboardingReturningFromSettings();
+    await openExactAlarmSettingsAsync().catch(() => false);
+  };
 
-    if (currentState === 'denied') {
-      await markOnboardingReturningFromSettings();
-      await Linking.openSettings().catch(() => null);
-      return;
-    }
-
-    await requestCameraPermission();
+  const handleOpenCameraSettings = async () => {
+    await markOnboardingReturningFromSettings();
+    await Linking.openSettings().catch(() => null);
   };
 
   if (!isOnboardingReady) {
@@ -341,11 +338,13 @@ export default function OnboardingScreen() {
         <HowItWorksStep width={width} onNext={() => navigateToStep('permissions')} />
         <PermissionsStep
           cameraState={cameraState}
+          exactAlarmState={exactAlarmState}
           notificationState={notificationState}
           onContinueLocally={() => void handleContinueLocally()}
           onOptionalSignIn={() => void handleOptionalSignIn()}
-          onRequestCamera={() => void handleRequestCamera()}
-          onRequestNotifications={() => void handleRequestNotifications()}
+          onOpenCameraSettings={() => void handleOpenCameraSettings()}
+          onOpenNotificationSettings={() => void handleOpenNotificationSettings()}
+          onOpenExactAlarmSettings={() => void handleOpenExactAlarmSettings()}
           width={width}
         />
       </ScrollView>
@@ -434,68 +433,83 @@ function HowItWorksStep({
 
 function PermissionsStep({
   cameraState,
+  exactAlarmState,
   notificationState,
   onContinueLocally,
   onOptionalSignIn,
-  onRequestCamera,
-  onRequestNotifications,
+  onOpenCameraSettings,
+  onOpenNotificationSettings,
+  onOpenExactAlarmSettings,
   width,
 }: {
   cameraState: CameraPermissionState;
+  exactAlarmState: ExactAlarmAccessState;
   notificationState: NotificationPermissionState;
   onContinueLocally: () => void;
   onOptionalSignIn: () => void;
-  onRequestCamera: () => void;
-  onRequestNotifications: () => void;
+  onOpenCameraSettings: () => void;
+  onOpenNotificationSettings: () => void;
+  onOpenExactAlarmSettings: () => void;
   width: number;
 }) {
   const isNotificationEnabled = isNotificationPermissionEnabled(notificationState);
   const isCameraEnabled = cameraState === 'granted';
-  const arePermissionsReady = isNotificationEnabled && isCameraEnabled;
-  const notificationBadge = isNotificationEnabled ? 'Enabled' : notificationState === 'denied' ? 'Denied' : 'Set up now';
-  const cameraBadge = isCameraEnabled ? 'Enabled' : cameraState === 'denied' ? 'Denied' : 'Set up now';
-  const requirementMessage = arePermissionsReady
-    ? "You're ready. Reminders open the app so you can scan — keep notifications on."
-    : 'Enable notifications and camera when you can. The app will ask again before your first checkpoint goes live.';
+  const notificationDenied = notificationState === 'denied';
+  const cameraDenied = cameraState === 'denied';
+  const exactTimingUnavailable = Platform.OS === 'android' && exactAlarmState === 'inexact';
+  const notificationBadge = exactTimingUnavailable
+    ? 'Timing setup'
+    : isNotificationEnabled
+      ? 'Ready'
+      : notificationDenied
+        ? 'Blocked'
+        : 'When you save';
+  const cameraBadge = isCameraEnabled ? 'Ready' : cameraDenied ? 'Blocked' : 'When you scan';
+  const requirementMessage =
+    notificationDenied || cameraDenied
+      ? 'A permission is blocked in system settings. You can fix it now, or continue and enable it when setup asks.'
+      : 'No account needed. Camera and notifications are requested only when you need them.';
 
   return (
     <View style={[styles.screen, { width }]}>
       <Header
         title={
           <>
-            Permissions &amp;{'\n'}Local-First
+            Local-first.{'\n'}Ask later.
           </>
         }
-        description="A few quick settings so you can start without an account."
+        description="Start without an account. Permissions are requested in context, not up front."
       />
 
       <View style={styles.permissionList}>
         <PermissionRow
           badge={notificationBadge}
-          badgeTone={notificationState === 'denied' ? 'danger' : isNotificationEnabled ? 'success' : 'warning'}
+          badgeTone={notificationDenied ? 'danger' : isNotificationEnabled && !exactTimingUnavailable ? 'success' : 'warning'}
           description={
-            notificationState === 'denied'
-              ? 'Enable notifications in system settings before scheduling a checkpoint.'
-              : isNotificationEnabled
+            notificationDenied
+              ? 'Blocked in system settings. Open Settings before a reminder can go live.'
+              : exactTimingUnavailable
+                ? 'Allow exact alarm timing in Android settings to prevent system delays.'
+                : isNotificationEnabled
                 ? 'Reminders can open the app when it is time to scan.'
-                : 'Needed so your checkpoint can remind you on time.'
+                : "We'll ask when you save your first checkpoint."
           }
           icon="notifications-outline"
-          onPress={isNotificationEnabled ? undefined : onRequestNotifications}
+          onPress={notificationDenied ? onOpenNotificationSettings : exactTimingUnavailable ? onOpenExactAlarmSettings : undefined}
           title="Notifications"
         />
         <PermissionRow
           badge={cameraBadge}
-          badgeTone={cameraState === 'denied' ? 'danger' : isCameraEnabled ? 'success' : 'warning'}
+          badgeTone={cameraDenied ? 'danger' : isCameraEnabled ? 'success' : 'warning'}
           description={
-            cameraState === 'denied'
-              ? 'Enable camera access in system settings before linking a proof code.'
+            cameraDenied
+              ? 'Blocked in system settings. Open Settings before linking a proof code.'
               : isCameraEnabled
-                ? 'Camera access is enabled for scans.'
-                : 'Needed when you link a QR code or barcode.'
+                ? 'Camera access is ready for scans.'
+                : "We'll ask when you scan a QR code or barcode."
           }
           icon="camera-outline"
-          onPress={isCameraEnabled ? undefined : onRequestCamera}
+          onPress={cameraDenied ? onOpenCameraSettings : undefined}
           title="Camera Access"
         />
         <View style={styles.localCard}>
@@ -522,13 +536,19 @@ function PermissionsStep({
           onPress={onOptionalSignIn}
           variant="secondary"
         />
-        <View style={[styles.controlNote, !arePermissionsReady ? styles.requirementNote : null]}>
+        <View style={[styles.controlNote, notificationDenied || cameraDenied ? styles.requirementNote : null]}>
           <Ionicons
-            color={arePermissionsReady ? palette.muted : palette.gold}
-            name={arePermissionsReady ? 'shield-checkmark-outline' : 'information-circle-outline'}
+            color={notificationDenied || cameraDenied ? palette.gold : palette.muted}
+            name={notificationDenied || cameraDenied ? 'information-circle-outline' : 'shield-checkmark-outline'}
             size={18}
           />
-          <Text style={[styles.controlText, !arePermissionsReady ? styles.requirementText : null]}>{requirementMessage}</Text>
+          <Text
+            style={[
+              styles.controlText,
+              notificationDenied || cameraDenied ? styles.requirementText : null,
+            ]}>
+            {requirementMessage}
+          </Text>
         </View>
       </View>
     </View>

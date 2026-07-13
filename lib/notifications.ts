@@ -1,8 +1,9 @@
 import { Linking, Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
 
-import { Alarm } from '@/types/alarm';
+import { Alarm, AlarmNotificationKind, AlarmNotificationRegistration } from '@/types/alarm';
 import { createNextAlarmDateForSchedule, formatAlarmTime } from '@/lib/alarms';
+import { shiftWeekdayAndTime } from '@/lib/alarm-schedule';
 import {
   getCheckpointNotificationCopy,
   getCheckpointReadinessNotificationCopy,
@@ -15,6 +16,17 @@ const SOCIAL_PUSH_CHANNEL_ID = 'social-pressure-social-alerts';
 const NOTIFICATION_PREFERENCES_STORAGE_KEY = 'social-pressure-alarm/notification-preferences';
 const WEEKLY_REVIEW_NOTIFICATION_STORAGE_KEY = 'social-pressure-alarm/weekly-review-notification';
 const CHECKPOINT_NOTIFICATION_ID_PREFIX = 'checkpoint';
+const WEEKLY_REVIEW_NOTIFICATION_ID = 'weekly-review:1';
+const IOS_PENDING_NOTIFICATION_LIMIT = 64;
+
+type NotificationPlanItem = {
+  identifier: string;
+  kind: AlarmNotificationKind;
+  optional: boolean;
+  request: Parameters<typeof Notifications.scheduleNotificationAsync>[0];
+  triggerSignature: string;
+  weekday?: number;
+};
 
 export type NotificationPreferences = {
   urgencyRemindersEnabled: boolean;
@@ -121,22 +133,13 @@ function getEveningReadinessDate(scheduledFor: Date) {
   return reminderDate;
 }
 
-function getNextWeeklyReviewDate() {
-  const reminderDate = new Date();
-  const day = reminderDate.getDay();
-  const daysUntilSunday = (7 - day) % 7;
-  reminderDate.setDate(reminderDate.getDate() + daysUntilSunday);
-  reminderDate.setHours(18, 0, 0, 0);
-
-  if (reminderDate.getTime() <= Date.now()) {
-    reminderDate.setDate(reminderDate.getDate() + 7);
-  }
-
-  return reminderDate;
-}
-
-function getCheckpointNotificationId(alarmId: string, scheduledFor: Date, kind: 'primary' | 'urgency' | 'readiness') {
-  return [CHECKPOINT_NOTIFICATION_ID_PREFIX, alarmId, scheduledFor.toISOString(), kind].join(':');
+function getCheckpointNotificationId(
+  alarmId: string,
+  scheduleRevision: number,
+  kind: AlarmNotificationKind,
+  slot: string
+) {
+  return [CHECKPOINT_NOTIFICATION_ID_PREFIX, alarmId, `r${scheduleRevision}`, kind, slot].join(':');
 }
 
 function getNotificationAlarmId(notification: Notifications.NotificationRequest) {
@@ -241,7 +244,8 @@ export function getAlarmNotificationStrategyKey(
   scheduledFor: Date
 ) {
   return [
-    'core:2',
+    'core:3',
+    `schedule:${alarm.repeatSchedule}:${alarm.hour}:${alarm.minute}:${alarm.timezone}:${alarm.scheduleRevision}`,
     `urgency:${preferences.urgencyRemindersEnabled && getUrgencyReminderDelaySeconds(alarm.gracePeriodSeconds) ? 1 : 0}`,
     `readiness:${
       preferences.eveningReadinessRemindersEnabled && shouldScheduleEveningReadinessReminder(alarm, scheduledFor) ? 1 : 0
@@ -249,11 +253,209 @@ export function getAlarmNotificationStrategyKey(
   ].join('|');
 }
 
-export async function scheduleAlarmNotificationAsync(
+function createPlanItem(
   alarm: Alarm,
-  options?: {
-    scheduledFor?: string;
+  kind: AlarmNotificationKind,
+  slot: string,
+  trigger: Notifications.SchedulableNotificationTriggerInput,
+  copy: { title: string; body: string },
+  optional: boolean,
+  weekday?: number
+): NotificationPlanItem {
+  const triggerSignature = JSON.stringify(trigger);
+  const identifier = getCheckpointNotificationId(alarm.id, alarm.scheduleRevision, kind, slot);
+
+  return {
+    identifier,
+    kind,
+    optional,
+    triggerSignature,
+    weekday,
+    request: {
+      identifier,
+      content: {
+        title: copy.title,
+        body: copy.body,
+        sound: 'default',
+        data: {
+          alarmId: alarm.id,
+          kind,
+          repeatSchedule: alarm.repeatSchedule,
+          scheduleRevision: alarm.scheduleRevision,
+          timezone: alarm.timezone,
+          triggerSignature,
+        },
+      },
+      trigger,
+    },
+  };
+}
+
+function buildRecurringItems(
+  alarm: Alarm,
+  kind: AlarmNotificationKind,
+  hour: number,
+  minute: number,
+  copy: { title: string; body: string },
+  optional: boolean,
+  weekdays?: number[]
+) {
+  if (alarm.repeatSchedule === 'daily') {
+    return [
+      createPlanItem(
+        alarm,
+        kind,
+        'daily',
+        {
+          type: Notifications.SchedulableTriggerInputTypes.DAILY,
+          hour,
+          minute,
+          channelId: ALARM_CHANNEL_ID,
+        },
+        copy,
+        optional
+      ),
+    ];
   }
+
+  return (weekdays ?? [2, 3, 4, 5, 6]).map((weekday) =>
+    createPlanItem(
+      alarm,
+      kind,
+      `w${weekday}`,
+      {
+        type: Notifications.SchedulableTriggerInputTypes.WEEKLY,
+        weekday,
+        hour,
+        minute,
+        channelId: ALARM_CHANNEL_ID,
+      },
+      copy,
+      optional,
+      weekday
+    )
+  );
+}
+
+export function buildAlarmNotificationPlan(
+  alarm: Alarm,
+  preferences: NotificationPreferences,
+  scheduledFor: Date
+) {
+  const primaryCopy = getCheckpointNotificationCopy(alarm.useCaseType, alarm.label, alarm.gracePeriodSeconds);
+  const titledPrimaryCopy = {
+    ...primaryCopy,
+    title: `${primaryCopy.title} · ${formatAlarmTime(alarm.hour, alarm.minute)}`,
+  };
+
+  if (alarm.repeatSchedule === 'once') {
+    const primary = createPlanItem(
+      alarm,
+      'primary',
+      scheduledFor.toISOString(),
+      {
+        type: Notifications.SchedulableTriggerInputTypes.DATE,
+        date: scheduledFor,
+        channelId: ALARM_CHANNEL_ID,
+      },
+      titledPrimaryCopy,
+      false
+    );
+    const items = [primary];
+    const reminderDelaySeconds = preferences.urgencyRemindersEnabled
+      ? getUrgencyReminderDelaySeconds(alarm.gracePeriodSeconds)
+      : null;
+
+    if (reminderDelaySeconds && reminderDelaySeconds < alarm.gracePeriodSeconds) {
+      const reminderDate = new Date(scheduledFor.getTime() + reminderDelaySeconds * 1000);
+      const reminderCopy = getCheckpointNotificationCopy(
+        alarm.useCaseType,
+        alarm.label,
+        alarm.gracePeriodSeconds,
+        alarm.gracePeriodSeconds - reminderDelaySeconds
+      );
+      items.push(
+        createPlanItem(
+          alarm,
+          'urgency',
+          reminderDate.toISOString(),
+          {
+            type: Notifications.SchedulableTriggerInputTypes.DATE,
+            date: reminderDate,
+            channelId: ALARM_CHANNEL_ID,
+          },
+          reminderCopy,
+          true
+        )
+      );
+    }
+
+    return items;
+  }
+
+  const items = buildRecurringItems(
+    alarm,
+    'primary',
+    alarm.hour,
+    alarm.minute,
+    titledPrimaryCopy,
+    false
+  );
+  const urgencyDelaySeconds = preferences.urgencyRemindersEnabled
+    ? getUrgencyReminderDelaySeconds(alarm.gracePeriodSeconds)
+    : null;
+  const urgencyDelayMinutes = urgencyDelaySeconds ? Math.floor(urgencyDelaySeconds / 60) : 0;
+
+  if (urgencyDelayMinutes > 0 && urgencyDelayMinutes * 60 < alarm.gracePeriodSeconds) {
+    const urgencyCopy = getCheckpointNotificationCopy(
+      alarm.useCaseType,
+      alarm.label,
+      alarm.gracePeriodSeconds,
+      alarm.gracePeriodSeconds - urgencyDelayMinutes * 60
+    );
+
+    if (alarm.repeatSchedule === 'daily') {
+      const shifted = shiftWeekdayAndTime(1, alarm.hour, alarm.minute, urgencyDelayMinutes);
+      items.push(...buildRecurringItems(alarm, 'urgency', shifted.hour, shifted.minute, urgencyCopy, true));
+    } else {
+      for (const sourceWeekday of [2, 3, 4, 5, 6]) {
+        const shifted = shiftWeekdayAndTime(sourceWeekday, alarm.hour, alarm.minute, urgencyDelayMinutes);
+        items.push(
+          ...buildRecurringItems(
+            alarm,
+            'urgency',
+            shifted.hour,
+            shifted.minute,
+            urgencyCopy,
+            true,
+            [shifted.weekday]
+          )
+        );
+      }
+    }
+  }
+
+  if (preferences.eveningReadinessRemindersEnabled && scheduledFor.getHours() < 12) {
+    const readinessCopy = getCheckpointReadinessNotificationCopy(alarm.useCaseType, alarm.label);
+    items.push(
+      ...buildRecurringItems(
+        alarm,
+        'readiness',
+        20,
+        0,
+        readinessCopy,
+        true,
+        alarm.repeatSchedule === 'weekdays' ? [1, 2, 3, 4, 5] : undefined
+      )
+    );
+  }
+
+  return items;
+}
+
+export async function reconcileAlarmNotificationPlanAsync(
+  alarm: Alarm,
+  options?: { scheduledFor?: string }
 ) {
   const permissionState = await getNotificationPermissionState();
 
@@ -266,130 +468,90 @@ export async function scheduleAlarmNotificationAsync(
     ? new Date(options.scheduledFor)
     : createNextAlarmDateForSchedule(alarm.hour, alarm.minute, alarm.repeatSchedule);
 
-  if (Number.isNaN(scheduledFor.getTime())) {
-    throw new Error('The checkpoint time is invalid. Choose a new time and try again.');
-  }
-
-  // iOS rejects past DATE triggers with a native NSInternalInconsistencyException
-  // whose trigger is null. Immediate in-app practice runs must bypass notification
-  // scheduling instead of trying to represent "now" as a local notification.
-  if (scheduledFor.getTime() <= Date.now()) {
+  if (Number.isNaN(scheduledFor.getTime()) || scheduledFor.getTime() <= Date.now()) {
     throw new Error('The checkpoint time has already passed. Choose a future time and try again.');
   }
 
-  const triggerContent = getCheckpointNotificationCopy(
-    alarm.useCaseType,
-    alarm.label,
-    alarm.gracePeriodSeconds
-  );
-  const strategyKey = getAlarmNotificationStrategyKey(alarm, preferences, scheduledFor);
+  const allScheduled = await Notifications.getAllScheduledNotificationsAsync();
+  const alarmScheduled = allScheduled.filter((notification) => getNotificationAlarmId(notification) === alarm.id);
+  const otherScheduledCount = allScheduled.length - alarmScheduled.length;
+  const desired = buildAlarmNotificationPlan(alarm, preferences, scheduledFor);
+  const primary = desired.filter((item) => !item.optional);
+  const optional = desired.filter((item) => item.optional);
+  const weeklyReviewReserve =
+    preferences.weeklyReviewRemindersEnabled &&
+    !allScheduled.some((notification) => notification.identifier === WEEKLY_REVIEW_NOTIFICATION_ID)
+      ? 1
+      : 0;
+  const available = Platform.OS === 'ios'
+    ? Math.max(0, IOS_PENDING_NOTIFICATION_LIMIT - otherScheduledCount - weeklyReviewReserve)
+    : Infinity;
 
-  const primaryNotificationIdentifier = getCheckpointNotificationId(alarm.id, scheduledFor, 'primary');
-  const primaryNotificationId = await scheduleLocalNotificationAsync(
-    {
-      identifier: primaryNotificationIdentifier,
-      content: {
-        title: `${triggerContent.title} · ${formatAlarmTime(scheduledFor.getHours(), scheduledFor.getMinutes())}`,
-        body: triggerContent.body,
-        sound: 'default',
-        data: {
-          alarmId: alarm.id,
-          kind: 'primary',
-        },
-      },
-      trigger: {
-        type: Notifications.SchedulableTriggerInputTypes.DATE,
-        date: scheduledFor,
-        channelId: ALARM_CHANNEL_ID,
-      },
-    },
-    'This checkpoint reminder could not be scheduled. Choose a future time and try again.'
-  );
-
-  const notificationIds = [primaryNotificationId];
-  const reminderDelaySeconds = preferences.urgencyRemindersEnabled
-    ? getUrgencyReminderDelaySeconds(alarm.gracePeriodSeconds)
-    : null;
-
-  if (reminderDelaySeconds && reminderDelaySeconds < alarm.gracePeriodSeconds) {
-    const reminderDate = new Date(scheduledFor.getTime() + reminderDelaySeconds * 1000);
-    const secondsRemaining = alarm.gracePeriodSeconds - reminderDelaySeconds;
-    const reminderContent = getCheckpointNotificationCopy(
-      alarm.useCaseType,
-      alarm.label,
-      alarm.gracePeriodSeconds,
-      secondsRemaining
-    );
-
-    const reminderNotificationIdentifier = getCheckpointNotificationId(alarm.id, scheduledFor, 'urgency');
-    const reminderNotificationId = await scheduleLocalNotificationAsync(
-        {
-          identifier: reminderNotificationIdentifier,
-          content: {
-            title: reminderContent.title,
-            body: reminderContent.body,
-            sound: 'default',
-            data: {
-              alarmId: alarm.id,
-              kind: 'urgency',
-            },
-          },
-          trigger: {
-            type: Notifications.SchedulableTriggerInputTypes.DATE,
-            date: reminderDate,
-            channelId: ALARM_CHANNEL_ID,
-          },
-        },
-        'The urgency follow-up could not be scheduled. Your main checkpoint reminder is still active.'
-      )
-      .catch(() => null);
-
-    if (reminderNotificationId) {
-      notificationIds.push(reminderNotificationId);
-    }
+  if (primary.length > available) {
+    throw new Error('This device has no remaining notification capacity for another active checkpoint.');
   }
 
-  if (preferences.eveningReadinessRemindersEnabled && shouldScheduleEveningReadinessReminder(alarm, scheduledFor)) {
-    const readinessDate = getEveningReadinessDate(scheduledFor);
+  const selected = [...primary, ...optional.slice(0, Math.max(0, available - primary.length))];
+  const omittedKinds = [...new Set(optional.slice(Math.max(0, available - primary.length)).map((item) => item.kind))];
+  const selectedIdentifiers = new Set(selected.map((item) => item.identifier));
+  const existingByIdentifier = new Map(alarmScheduled.map((request) => [request.identifier, request]));
+  const registrations: AlarmNotificationRegistration[] = [];
 
-    if (readinessDate.getTime() > Date.now()) {
-      const readinessContent = getCheckpointReadinessNotificationCopy(alarm.useCaseType, alarm.label);
-      const readinessNotificationIdentifier = getCheckpointNotificationId(alarm.id, scheduledFor, 'readiness');
-      const readinessNotificationId = await scheduleLocalNotificationAsync(
-          {
-            identifier: readinessNotificationIdentifier,
-            content: {
-              title: readinessContent.title,
-              body: readinessContent.body,
-              sound: 'default',
-              data: {
-                alarmId: alarm.id,
-                kind: 'readiness',
-              },
-            },
-            trigger: {
-              type: Notifications.SchedulableTriggerInputTypes.DATE,
-              date: readinessDate,
-              channelId: ALARM_CHANNEL_ID,
-            },
-          },
-          'The evening preparation reminder could not be scheduled.'
-        )
-        .catch(() => null);
+  for (const item of selected) {
+    const existing = existingByIdentifier.get(item.identifier);
+    const existingSignature = existing?.content.data?.triggerSignature;
 
-      if (readinessNotificationId) {
-        notificationIds.push(readinessNotificationId);
+    if (existing && existingSignature !== item.triggerSignature) {
+      await Notifications.cancelScheduledNotificationAsync(existing.identifier);
+    }
+
+    if (!existing || existingSignature !== item.triggerSignature) {
+      try {
+        await scheduleLocalNotificationAsync(
+          item.request,
+          item.optional
+            ? `The optional ${item.kind} reminder could not be scheduled.`
+            : 'This checkpoint reminder could not be scheduled. Choose a future time and try again.'
+        );
+      } catch (error) {
+        if (!item.optional) {
+          throw error;
+        }
+        omittedKinds.push(item.kind);
+        continue;
       }
     }
+
+    registrations.push({
+      identifier: item.identifier,
+      kind: item.kind,
+      triggerSignature: item.triggerSignature,
+      weekday: item.weekday,
+    });
   }
 
-  await cancelScheduledNotificationsForAlarmAsync(alarm.id, notificationIds).catch(() => null);
+  await Promise.all(
+    alarmScheduled
+      .filter((request) => !selectedIdentifiers.has(request.identifier))
+      .map((request) => Notifications.cancelScheduledNotificationAsync(request.identifier))
+  );
 
   return {
-    notificationIds,
+    notificationIds: registrations.map((registration) => registration.identifier),
+    notificationRegistrations: registrations,
+    omittedKinds: [...new Set(omittedKinds)],
     scheduledFor: scheduledFor.toISOString(),
-    strategyKey,
+    strategyKey: getAlarmNotificationStrategyKey(alarm, preferences, scheduledFor),
   };
+}
+
+export async function scheduleAlarmNotificationAsync(
+  alarm: Alarm,
+  options?: {
+    scheduledFor?: string;
+  }
+) {
+  return reconcileAlarmNotificationPlanAsync(alarm, options);
 }
 
 export async function cancelAlarmNotificationAsync(notificationIds?: string | string[]) {
@@ -411,11 +573,12 @@ export async function syncWeeklyReviewReminderAsync(
   const weeklyReminderRecord = await readScopedStorageValue(WEEKLY_REVIEW_NOTIFICATION_STORAGE_KEY);
   const existingNotificationId = getWeeklyReviewNotificationId(weeklyReminderRecord.value);
 
-  if (existingNotificationId) {
+  if (existingNotificationId && existingNotificationId !== WEEKLY_REVIEW_NOTIFICATION_ID) {
     await Notifications.cancelScheduledNotificationAsync(existingNotificationId).catch(() => null);
   }
 
   if (!resolvedPreferences.weeklyReviewRemindersEnabled) {
+    await Notifications.cancelScheduledNotificationAsync(WEEKLY_REVIEW_NOTIFICATION_ID).catch(() => null);
     await writeScopedStorageValue(WEEKLY_REVIEW_NOTIFICATION_STORAGE_KEY, '');
     return null;
   }
@@ -430,10 +593,19 @@ export async function syncWeeklyReviewReminderAsync(
     return null;
   }
 
-  const weeklyReviewDate = getNextWeeklyReviewDate();
+  const scheduledNotifications = await Notifications.getAllScheduledNotificationsAsync();
+  if (scheduledNotifications.some((notification) => notification.identifier === WEEKLY_REVIEW_NOTIFICATION_ID)) {
+    await writeScopedStorageValue(WEEKLY_REVIEW_NOTIFICATION_STORAGE_KEY, WEEKLY_REVIEW_NOTIFICATION_ID);
+    return {
+      notificationId: WEEKLY_REVIEW_NOTIFICATION_ID,
+      scheduledFor: 'weekly:sunday:18:00',
+    };
+  }
+
   const weeklyReviewContent = getWeeklyReviewNotificationCopy();
   const weeklyReviewNotificationId = await scheduleLocalNotificationAsync(
     {
+      identifier: WEEKLY_REVIEW_NOTIFICATION_ID,
       content: {
         title: weeklyReviewContent.title,
         body: weeklyReviewContent.body,
@@ -443,8 +615,10 @@ export async function syncWeeklyReviewReminderAsync(
         },
       },
       trigger: {
-        type: Notifications.SchedulableTriggerInputTypes.DATE,
-        date: weeklyReviewDate,
+        type: Notifications.SchedulableTriggerInputTypes.WEEKLY,
+        weekday: 1,
+        hour: 18,
+        minute: 0,
         channelId: ALARM_CHANNEL_ID,
       },
     },
@@ -455,7 +629,7 @@ export async function syncWeeklyReviewReminderAsync(
 
   return {
     notificationId: weeklyReviewNotificationId,
-    scheduledFor: weeklyReviewDate.toISOString(),
+    scheduledFor: 'weekly:sunday:18:00',
   };
 }
 

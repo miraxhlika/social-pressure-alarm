@@ -1,6 +1,5 @@
 import { getSocialSession, getSupabaseClient } from '@/lib/social/client';
 import { hasSocialBackendConfig } from '@/lib/social/config';
-import { sendMissedCheckpointAlertForEvent } from '@/lib/social/push';
 import {
   GUEST_STORAGE_SCOPE,
   readScopedStorageValue,
@@ -74,7 +73,8 @@ function normalizeOutcome(value: unknown): AlarmOutcome | null {
 }
 
 function getAlarmOutcomeIdempotencyKey(alarmId: string, scheduledFor: string | undefined, outcome: AlarmOutcome) {
-  return `${alarmId}::${scheduledFor ?? 'unscheduled'}::${outcome}`;
+  void outcome;
+  return `${alarmId}::${scheduledFor ?? 'unscheduled'}`;
 }
 
 function normalizeQueuedAlarmEvent(value: unknown): QueuedAlarmEvent | null {
@@ -123,11 +123,15 @@ function normalizeQueuedAlarmEvent(value: unknown): QueuedAlarmEvent | null {
 
   return {
     id,
+    occurrenceKey: getTrimmedString(value.occurrenceKey) ?? getAlarmOutcomeIdempotencyKey(alarmId, getOptionalIsoString(value.scheduledFor), outcome),
     alarmId,
     alarmLabel,
     scheduledFor: getOptionalIsoString(value.scheduledFor),
     outcome,
     resolvedAt,
+    capturedAt: getOptionalIsoString(value.capturedAt) ?? resolvedAt,
+    scheduleRevision:
+      typeof value.scheduleRevision === 'number' ? Math.max(1, Math.trunc(value.scheduleRevision)) : 1,
     source: 'device',
     clientId: getTrimmedString(value.clientId) ?? id,
     idempotencyKey: getTrimmedString(value.idempotencyKey) ?? id,
@@ -216,69 +220,16 @@ async function writeSocialSyncMetaStorage(meta: SocialSyncMeta) {
   await writeScopedStorageValue(SOCIAL_SYNC_META_KEY, JSON.stringify(meta));
 }
 
-function mapQueuedAlarmEventForSync(event: QueuedAlarmEvent, userId: string) {
+function mapQueuedAlarmEventMetadata(event: QueuedAlarmEvent) {
   const idempotencyKey = event.idempotencyKey ?? event.clientId ?? event.id;
 
   return {
-    id: idempotencyKey,
-    user_id: userId,
-    alarm_id: event.alarmId,
-    alarm_label: event.alarmLabel,
-    scheduled_for: event.scheduledFor ?? null,
-    outcome: event.outcome,
-    resolved_at: event.resolvedAt,
-    source: event.source,
-    circle_id: event.socialSettings?.circleId ?? null,
-    share_successes: event.socialSettings?.shareSuccesses ?? false,
-    share_misses: event.socialSettings?.shareMisses ?? false,
-    metadata: {
-      ...event.sharePayload,
-      clientId: event.clientId ?? event.id,
-      idempotencyKey,
-    },
+    ...event.sharePayload,
+    clientId: event.clientId ?? event.id,
+    idempotencyKey,
+    occurrenceKey: event.occurrenceKey,
+    socialSettings: event.socialSettings ?? {},
   };
-}
-
-function shouldCreateProofShare(event: QueuedAlarmEvent) {
-  return Boolean(
-    event.socialSettings?.circleId &&
-      ((event.outcome === 'confirmed' && event.socialSettings.shareSuccesses) ||
-        (event.outcome === 'missed' && event.socialSettings.shareMisses))
-  );
-}
-
-async function upsertProofShareForEvent(event: QueuedAlarmEvent, userId: string) {
-  const client = getSupabaseClient();
-  const circleId = event.socialSettings?.circleId;
-  const alarmEventId = event.idempotencyKey ?? event.clientId ?? event.id;
-
-  if (!client || !circleId || !shouldCreateProofShare(event)) {
-    return;
-  }
-
-  const { error } = await client.from('proof_shares').upsert(
-    {
-      alarm_event_id: alarmEventId,
-      user_id: userId,
-      circle_id: circleId,
-      payload: {
-        alarmId: event.alarmId,
-        alarmLabel: event.alarmLabel,
-        scheduledFor: event.scheduledFor ?? null,
-        outcome: event.outcome,
-        resolvedAt: event.resolvedAt,
-        sharePayload: event.sharePayload,
-      },
-    },
-    {
-      onConflict: 'alarm_event_id,circle_id',
-      ignoreDuplicates: true,
-    }
-  );
-
-  if (error) {
-    throw error;
-  }
 }
 
 export async function enqueueAlarmEvent(event: AlarmEventRecord) {
@@ -433,20 +384,26 @@ export async function flushAlarmEventQueue(): Promise<FlushAlarmEventQueueResult
 
   for (const event of queue) {
     try {
-      const { error } = await client
-        .from('alarm_events')
-        .upsert(mapQueuedAlarmEventForSync(event, session.user.id), {
-          onConflict: 'id',
-        });
+      const { data, error } = await client.rpc('resolve_alarm_occurrence', {
+        alarm_id_input: event.alarmId,
+        scheduled_for_input: event.scheduledFor,
+        outcome_input: event.outcome,
+        captured_at_input: event.capturedAt,
+        schedule_revision_input: event.scheduleRevision,
+        metadata_input: mapQueuedAlarmEventMetadata(event),
+      });
 
       if (error) {
         throw error;
       }
 
-      await upsertProofShareForEvent(event, session.user.id);
-
-      if (event.outcome === 'missed' && event.socialSettings?.shareMisses) {
-        void sendMissedCheckpointAlertForEvent(event.idempotencyKey ?? event.clientId ?? event.id).catch(() => null);
+      const result = data && typeof data === 'object' ? (data as Record<string, unknown>) : null;
+      if (result?.status === 'rejected') {
+        throw new Error(
+          result.reason === 'proof_after_deadline'
+            ? 'The proof was captured after the checkpoint deadline.'
+            : 'The server rejected this checkpoint outcome.'
+        );
       }
 
       deliveredCount += 1;

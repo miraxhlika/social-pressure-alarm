@@ -3,7 +3,14 @@ import { AppState } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import { useRouter } from 'expo-router';
 
-import { getAlarmPhase, getNextActionableAlarm, hydrateAlarmRuntimeForCurrentUser } from '@/lib/alarms';
+import {
+  getAlarmPhase,
+  getNextActionableAlarm,
+  hydrateAlarmRuntimeForCurrentUser,
+  updateAlarm,
+} from '@/lib/alarms';
+import { advanceRecurringOccurrence, createNextOccurrenceDate } from '@/lib/alarm-schedule';
+import { getExactAlarmAccessState } from '@/lib/exact-alarm-access';
 import { configureNotificationsAsync, syncWeeklyReviewReminderAsync } from '@/lib/notifications';
 import { getSupabaseClient } from '@/lib/social/client';
 
@@ -27,6 +34,76 @@ function getAlarmIdFromNotification(
   return typeof alarmId === 'string' ? alarmId : null;
 }
 
+function getScheduleRevisionFromNotification(
+  notification:
+    | Notifications.Notification
+    | Notifications.NotificationResponse
+    | null
+    | undefined
+) {
+  if (!notification) {
+    return null;
+  }
+
+  const payload =
+    'notification' in notification
+      ? notification.notification.request.content.data
+      : notification.request.content.data;
+  const revision = payload?.scheduleRevision;
+  return typeof revision === 'number' ? revision : null;
+}
+
+function getNotificationDeliveryContext(
+  notification:
+    | Notifications.Notification
+    | Notifications.NotificationResponse
+    | null
+    | undefined
+) {
+  if (!notification) {
+    return { deliveredAt: null, timezone: null };
+  }
+
+  const resolvedNotification = 'notification' in notification ? notification.notification : notification;
+  const timezone = resolvedNotification.request.content.data?.timezone;
+
+  return {
+    deliveredAt: typeof resolvedNotification.date === 'number' ? resolvedNotification.date : null,
+    timezone: typeof timezone === 'string' ? timezone : null,
+  };
+}
+
+function getOccurrenceAtOrBeforeDelivery(
+  alarm: Awaited<ReturnType<typeof hydrateAlarmRuntimeForCurrentUser>>['alarms'][number],
+  deliveredAt: number
+) {
+  let occurrence = createNextOccurrenceDate(
+    alarm.hour,
+    alarm.minute,
+    alarm.repeatSchedule,
+    new Date(deliveredAt - 8 * 24 * 60 * 60 * 1000),
+    alarm.timezone
+  );
+
+  while (alarm.repeatSchedule !== 'once') {
+    const next = advanceRecurringOccurrence(
+      occurrence,
+      alarm.hour,
+      alarm.minute,
+      alarm.repeatSchedule,
+      alarm.timezone
+    );
+
+    if (next.getTime() > deliveredAt) {
+      break;
+    }
+
+    occurrence = next;
+  }
+
+  return occurrence;
+}
+
 function isCircleNotification(
   notification:
     | Notifications.Notification
@@ -44,7 +121,7 @@ function isCircleNotification(
       : notification.request.content.data;
   const kind = payload?.kind;
 
-  return kind === 'circle-missed-checkpoint' || kind === 'circle-nudge';
+  return kind === 'circle-missed-checkpoint' || kind === 'circle-checkpoint-corrected' || kind === 'circle-nudge';
 }
 
 export function useAlarmRuntime() {
@@ -60,12 +137,43 @@ export function useAlarmRuntime() {
       });
     };
 
-    const routeToAlarmIfStillActive = async (alarmId: string, clearLastResponse = false) => {
+    const routeToAlarmIfStillActive = async (
+      alarmId: string,
+      clearLastResponse = false,
+      scheduleRevision: number | null = null,
+      deliveryContext: ReturnType<typeof getNotificationDeliveryContext> = { deliveredAt: null, timezone: null }
+    ) => {
       try {
         const store = await hydrateAlarmRuntimeForCurrentUser();
-        const alarm = store.alarms.find((candidate) => candidate.id === alarmId) ?? null;
+        let alarm = store.alarms.find((candidate) => candidate.id === alarmId) ?? null;
+        let acceptedTimezoneTransition = false;
 
-        if (!alarm || !alarm.isActive || getAlarmPhase(alarm) !== 'ringing') {
+        if (
+          alarm &&
+          scheduleRevision !== null &&
+          alarm.scheduleRevision !== scheduleRevision &&
+          deliveryContext.timezone &&
+          deliveryContext.timezone !== alarm.timezone &&
+          deliveryContext.deliveredAt
+        ) {
+          const occurrence = getOccurrenceAtOrBeforeDelivery(alarm, deliveryContext.deliveredAt);
+          const now = Date.now();
+
+          if (
+            occurrence.getTime() <= now &&
+            now <= occurrence.getTime() + alarm.gracePeriodSeconds * 1000
+          ) {
+            alarm = await updateAlarm({ ...alarm, scheduledFor: occurrence.toISOString() });
+            acceptedTimezoneTransition = true;
+          }
+        }
+
+        if (
+          !alarm ||
+          !alarm.isActive ||
+          (scheduleRevision !== null && alarm.scheduleRevision !== scheduleRevision && !acceptedTimezoneTransition) ||
+          getAlarmPhase(alarm) !== 'ringing'
+        ) {
           return;
         }
 
@@ -78,7 +186,10 @@ export function useAlarmRuntime() {
     };
 
     const hydrateAndCheckForDueAlarms = async () => {
-      const store = await hydrateAlarmRuntimeForCurrentUser();
+      const [store] = await Promise.all([
+        hydrateAlarmRuntimeForCurrentUser(),
+        getExactAlarmAccessState().catch(() => 'unsupported' as const),
+      ]);
       await syncWeeklyReviewReminderAsync(undefined, {
         requestPermissions: false,
       }).catch(() => null);
@@ -99,7 +210,12 @@ export function useAlarmRuntime() {
       const alarmId = getAlarmIdFromNotification(response);
 
       if (alarmId) {
-        void routeToAlarmIfStillActive(alarmId, true);
+        void routeToAlarmIfStillActive(
+          alarmId,
+          true,
+          getScheduleRevisionFromNotification(response),
+          getNotificationDeliveryContext(response)
+        );
         return;
       }
 
@@ -113,7 +229,12 @@ export function useAlarmRuntime() {
       const alarmId = getAlarmIdFromNotification(notification);
 
       if (alarmId) {
-        void routeToAlarmIfStillActive(alarmId);
+        void routeToAlarmIfStillActive(
+          alarmId,
+          false,
+          getScheduleRevisionFromNotification(notification),
+          getNotificationDeliveryContext(notification)
+        );
       }
     });
 
@@ -121,7 +242,12 @@ export function useAlarmRuntime() {
       const alarmId = getAlarmIdFromNotification(response);
 
       if (alarmId) {
-        void routeToAlarmIfStillActive(alarmId, true);
+        void routeToAlarmIfStillActive(
+          alarmId,
+          true,
+          getScheduleRevisionFromNotification(response),
+          getNotificationDeliveryContext(response)
+        );
         return;
       }
 

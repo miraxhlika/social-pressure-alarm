@@ -77,6 +77,7 @@ async function scheduleNextRecurringAlarm(alarm: Alarm) {
       isPracticeRun: undefined,
       isActive: true,
       notificationIds: nextScheduled.notificationIds,
+      notificationRegistrations: nextScheduled.notificationRegistrations,
       scheduledFor: nextScheduled.scheduledFor,
       notificationStrategyKey: nextScheduled.strategyKey,
     });
@@ -422,9 +423,12 @@ export default function RingingScreen() {
     await triggerHaptic('success');
 
     try {
-      await cancelAlarmNotificationAsync(alarm.notificationIds);
+      if (alarm.repeatSchedule === 'once') {
+        await cancelAlarmNotificationAsync(alarm.notificationIds);
+      }
       const resolvedAlarm = await resolveAlarm(alarm.id, 'confirmed', {
         scheduledFor: alarm.scheduledFor,
+        capturedAt: new Date().toISOString(),
       });
       let practiceDeferredUntil: string | undefined;
 
@@ -457,7 +461,11 @@ export default function RingingScreen() {
         });
       }
 
-      if (alarm.repeatSchedule !== 'once' && resolvedAlarm) {
+      if (
+        alarm.repeatSchedule !== 'once' &&
+        resolvedAlarm &&
+        (resolvedAlarm.isPracticeRun || !alarm.notificationRegistrations?.length)
+      ) {
         const nextRun = await scheduleNextRecurringAlarm(resolvedAlarm).catch(async (error: unknown) => {
           await alert({
             description: error instanceof Error
@@ -511,9 +519,12 @@ export default function RingingScreen() {
     setIsSubmitting(true);
 
     try {
-      await cancelAlarmNotificationAsync(alarm.notificationIds);
+      if (alarm.repeatSchedule === 'once') {
+        await cancelAlarmNotificationAsync(alarm.notificationIds);
+      }
       const resolvedAlarm = await resolveAlarm(alarm.id, 'missed', {
         scheduledFor: alarm.scheduledFor,
+        capturedAt: new Date().toISOString(),
       });
       const store = await readAlarmStore();
       await trackAnalyticsEvent('checkpoint_missed', {
@@ -533,7 +544,11 @@ export default function RingingScreen() {
         });
       }
 
-      if (alarm.repeatSchedule !== 'once' && resolvedAlarm) {
+      if (
+        alarm.repeatSchedule !== 'once' &&
+        resolvedAlarm &&
+        (resolvedAlarm.isPracticeRun || !alarm.notificationRegistrations?.length)
+      ) {
         await scheduleNextRecurringAlarm(resolvedAlarm).catch(async (error: unknown) => {
           await alert({
             description: error instanceof Error

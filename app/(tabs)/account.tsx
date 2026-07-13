@@ -3,7 +3,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useCameraPermissions } from 'expo-camera';
 import type { User } from '@supabase/supabase-js';
 import { useRouter } from 'expo-router';
-import { Animated, Easing, Linking, Pressable, Share, StyleSheet, Switch, Text, View } from 'react-native';
+import { Animated, AppState, Easing, Linking, Platform, Pressable, Share, StyleSheet, Switch, Text, View } from 'react-native';
 
 import { AppButton } from '@/components/ui/app-button';
 import { AppCard } from '@/components/ui/app-card';
@@ -16,6 +16,11 @@ import { StatusPill } from '@/components/ui/status-pill';
 import { Fonts, Radius, Spacing, TextPresets, Type, getAppColors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { readAlarmStore, resetAlarmStore } from '@/lib/alarms';
+import {
+  ExactAlarmAccessState,
+  getExactAlarmAccessState,
+  openExactAlarmSettingsAsync,
+} from '@/lib/exact-alarm-access';
 import {
   DEFAULT_NOTIFICATION_PREFERENCES,
   NotificationPermissionState,
@@ -262,6 +267,7 @@ export default function AccountScreen() {
   const [profileFeedback, setProfileFeedback] = useState<FormFeedback | null>(null);
   const [notificationPermissionState, setNotificationPermissionState] =
     useState<NotificationPermissionState>('undetermined');
+  const [exactAlarmAccessState, setExactAlarmAccessState] = useState<ExactAlarmAccessState>('unsupported');
   const [reminderPreferences, setReminderPreferences] = useState(DEFAULT_NOTIFICATION_PREFERENCES);
   const [isReminderPreferencesLoading, setIsReminderPreferencesLoading] = useState(true);
   const [isReminderPreferencesSubmitting, setIsReminderPreferencesSubmitting] = useState(false);
@@ -326,13 +332,15 @@ export default function AccountScreen() {
     setIsReminderPreferencesLoading(true);
 
     try {
-      const [storedPreferences, permissionState] = await Promise.all([
+      const [storedPreferences, permissionState, exactAlarmState] = await Promise.all([
         readNotificationPreferences(),
         getNotificationPermissionState(),
+        getExactAlarmAccessState(),
       ]);
 
       setReminderPreferences(storedPreferences);
       setNotificationPermissionState(permissionState);
+      setExactAlarmAccessState(exactAlarmState);
       setReminderFeedback(null);
     } finally {
       setIsReminderPreferencesLoading(false);
@@ -341,6 +349,16 @@ export default function AccountScreen() {
 
   useEffect(() => {
     void loadReminderSettings();
+  }, [loadReminderSettings]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        void loadReminderSettings();
+      }
+    });
+
+    return () => subscription.remove();
   }, [loadReminderSettings]);
 
   const handleSaveProfile = async () => {
@@ -385,7 +403,10 @@ export default function AccountScreen() {
     setProfileFeedback(null);
 
     try {
+      const store = await readAlarmStore();
+      await Promise.all(store.alarms.map((alarm) => cancelAlarmNotificationAsync(alarm.notificationIds)));
       await signOut();
+      await syncWeeklyReviewReminderAsync(undefined, { requestPermissions: false }).catch(() => null);
       setActiveSettingsPanel(null);
     } catch (error) {
       setProfileFeedback({
@@ -773,7 +794,9 @@ export default function AccountScreen() {
                 title="Notifications"
                 description={
                   notificationPermissionState === 'granted' || notificationPermissionState === 'provisional'
-                    ? 'Reminders open the app so you can scan. They work best when the phone is unlocked and notifications stay allowed.'
+                    ? exactAlarmAccessState === 'inexact'
+                      ? 'Notifications are enabled, but Android may delay checkpoint reminders until exact alarm access is allowed.'
+                      : 'Reminders are registered with the device and continue while the app is closed.'
                     : 'Enable alerts so checkpoint reminders can open the app on time.'
                 }
               />
@@ -781,6 +804,15 @@ export default function AccountScreen() {
                 <AppButton
                   label={notificationPermissionState === 'denied' ? 'Open device settings' : 'Enable notifications'}
                   onPress={handleRequestNotificationAccess}
+                  variant="secondary"
+                />
+              ) : null}
+              {Platform.OS === 'android' && exactAlarmAccessState === 'inexact' ? (
+                <AppButton
+                  label="Allow exact alarm timing"
+                  onPress={() => {
+                    void openExactAlarmSettingsAsync();
+                  }}
                   variant="secondary"
                 />
               ) : null}
