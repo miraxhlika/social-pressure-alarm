@@ -9,6 +9,7 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "lint": "expo lint",
+    "test:scheduling": "deno test --sloppy-imports lib/alarm-schedule.test.ts",
     "testflight:build": "eas build -p ios --profile production",
     "testflight:submit": "eas submit -p ios --latest",
     "testflight:release": "npm run testflight:build && npm run testflight:submit"

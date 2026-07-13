@@ -4,7 +4,7 @@ import { usePreventRemove } from '@react-navigation/native';
 import { BarcodeScanningResult, CameraView, useCameraPermissions } from 'expo-camera';
 import { type Href, useLocalSearchParams, useRouter } from 'expo-router';
 import { type ComponentProps, type RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, AppState, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, AppState, ActivityIndicator, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { AppButton } from '@/components/ui/app-button';
 import { AppIconButton } from '@/components/ui/app-icon-button';
@@ -30,6 +30,8 @@ import {
   saveNewAlarm,
   updateAlarm,
 } from '@/lib/alarms';
+import { getDeviceTimezone } from '@/lib/alarm-schedule';
+import { getExactAlarmAccessState } from '@/lib/exact-alarm-access';
 import {
   CHECKPOINT_TEMPLATES,
   FIRST_CHECKPOINT_TEMPLATES,
@@ -323,9 +325,7 @@ export default function CreateAlarmScreen() {
   const parsedGracePeriod = Number.parseInt(gracePeriodSeconds, 10);
   const gracePreviewSeconds = Number.isFinite(parsedGracePeriod) ? Math.max(parsedGracePeriod, 0) : 0;
   const hasLinkedProofCode = expectedQrPayload.trim().length > 0;
-  const requiresProofVerification = isOnboardingConversion || isFirstCheckpoint;
-  const hasVerifiedProofCode = Boolean(proofCodeVerifiedAt);
-  const canSaveLinkedProof = hasLinkedProofCode && (!requiresProofVerification || hasVerifiedProofCode);
+  const canSaveLinkedProof = hasLinkedProofCode;
   const shouldSaveFromDetailsStep = activeStep === 1 && canSaveLinkedProof;
   let footerButtonLabel = 'Link proof code';
   let footerHelperCopy = '';
@@ -337,9 +337,6 @@ export default function CreateAlarmScreen() {
     if (!hasLinkedProofCode) {
       footerButtonLabel = 'Link a Code';
       footerHelperCopy = 'Scan a QR code or barcode at the real place or object.';
-    } else if (requiresProofVerification && !hasVerifiedProofCode) {
-      footerButtonLabel = 'Run test scan';
-      footerHelperCopy = 'Test the code once so your first live clear is reliable.';
     } else {
       footerButtonLabel = isSaving
         ? isOnboardingConversion
@@ -352,17 +349,21 @@ export default function CreateAlarmScreen() {
             : 'Save Checkpoint';
       footerHelperCopy = isOnboardingConversion
         ? 'You will clear this checkpoint once now, then keep the daily schedule.'
-        : 'Code linked and verified. Save when you are ready.';
+        : 'Code linked. Save when you are ready.';
     }
   } else if (shouldSaveFromDetailsStep) {
     footerButtonLabel = isSaving ? 'Saving...' : isEditMode ? 'Save Changes' : 'Save Checkpoint';
     footerHelperCopy =
       notificationPermissionState === 'denied'
         ? 'Notifications are blocked in Settings. Re-enable them before saving.'
-        : 'Reminders open the app so you can scan. Keep notifications on.';
-  } else if (activeStep === 1 && hasLinkedProofCode && requiresProofVerification && !hasVerifiedProofCode) {
-    footerButtonLabel = 'Finish proof setup';
-    footerHelperCopy = 'A quick test scan is required before your first checkpoint can go live.';
+        : notificationPermissionState === 'undetermined'
+          ? 'We ask for notifications when you save, so the reminder can go live.'
+          : 'Reminders open the app so you can scan. Keep notifications on.';
+  } else if (activeStep === 1) {
+    footerHelperCopy =
+      notificationPermissionState === 'undetermined'
+        ? 'Next you will scan a code. Notifications are asked when you save.'
+        : '';
   }
   const formattedTime = useMemo(
     () =>
@@ -729,6 +730,8 @@ export default function CreateAlarmScreen() {
       return;
     }
 
+    // Link code is a camera action. Notifications are requested at save, when the
+    // reminder actually goes live — never stack two OS prompts on one tap.
     handleOpenLinkCodeStep();
   }, [focusNameField, handleOpenLinkCodeStep, label, validateDetailsStep]);
 
@@ -926,8 +929,6 @@ export default function CreateAlarmScreen() {
 
     if (!trimmedExpectedQrPayload) {
       nextErrors.expectedQrPayload = 'Scan or choose the exact code this checkpoint should accept.';
-    } else if (requiresProofVerification && !proofCodeVerifiedAt) {
-      nextErrors.expectedQrPayload = 'Run a test scan before saving your first checkpoint.';
     }
 
     if (Number.isNaN(gracePeriod) || gracePeriod < 15) {
@@ -949,10 +950,10 @@ export default function CreateAlarmScreen() {
     }
 
     setErrors({});
-
     setIsSaving(true);
 
     let scheduledNotificationIds: string[] | undefined;
+    let didNavigateAway = false;
 
     try {
       const store = await readAlarmStore();
@@ -960,13 +961,19 @@ export default function CreateAlarmScreen() {
       const nextNotificationPermissionState = await getNotificationPermissionState().catch(
         () => (hasNotificationPermission ? 'granted' : 'denied') as NotificationPermissionState
       );
-      setNotificationPermissionState(nextNotificationPermissionState);
 
       if (!hasNotificationPermission) {
+        setNotificationPermissionState(nextNotificationPermissionState);
         alertNotificationPermission(() => {
           void openNotificationSettingsAsync().catch(() => null);
         });
         return;
+      }
+
+      // Avoid a permission-state re-render while leaving for practice — that flash
+      // is what makes the create form reappear after the OS dialog.
+      if (!isOnboardingConversion) {
+        setNotificationPermissionState(nextNotificationPermissionState);
       }
 
       if (!newAlarmIdRef.current) {
@@ -994,6 +1001,8 @@ export default function CreateAlarmScreen() {
         expectedQrPayload: trimmedExpectedQrPayload,
         proofCodeType: getProofCodeTypeFromLinkMode(linkMode),
         repeatSchedule,
+        timezone: getDeviceTimezone(),
+        scheduleRevision: isEditMode && sourceAlarm ? sourceAlarm.scheduleRevision + 1 : 1,
         gracePeriodSeconds: gracePeriod,
         isActive: true,
         createdAt: isEditMode && sourceAlarm ? sourceAlarm.createdAt : new Date().toISOString(),
@@ -1008,8 +1017,10 @@ export default function CreateAlarmScreen() {
       const scheduled = isOnboardingConversion
         ? {
             notificationIds: [] as string[],
+            notificationRegistrations: [],
             scheduledFor: new Date().toISOString(),
             strategyKey: undefined,
+            omittedKinds: [],
           }
         : await scheduleAlarmNotificationAsync(baseAlarm);
       scheduledNotificationIds = scheduled.notificationIds;
@@ -1022,6 +1033,7 @@ export default function CreateAlarmScreen() {
         ...baseAlarm,
         isPracticeRun: isOnboardingConversion,
         notificationIds: scheduled.notificationIds,
+        notificationRegistrations: scheduled.notificationRegistrations,
         scheduledFor: scheduled.scheduledFor,
         notificationStrategyKey: scheduled.strategyKey,
       };
@@ -1048,6 +1060,7 @@ export default function CreateAlarmScreen() {
 
       if (isOnboardingConversion && !isEditMode) {
         await markOnboardingCompleted();
+        didNavigateAway = true;
         router.replace({
           pathname: '/ringing',
           params: {
@@ -1057,6 +1070,23 @@ export default function CreateAlarmScreen() {
         return;
       }
 
+      const exactAlarmAccess = await getExactAlarmAccessState();
+      if (scheduled.omittedKinds.length > 0 || exactAlarmAccess === 'inexact') {
+        const omittedCopy = scheduled.omittedKinds.length > 0
+          ? ` Optional ${scheduled.omittedKinds.join(' and ')} reminders were omitted because the device notification limit was reached.`
+          : '';
+        const timingCopy = exactAlarmAccess === 'inexact'
+          ? ' Android exact alarm access is off, so the reminder may be delayed. You can enable it from Account → Notifications.'
+          : '';
+        await alert({
+          title: 'Checkpoint saved with a warning',
+          description: `${timingCopy}${omittedCopy}`.trim(),
+          icon: 'notifications-outline',
+          tone: 'warning',
+        });
+      }
+
+      didNavigateAway = true;
       router.replace(returnTo);
     } catch (error) {
       if (scheduledNotificationIds) {
@@ -1073,7 +1103,9 @@ export default function CreateAlarmScreen() {
       });
     } finally {
       saveInFlightRef.current = false;
-      setIsSaving(false);
+      if (!didNavigateAway) {
+        setIsSaving(false);
+      }
     }
   }, [
     alert,
@@ -1087,9 +1119,7 @@ export default function CreateAlarmScreen() {
     linkMode,
     notes,
     placeObject,
-    proofCodeVerifiedAt,
     repeatSchedule,
-    requiresProofVerification,
     returnTo,
     router,
     selectedCircleId,
@@ -1102,52 +1132,38 @@ export default function CreateAlarmScreen() {
   ]);
 
   return (
-    <AppScreen
-      backgroundColor={colors.elevated}
-      contentStyle={styles.screenContent}
-      footer={
-        activeStep === 0 ? null : (
-          <View style={styles.bottomFooter}>
-            <FlowFooterButton
-              disabled={isSaving}
-              icon={
-                canSaveLinkedProof
-                  ? 'checkmark'
-                  : activeStep === 2 && hasLinkedProofCode && requiresProofVerification && !hasVerifiedProofCode
-                    ? 'scan-outline'
-                    : activeStep === 2
-                      ? 'scan'
-                      : 'qr-code-outline'
-              }
-              label={footerButtonLabel}
-              onPress={
-                activeStep === 2
-                  ? !hasLinkedProofCode
-                    ? () => void handleOpenScanner(linkMode === 'scanBarcode' ? 'scanBarcode' : 'scanQr')
-                    : requiresProofVerification && !hasVerifiedProofCode
-                      ? () => void handleOpenTestScanner()
+    <View style={styles.createRoot}>
+      <AppScreen
+        backgroundColor={colors.elevated}
+        contentStyle={styles.screenContent}
+        footer={
+          activeStep === 0 ? null : (
+            <View style={styles.bottomFooter}>
+              <FlowFooterButton
+                disabled={isSaving}
+                icon={canSaveLinkedProof ? 'checkmark' : activeStep === 2 ? 'scan' : 'qr-code-outline'}
+                label={footerButtonLabel}
+                onPress={
+                  activeStep === 2
+                    ? !hasLinkedProofCode
+                      ? () => void handleOpenScanner(linkMode === 'scanBarcode' ? 'scanBarcode' : 'scanQr')
                       : handleSave
-                  : shouldSaveFromDetailsStep
-                    ? handleSave
-                    : hasLinkedProofCode && requiresProofVerification && !hasVerifiedProofCode
-                      ? () => {
-                          setActiveStep(2);
-                          void handleOpenTestScanner();
-                        }
+                    : shouldSaveFromDetailsStep
+                      ? handleSave
                       : handleContinueToLinkCode
-              }
-            />
-            {footerHelperCopy ? (
-              <View style={styles.footerHelper}>
-                <Ionicons color={colors.muted} name="lock-closed-outline" size={12} />
-                <Text style={[styles.footerHelperText, { color: colors.textSoft }]}>{footerHelperCopy}</Text>
-              </View>
-            ) : null}
-          </View>
-        )
-      }
-      keyboardAware
-      scrollRef={scrollViewRef}>
+                }
+              />
+              {footerHelperCopy ? (
+                <View style={styles.footerHelper}>
+                  <Ionicons color={colors.muted} name="lock-closed-outline" size={12} />
+                  <Text style={[styles.footerHelperText, { color: colors.textSoft }]}>{footerHelperCopy}</Text>
+                </View>
+              ) : null}
+            </View>
+          )
+        }
+        keyboardAware
+        scrollRef={scrollViewRef}>
       <FlowTopBar
         leftAccessibilityLabel={
           activeStep === 0
@@ -1169,8 +1185,8 @@ export default function CreateAlarmScreen() {
               ? isOnboardingConversion
                 ? 'Then link a code and clear it once.'
                 : 'Set it up in a minute.'
-              : requiresProofVerification
-                ? 'Link the code, then test it once.'
+              : isOnboardingConversion
+                ? 'Link a code, then clear it once.'
                 : 'Choose the code that proves completion.'
         }
         title={
@@ -1239,7 +1255,6 @@ export default function CreateAlarmScreen() {
           onTimeChange={handleTimeChange}
           placeObject={placeObject}
           repeatSchedule={repeatSchedule}
-          requiresProofVerification={requiresProofVerification}
           selectedTemplate={selectedTemplate}
           selectedCircleId={selectedCircleId}
           shareMisses={shareMisses}
@@ -1278,13 +1293,26 @@ export default function CreateAlarmScreen() {
           permissionGranted={Boolean(permission?.granted)}
           proofCodeCapturedAt={proofCodeCapturedAt}
           proofCodeVerifiedAt={proofCodeVerifiedAt}
-          requiresProofVerification={requiresProofVerification}
           scannerMessage={scannerMessage}
           scannerPurpose={scannerPurpose}
           shouldShowCameraFallback={shouldShowCameraFallback}
         />
       )}
-    </AppScreen>
+      </AppScreen>
+      {isSaving && isOnboardingConversion ? (
+        <View
+          accessibilityLabel="Starting practice"
+          accessibilityRole="progressbar"
+          pointerEvents="auto"
+          style={[styles.practiceTransitionOverlay, { backgroundColor: colors.elevated }]}>
+          <ActivityIndicator color={colors.primary} size="large" />
+          <Text style={[styles.practiceTransitionTitle, { color: colors.text }]}>Starting practice</Text>
+          <Text style={[styles.practiceTransitionCopy, { color: colors.textSoft }]}>
+            Opening your live checkpoint…
+          </Text>
+        </View>
+      ) : null}
+    </View>
   );
 }
 
@@ -1363,7 +1391,6 @@ function CreateDetailsStep({
   placeObject,
   proofCodeVerifiedAt,
   repeatSchedule,
-  requiresProofVerification = false,
   selectedCircleId,
   selectedTemplate,
   shareMisses,
@@ -1403,7 +1430,6 @@ function CreateDetailsStep({
   placeObject: string;
   proofCodeVerifiedAt: string | null;
   repeatSchedule: RepeatSchedule;
-  requiresProofVerification?: boolean;
   selectedCircleId: string | null;
   selectedTemplate: ReturnType<typeof getCheckpointTemplate>;
   shareMisses: boolean;
@@ -1519,9 +1545,7 @@ function CreateDetailsStep({
             hasLinkedProofCode
               ? proofCodeVerifiedAt
                 ? 'Tested and ready'
-                : requiresProofVerification
-                  ? 'Linked · test scan still needed'
-                  : 'Ready to use'
+                : 'Ready to use'
               : 'Scan a QR code or barcode'
           }
           expanded={false}
@@ -1660,7 +1684,6 @@ function LinkCodeStep({
   permissionGranted,
   proofCodeCapturedAt,
   proofCodeVerifiedAt,
-  requiresProofVerification = false,
   scannerMessage,
   scannerPurpose,
   shouldShowCameraFallback,
@@ -1686,7 +1709,6 @@ function LinkCodeStep({
   permissionGranted: boolean;
   proofCodeCapturedAt: string | null;
   proofCodeVerifiedAt: string | null;
-  requiresProofVerification?: boolean;
   scannerMessage: string;
   scannerPurpose: ScannerPurpose;
   shouldShowCameraFallback: boolean;
@@ -1844,40 +1866,27 @@ function LinkCodeStep({
         )}
       </FlowPanel>
 
-      <View style={styles.testScanGroup}>
-        <FlowSectionLabel>{requiresProofVerification ? 'REQUIRED TEST SCAN' : 'TEST SCAN'}</FlowSectionLabel>
-        <Pressable
-          accessibilityLabel={`Test Scan. Verify this code matches. ${proofCodeVerifiedAt ? 'Matched' : requiresProofVerification ? 'Required' : 'Test'}.`}
-          accessibilityRole="button"
-          onPress={onOpenTestScanner}
-          style={({ pressed }) => [
-            styles.testScanRow,
-            requiresProofVerification && !proofCodeVerifiedAt
-              ? { backgroundColor: colors.warningSurface, borderRadius: Radius.md, paddingHorizontal: Spacing.sm }
-              : null,
-            pressed && styles.pressed,
-          ]}>
-          <Ionicons color={colors.primary} name="scan-outline" size={19} />
-          <View style={styles.testScanCopy}>
-            <Text style={[styles.testScanTitle, { color: colors.text }]}>
-              {requiresProofVerification ? 'Test before first clear' : 'Test Scan'}
-            </Text>
-            <Text style={[styles.testScanDescription, { color: colors.textSoft }]}>
-              {requiresProofVerification
-                ? proofCodeVerifiedAt
-                  ? 'Verified. You are ready to start.'
-                  : 'Required once so your first live clear works'
-                : 'Verify this code matches'}
-            </Text>
-          </View>
-          <StatusPill
-            label={proofCodeVerifiedAt ? 'Matched' : requiresProofVerification ? 'Required' : 'Test'}
-            tone={proofCodeVerifiedAt ? 'success' : requiresProofVerification ? 'warning' : 'default'}
-          />
-          <Ionicons color={colors.muted} name="chevron-forward" size={17} />
-        </Pressable>
-        {error ? <Text style={[styles.errorText, { color: colors.danger }]}>{error}</Text> : null}
-      </View>
+      {expectedQrPayload.trim() ? (
+        <View style={styles.testScanGroup}>
+          <FlowSectionLabel>OPTIONAL TEST SCAN</FlowSectionLabel>
+          <Pressable
+            accessibilityLabel={`Test Scan. Optionally verify this code matches. ${proofCodeVerifiedAt ? 'Matched' : 'Optional'}.`}
+            accessibilityRole="button"
+            onPress={onOpenTestScanner}
+            style={({ pressed }) => [styles.testScanRow, pressed && styles.pressed]}>
+            <Ionicons color={colors.primary} name="scan-outline" size={19} />
+            <View style={styles.testScanCopy}>
+              <Text style={[styles.testScanTitle, { color: colors.text }]}>Test Scan</Text>
+              <Text style={[styles.testScanDescription, { color: colors.textSoft }]}>
+                {proofCodeVerifiedAt ? 'Verified. This code matches.' : 'Optional — confirm the linked code still matches'}
+              </Text>
+            </View>
+            <StatusPill label={proofCodeVerifiedAt ? 'Matched' : 'Optional'} tone={proofCodeVerifiedAt ? 'success' : 'default'} />
+            <Ionicons color={colors.muted} name="chevron-forward" size={17} />
+          </Pressable>
+          {error ? <Text style={[styles.errorText, { color: colors.danger }]}>{error}</Text> : null}
+        </View>
+      ) : null}
 
       <FlowPanel style={styles.strictInfo} tone="muted">
         <View style={styles.strictInfoIcon}>
@@ -2177,6 +2186,30 @@ function alertNotificationPermission(onOpenSettings: () => void) {
 }
 
 const styles = StyleSheet.create({
+  createRoot: {
+    flex: 1,
+  },
+  practiceTransitionOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    gap: Spacing.sm,
+    justifyContent: 'center',
+    paddingHorizontal: Spacing.xl,
+    zIndex: 20,
+  },
+  practiceTransitionTitle: {
+    ...TextPresets.title,
+    fontSize: 22,
+    lineHeight: 28,
+    marginTop: Spacing.sm,
+    textAlign: 'center',
+  },
+  practiceTransitionCopy: {
+    ...TextPresets.body,
+    fontSize: 14,
+    lineHeight: 20,
+    textAlign: 'center',
+  },
   screenContent: {
     gap: Spacing.md,
     paddingHorizontal: Spacing.lg,

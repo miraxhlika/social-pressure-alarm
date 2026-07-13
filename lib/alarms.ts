@@ -18,6 +18,14 @@ import {
   getFailureOccurrenceTimestamp,
   getSuccessOccurrenceTimestamp,
 } from '@/lib/alarm-history';
+import {
+  advanceRecurringOccurrence,
+  createAlarmOccurrenceKey,
+  createNextOccurrenceDate,
+  enumerateElapsedOccurrences,
+  getDeviceTimezone,
+  isValidTimezone,
+} from '@/lib/alarm-schedule';
 import { normalizeUseCaseType } from '@/lib/checkpoint-templates';
 import { getWeeklyCompletionStats } from '@/lib/progress';
 import { hasSocialBackendConfig } from '@/lib/social/config';
@@ -284,6 +292,11 @@ function normalizeAlarm(rawAlarm: unknown): Alarm | null {
     notes: getTrimmedString(legacyAlarm.notes),
     expectedQrPayload,
     repeatSchedule: getRepeatSchedule(legacyAlarm.repeatSchedule),
+    timezone:
+      getTrimmedString(legacyAlarm.timezone) && isValidTimezone(getTrimmedString(legacyAlarm.timezone) as string)
+        ? (getTrimmedString(legacyAlarm.timezone) as string)
+        : getDeviceTimezone(),
+    scheduleRevision: getBoundedNumber(legacyAlarm.scheduleRevision, 1, Number.MAX_SAFE_INTEGER, 1),
     gracePeriodSeconds: getBoundedNumber(legacyAlarm.gracePeriodSeconds, 15, 3600, 120),
     isActive: typeof legacyAlarm.isActive === 'boolean' ? legacyAlarm.isActive : true,
     createdAt: getRequiredIsoString(legacyAlarm.createdAt, new Date().toISOString()),
@@ -314,14 +327,37 @@ function normalizeRuntimeMetadata(rawValue: unknown): AlarmRuntimeMetadata | nul
         .map((value) => getTrimmedString(value))
         .filter((value): value is string => Boolean(value))
     : [];
+  const notificationRegistrations = Array.isArray(rawValue.notificationRegistrations)
+    ? rawValue.notificationRegistrations.flatMap((value) => {
+        if (!isRecord(value)) {
+          return [];
+        }
 
-  if (notificationIds.length === 0 && !scheduledFor && !isPracticeRun) {
+        const identifier = getTrimmedString(value.identifier);
+        const kind = value.kind;
+        const triggerSignature = getTrimmedString(value.triggerSignature);
+
+        if (!identifier || !triggerSignature || (kind !== 'primary' && kind !== 'urgency' && kind !== 'readiness')) {
+          return [];
+        }
+
+        return [{
+          identifier,
+          kind: kind as 'primary' | 'urgency' | 'readiness',
+          triggerSignature,
+          weekday: typeof value.weekday === 'number' ? getBoundedNumber(value.weekday, 1, 7, 1) : undefined,
+        }];
+      })
+    : [];
+
+  if (notificationIds.length === 0 && notificationRegistrations.length === 0 && !scheduledFor && !isPracticeRun) {
     return null;
   }
 
   return {
     isPracticeRun,
     notificationIds,
+    notificationRegistrations,
     scheduledFor,
     notificationStrategyKey,
   };
@@ -462,7 +498,8 @@ export function createAlarmOutcomeIdempotencyKey(
   scheduledFor: string | undefined,
   outcome: AlarmOutcome
 ) {
-  return `${alarmId}::${getAlarmOccurrenceKey(scheduledFor)}::${outcome}`;
+  void outcome;
+  return createAlarmOccurrenceKey(alarmId, scheduledFor);
 }
 
 function hasFailureHistoryForOccurrence(
@@ -491,6 +528,7 @@ function hasSuccessHistoryForOccurrence(
 
 type ResolveAlarmOutcomeInStoreOptions = {
   resolvedAt?: string;
+  capturedAt?: string;
   scheduledFor?: string;
   nextScheduledFor?: string;
   isActive?: boolean;
@@ -519,13 +557,25 @@ export function resolveAlarmOutcomeInStore(
   const resolvedTimestamp = new Date(resolvedAt).getTime();
   const scheduledFor = options.scheduledFor ?? alarm.scheduledFor;
   const scheduledTimestamp = scheduledFor ? new Date(scheduledFor).getTime() : resolvedTimestamp;
-  const nextScheduledFor = options.nextScheduledFor ?? alarm.scheduledFor;
+  const nextScheduledFor = options.nextScheduledFor ?? (
+    alarm.repeatSchedule === 'once' || !scheduledFor
+      ? alarm.scheduledFor
+      : advanceRecurringOccurrence(
+          scheduledFor,
+          alarm.hour,
+          alarm.minute,
+          alarm.repeatSchedule,
+          alarm.timezone
+        ).toISOString()
+  );
   const updatedAlarm: Alarm = {
     ...alarm,
     clientId: alarm.clientId ?? alarm.id,
-    isActive: options.isActive ?? false,
-    notificationIds: undefined,
-    notificationStrategyKey: undefined,
+    isActive: options.isActive ?? alarm.repeatSchedule !== 'once',
+    notificationIds: alarm.repeatSchedule === 'once' ? undefined : alarm.notificationIds,
+    notificationRegistrations:
+      alarm.repeatSchedule === 'once' ? undefined : alarm.notificationRegistrations,
+    notificationStrategyKey: alarm.repeatSchedule === 'once' ? undefined : alarm.notificationStrategyKey,
     scheduledFor: nextScheduledFor,
     lastOutcome: outcome,
     updatedAt: resolvedAt,
@@ -590,6 +640,7 @@ export function resolveAlarmOutcomeInStore(
   const idempotencyKey = createAlarmOutcomeIdempotencyKey(alarm.id, scheduledFor, outcome);
   const eventRecord: AlarmEventRecord = {
     id: idempotencyKey,
+    occurrenceKey: createAlarmOccurrenceKey(alarm.id, scheduledFor),
     clientId: createAlarmOutcomeIdempotencyKey(alarm.clientId ?? alarm.id, scheduledFor, outcome),
     idempotencyKey,
     alarmId: alarm.id,
@@ -597,6 +648,8 @@ export function resolveAlarmOutcomeInStore(
     scheduledFor,
     outcome,
     resolvedAt,
+    capturedAt: options.capturedAt ?? resolvedAt,
+    scheduleRevision: alarm.scheduleRevision,
     source: 'device',
     socialSettings: alarm.socialSettings,
     sharePayload: {
@@ -646,27 +699,54 @@ export function reconcileOverdueAlarmOutcomesInStore(
       continue;
     }
 
-    const nextScheduledFor =
-      alarm.repeatSchedule === 'once'
-        ? alarm.scheduledFor
-        : createNextAlarmDateForSchedule(alarm.hour, alarm.minute, alarm.repeatSchedule, new Date(now)).toISOString();
-    const resolution = resolveAlarmOutcomeInStore(nextStore, alarm.id, 'missed', {
-      resolvedAt,
-      scheduledFor: alarm.scheduledFor,
-      nextScheduledFor,
-      isActive: alarm.repeatSchedule !== 'once',
-    });
+    let cursor = alarm.scheduledFor;
+    let hasMore = true;
 
-    if (!resolution) {
-      continue;
-    }
+    while (hasMore) {
+      const elapsed = enumerateElapsedOccurrences({
+        scheduledFor: cursor,
+        hour: alarm.hour,
+        minute: alarm.minute,
+        repeatSchedule: alarm.repeatSchedule,
+        timezone: alarm.timezone,
+        gracePeriodSeconds: alarm.gracePeriodSeconds,
+        now,
+        limit: 100,
+      });
 
-    nextStore = resolution.store;
-    dirtyAlarmIds.push(alarm.id);
-    resolvedCount += 1;
+      for (const occurrence of elapsed.occurrences) {
+        const resolution = resolveAlarmOutcomeInStore(nextStore, alarm.id, 'missed', {
+          resolvedAt,
+          capturedAt: new Date(new Date(occurrence).getTime() + alarm.gracePeriodSeconds * 1000).toISOString(),
+          scheduledFor: occurrence,
+          nextScheduledFor:
+            alarm.repeatSchedule === 'once'
+              ? occurrence
+              : advanceRecurringOccurrence(
+                  occurrence,
+                  alarm.hour,
+                  alarm.minute,
+                  alarm.repeatSchedule,
+                  alarm.timezone
+                ).toISOString(),
+          isActive: alarm.repeatSchedule !== 'once',
+        });
 
-    if (resolution.eventRecord) {
-      eventRecords.push(resolution.eventRecord);
+        if (!resolution) {
+          continue;
+        }
+
+        nextStore = resolution.store;
+        dirtyAlarmIds.push(alarm.id);
+        resolvedCount += resolution.didRecordOutcome ? 1 : 0;
+
+        if (resolution.eventRecord) {
+          eventRecords.push(resolution.eventRecord);
+        }
+      }
+
+      cursor = elapsed.nextScheduledFor;
+      hasMore = alarm.repeatSchedule !== 'once' && elapsed.hasMore;
     }
   }
 
@@ -718,6 +798,7 @@ function stripAlarmRuntimeMetadata(alarm: Alarm): AlarmDefinition {
   const {
     isPracticeRun: _isPracticeRun,
     notificationIds: _notificationIds,
+    notificationRegistrations: _notificationRegistrations,
     notificationStrategyKey: _notificationStrategyKey,
     ...alarmDefinition
   } = alarm;
@@ -729,6 +810,7 @@ function mergeAlarmWithRuntimeMetadata(alarm: AlarmDefinition, runtimeMetadata?:
     ...alarm,
     isPracticeRun: runtimeMetadata?.isPracticeRun,
     notificationIds: runtimeMetadata?.notificationIds,
+    notificationRegistrations: runtimeMetadata?.notificationRegistrations,
   };
 }
 
@@ -876,6 +958,7 @@ async function migrateAlarmRuntimeMetadata(
               ...nextRuntimeStore.alarms,
               [alarm.id]: {
                 notificationIds: alarm.notificationIds,
+                notificationRegistrations: alarm.notificationRegistrations,
                 scheduledFor: alarm.scheduledFor,
               },
             },
@@ -1043,20 +1126,51 @@ async function reconcileAlarmOutcomesAndSchedules(store: AlarmStore, runtimeStor
           pendingDeletes: [...new Set([...runtimeStore.pendingDeletes, ...duplicateAlarmIds])],
         };
   const outcomeState = await reconcileOverdueAlarmOutcomesForState(normalizedStore, normalizedRuntimeStore);
+  const currentTimezone = getDeviceTimezone();
+  const timezoneChangedAlarmIds: string[] = [];
+  const timezoneAdjustedStore: AlarmStore = {
+    ...outcomeState.store,
+    alarms: outcomeState.store.alarms.map((alarm) => {
+      if (!alarm.isActive || alarm.timezone === currentTimezone || getAlarmPhase(alarm) === 'ringing') {
+        return alarm;
+      }
+
+      timezoneChangedAlarmIds.push(alarm.id);
+      return {
+        ...alarm,
+        timezone: currentTimezone,
+        scheduleRevision: alarm.scheduleRevision + 1,
+        scheduledFor: createNextOccurrenceDate(
+          alarm.hour,
+          alarm.minute,
+          alarm.repeatSchedule,
+          new Date(),
+          currentTimezone
+        ).toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+    }),
+  };
 
   if (outcomeState.resolvedCount > 0) {
-    await writeLocalAlarmState(outcomeState.store, outcomeState.runtimeStore);
+    await writeLocalAlarmState(timezoneAdjustedStore, outcomeState.runtimeStore);
   }
 
-  return reconcileAlarmSchedules(outcomeState.store, outcomeState.runtimeStore);
+  if (timezoneChangedAlarmIds.length > 0 && shouldSyncRemoteAlarms()) {
+    await upsertMyRemoteAlarms(
+      timezoneAdjustedStore.alarms
+        .filter((alarm) => timezoneChangedAlarmIds.includes(alarm.id))
+        .map(stripAlarmRuntimeMetadata)
+    ).catch(() => null);
+  }
+
+  return reconcileAlarmSchedules(timezoneAdjustedStore, outcomeState.runtimeStore);
 }
 
 async function reconcileAlarmSchedules(store: AlarmStore, runtimeStore: AlarmRuntimeStore) {
   const {
     cancelAlarmNotificationAsync,
-    getAlarmNotificationStrategyKey,
     isNotificationPermissionRequiredError,
-    readNotificationPreferences,
     scheduleAlarmNotificationAsync,
   } = await import('@/lib/notifications');
   const knownAlarmIds = new Set(store.alarms.map((alarm) => alarm.id));
@@ -1067,7 +1181,6 @@ async function reconcileAlarmSchedules(store: AlarmStore, runtimeStore: AlarmRun
   let nextAlarms = [...store.alarms];
   const alarmsToSyncRemotely = [] as AlarmDefinition[];
   const now = Date.now();
-  const notificationPreferences = await readNotificationPreferences();
 
   for (const [alarmId, metadata] of Object.entries(runtimeStore.alarms)) {
     if (knownAlarmIds.has(alarmId)) {
@@ -1099,23 +1212,6 @@ async function reconcileAlarmSchedules(store: AlarmStore, runtimeStore: AlarmRun
       continue;
     }
 
-    const strategyKey = getAlarmNotificationStrategyKey(
-      alarm,
-      notificationPreferences,
-      alarm.scheduledFor ? new Date(alarm.scheduledFor) : createNextAlarmDateForSchedule(alarm.hour, alarm.minute, alarm.repeatSchedule)
-    );
-
-    if (runtimeMetadata?.notificationIds?.length) {
-      if (
-        runtimeMetadata.scheduledFor === alarm.scheduledFor &&
-        runtimeMetadata.notificationStrategyKey === strategyKey
-      ) {
-        continue;
-      }
-
-      await cancelAlarmNotificationAsync(runtimeMetadata.notificationIds);
-    }
-
     let scheduled: Awaited<ReturnType<typeof scheduleAlarmNotificationAsync>>;
 
     try {
@@ -1133,6 +1229,7 @@ async function reconcileAlarmSchedules(store: AlarmStore, runtimeStore: AlarmRun
 
     nextRuntimeStore.alarms[alarm.id] = {
       notificationIds: scheduled.notificationIds,
+      notificationRegistrations: scheduled.notificationRegistrations,
       scheduledFor: scheduled.scheduledFor,
       notificationStrategyKey: scheduled.strategyKey,
     };
@@ -1428,6 +1525,7 @@ async function enqueueRecentGuestHistoryForSync(
 
     await enqueueAlarmEvent({
       id: idempotencyKey,
+      occurrenceKey: createAlarmOccurrenceKey(alarmId, entry.scheduledFor),
       clientId: createAlarmOutcomeIdempotencyKey(entry.alarmId, entry.scheduledFor, 'missed'),
       idempotencyKey,
       alarmId,
@@ -1435,6 +1533,8 @@ async function enqueueRecentGuestHistoryForSync(
       scheduledFor: entry.scheduledFor,
       outcome: 'missed',
       resolvedAt: entry.failedAt,
+      capturedAt: entry.failedAt,
+      scheduleRevision: alarm?.scheduleRevision ?? 1,
       source: 'device',
       socialSettings: alarm?.socialSettings,
       sharePayload: {
@@ -1456,6 +1556,7 @@ async function enqueueRecentGuestHistoryForSync(
 
     await enqueueAlarmEvent({
       id: idempotencyKey,
+      occurrenceKey: createAlarmOccurrenceKey(alarmId, entry.scheduledFor),
       clientId: createAlarmOutcomeIdempotencyKey(entry.alarmId, entry.scheduledFor, 'confirmed'),
       idempotencyKey,
       alarmId,
@@ -1463,6 +1564,8 @@ async function enqueueRecentGuestHistoryForSync(
       scheduledFor: entry.scheduledFor,
       outcome: 'confirmed',
       resolvedAt: entry.confirmedAt,
+      capturedAt: entry.confirmedAt,
+      scheduleRevision: alarm?.scheduleRevision ?? 1,
       source: 'device',
       socialSettings: alarm?.socialSettings,
       sharePayload: {
@@ -1741,6 +1844,7 @@ export async function saveNewAlarm(alarm: Alarm) {
       [alarmToSave.id]: {
         isPracticeRun: alarmToSave.isPracticeRun,
         notificationIds: alarmToSave.notificationIds,
+        notificationRegistrations: alarmToSave.notificationRegistrations,
         scheduledFor: alarmToSave.scheduledFor,
         notificationStrategyKey: alarmToSave.notificationStrategyKey,
       },
@@ -1794,6 +1898,7 @@ export async function updateAlarm(updatedAlarm: Alarm) {
       [alarmToSave.id]: {
         isPracticeRun: alarmToSave.isPracticeRun,
         notificationIds: alarmToSave.notificationIds,
+        notificationRegistrations: alarmToSave.notificationRegistrations,
         scheduledFor: alarmToSave.scheduledFor,
         notificationStrategyKey: alarmToSave.notificationStrategyKey,
       },
@@ -1842,6 +1947,7 @@ export async function restartAlarmNow(alarmOrId: Alarm | string) {
     isPracticeRun: undefined,
     lastOutcome: undefined,
     notificationIds: undefined,
+    notificationRegistrations: undefined,
     notificationStrategyKey: undefined,
     scheduledFor: new Date().toISOString(),
   });
@@ -1881,6 +1987,7 @@ export async function rescheduleAlarm(
       isActive: true,
       lastOutcome: undefined,
       notificationIds: scheduled.notificationIds,
+      notificationRegistrations: scheduled.notificationRegistrations,
       scheduledFor: scheduled.scheduledFor,
       notificationStrategyKey: scheduled.strategyKey,
     });
@@ -1935,8 +2042,9 @@ export async function deleteAlarm(id: string) {
 export async function resolveAlarm(
   id: string,
   outcome: AlarmOutcome,
-  options?: {
+  options: {
     scheduledFor?: string;
+    capturedAt: string;
   }
 ) {
   const { store, runtimeStore } = await readLocalAlarmState();
@@ -1954,7 +2062,11 @@ export async function resolveAlarm(
     return options?.scheduledFor ? null : alarm;
   }
 
-  const resolution = resolveAlarmOutcomeInStore(store, alarm.id, outcome);
+  const resolution = resolveAlarmOutcomeInStore(store, alarm.id, outcome, {
+    scheduledFor: options.scheduledFor,
+    capturedAt: options.capturedAt,
+    resolvedAt: options.capturedAt,
+  });
 
   if (!resolution) {
     return null;
@@ -1969,6 +2081,7 @@ export async function resolveAlarm(
       [updatedAlarm.id]: {
         isPracticeRun: updatedAlarm.isPracticeRun,
         notificationIds: updatedAlarm.notificationIds,
+        notificationRegistrations: updatedAlarm.notificationRegistrations,
         scheduledFor: updatedAlarm.scheduledFor,
         notificationStrategyKey: updatedAlarm.notificationStrategyKey,
       },
@@ -2023,17 +2136,7 @@ export function createNextAlarmDateForSchedule(
   repeatSchedule: RepeatSchedule,
   now = new Date()
 ) {
-  const scheduledFor = createNextAlarmDate(hour, minute, now);
-
-  if (repeatSchedule !== 'weekdays') {
-    return scheduledFor;
-  }
-
-  while (scheduledFor.getDay() === 0 || scheduledFor.getDay() === 6) {
-    scheduledFor.setDate(scheduledFor.getDate() + 1);
-  }
-
-  return scheduledFor;
+  return createNextOccurrenceDate(hour, minute, repeatSchedule, now, getDeviceTimezone());
 }
 
 export function getAlarmDeadlineTimestamp(alarm: Alarm) {

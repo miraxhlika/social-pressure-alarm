@@ -4,6 +4,7 @@ export const MAX_CHECKPOINT_PRESETS = 8;
 
 export type AlarmOutcome = 'confirmed' | 'missed';
 export type RepeatSchedule = 'once' | 'daily' | 'weekdays';
+export type AlarmNotificationKind = 'primary' | 'urgency' | 'readiness';
 export type AlarmProofCodeType = 'qr' | 'barcode';
 export type UseCaseType =
   | 'wake_up'
@@ -32,11 +33,14 @@ export type AlarmEventSharePayload = {
 
 export type AlarmEventRecord = {
   id: string;
+  occurrenceKey: string;
   alarmId: string;
   alarmLabel: string;
   scheduledFor?: string;
   outcome: AlarmOutcome;
   resolvedAt: string;
+  capturedAt: string;
+  scheduleRevision: number;
   source: 'device';
   clientId?: string;
   idempotencyKey?: string;
@@ -86,6 +90,8 @@ export type AlarmDefinition = {
   expectedQrPayload: string;
   proofCodeType?: AlarmProofCodeType;
   repeatSchedule: RepeatSchedule;
+  timezone: string;
+  scheduleRevision: number;
   gracePeriodSeconds: number;
   isActive: boolean;
   createdAt: string;
@@ -95,8 +101,17 @@ export type AlarmDefinition = {
   lastOutcome?: AlarmOutcome;
 };
 
+export type AlarmNotificationRegistration = {
+  identifier: string;
+  kind: AlarmNotificationKind;
+  triggerSignature: string;
+  weekday?: number;
+};
+
 export type AlarmRuntimeMetadata = {
   isPracticeRun?: boolean;
+  notificationRegistrations?: AlarmNotificationRegistration[];
+  /** Legacy identifiers retained until the runtime store has been migrated. */
   notificationIds?: string[];
   scheduledFor?: string;
   notificationStrategyKey?: string;

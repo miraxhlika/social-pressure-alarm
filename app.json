@@ -2,7 +2,7 @@
   "expo": {
     "name": "Checkpoint Alarm",
     "slug": "social-pressure-alarm",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "socialpressurealarm",
@@ -27,7 +27,8 @@
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "permissions": [
-        "android.permission.CAMERA"
+        "android.permission.CAMERA",
+        "android.permission.SCHEDULE_EXACT_ALARM"
       ],
       "package": "com.miraxhlika.socialpressurealarm"
     },

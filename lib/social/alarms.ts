@@ -1,5 +1,6 @@
 import { getSocialSession, getSupabaseClient } from '@/lib/social/client';
 import { normalizeUseCaseType } from '@/lib/checkpoint-templates';
+import { getDeviceTimezone, isValidTimezone } from '@/lib/alarm-schedule';
 import { AlarmDefinition, AlarmSocialSettings, RepeatSchedule } from '@/types/alarm';
 
 type RemoteAlarmRow = {
@@ -13,6 +14,8 @@ type RemoteAlarmRow = {
   place_object?: string | null;
   notes?: string | null;
   repeat_schedule: RepeatSchedule;
+  timezone?: string | null;
+  schedule_revision?: number | null;
   grace_period_seconds: number;
   is_active: boolean;
   scheduled_for?: string | null;
@@ -62,6 +65,8 @@ function mapRemoteAlarmRow(row: RemoteAlarmRow): AlarmDefinition {
     notes: row.notes ?? undefined,
     expectedQrPayload: row.expected_qr_payload,
     repeatSchedule: row.repeat_schedule,
+    timezone: row.timezone && isValidTimezone(row.timezone) ? row.timezone : getDeviceTimezone(),
+    scheduleRevision: Math.max(1, Math.trunc(row.schedule_revision ?? 1)),
     gracePeriodSeconds: row.grace_period_seconds,
     isActive: row.is_active,
     createdAt: row.created_at,
@@ -84,6 +89,8 @@ function mapAlarmDefinitionForWrite(alarm: AlarmDefinition, userId: string) {
     minute: alarm.minute,
     use_case_type: alarm.useCaseType,
     repeat_schedule: alarm.repeatSchedule,
+    timezone: alarm.timezone,
+    schedule_revision: alarm.scheduleRevision,
     grace_period_seconds: alarm.gracePeriodSeconds,
     is_active: alarm.isActive,
     scheduled_for: alarm.scheduledFor ?? null,
@@ -112,7 +119,7 @@ export async function listMyRemoteAlarms() {
   const { data, error } = await client
     .from('user_alarms')
     .select(
-      'id, user_id, label, expected_qr_payload, place_object, notes, hour, minute, use_case_type, repeat_schedule, grace_period_seconds, is_active, scheduled_for, last_outcome, social_settings, created_at, updated_at'
+      'id, user_id, label, expected_qr_payload, place_object, notes, hour, minute, use_case_type, repeat_schedule, timezone, schedule_revision, grace_period_seconds, is_active, scheduled_for, last_outcome, social_settings, created_at, updated_at'
     )
     .eq('user_id', user.id)
     .order('created_at', { ascending: false });
@@ -132,7 +139,7 @@ export async function upsertMyRemoteAlarm(alarm: AlarmDefinition) {
       onConflict: 'user_id,id',
     })
     .select(
-      'id, user_id, label, expected_qr_payload, place_object, notes, hour, minute, use_case_type, repeat_schedule, grace_period_seconds, is_active, scheduled_for, last_outcome, social_settings, created_at, updated_at'
+      'id, user_id, label, expected_qr_payload, place_object, notes, hour, minute, use_case_type, repeat_schedule, timezone, schedule_revision, grace_period_seconds, is_active, scheduled_for, last_outcome, social_settings, created_at, updated_at'
     )
     .single();
 
@@ -158,7 +165,7 @@ export async function upsertMyRemoteAlarms(alarms: AlarmDefinition[]) {
       }
     )
     .select(
-      'id, user_id, label, expected_qr_payload, place_object, notes, hour, minute, use_case_type, repeat_schedule, grace_period_seconds, is_active, scheduled_for, last_outcome, social_settings, created_at, updated_at'
+      'id, user_id, label, expected_qr_payload, place_object, notes, hour, minute, use_case_type, repeat_schedule, timezone, schedule_revision, grace_period_seconds, is_active, scheduled_for, last_outcome, social_settings, created_at, updated_at'
     );
 
   if (error) {

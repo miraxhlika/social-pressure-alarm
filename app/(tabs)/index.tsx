@@ -58,21 +58,131 @@ function formatTodayTitleDate(day = new Date()) {
   });
 }
 
-function formatDueWindow(alarm: Alarm | null) {
-  if (!alarm) {
-    return 'Choose the place or object you will prove.';
+function formatReachWindow(alarm: Alarm) {
+  const start = alarm.scheduledFor
+    ? new Date(alarm.scheduledFor)
+    : (() => {
+        const date = new Date();
+        date.setHours(alarm.hour, alarm.minute, 0, 0);
+        return date;
+      })();
+
+  if (Number.isNaN(start.getTime())) {
+    return 'Choose a time for this checkpoint.';
   }
 
-  const start = new Date();
-  start.setHours(alarm.hour, alarm.minute, 0, 0);
-
-  const end = new Date(start);
-  end.setSeconds(end.getSeconds() + alarm.gracePeriodSeconds);
-
+  const end = new Date(start.getTime() + alarm.gracePeriodSeconds * 1000);
   const startLabel = start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   const endLabel = end.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
-  return `Due between ${startLabel} - ${endLabel}`;
+  return `${startLabel} – ${endLabel}`;
+}
+
+function getLocalDayOffset(date: Date, now = new Date()) {
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startOfTarget = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  return Math.round((startOfTarget - startOfToday) / 86_400_000);
+}
+
+function getRepeatShortLabel(repeatSchedule: Alarm['repeatSchedule']) {
+  if (repeatSchedule === 'daily') {
+    return 'Daily';
+  }
+
+  if (repeatSchedule === 'weekdays') {
+    return 'Weekdays';
+  }
+
+  return 'One-time';
+}
+
+function getHeroSchedulePresentation(alarm: Alarm | null, phaseLabel: string, now = new Date()) {
+  if (!alarm) {
+    return {
+      badgeLabel: phaseLabel,
+      dayHeadline: null as string | null,
+      detail: 'Choose the place or object you will prove.',
+      isFutureDay: false,
+    };
+  }
+
+  if (phaseLabel === 'Cleared') {
+    return {
+      badgeLabel: 'Cleared',
+      dayHeadline: null,
+      detail: 'You completed this checkpoint today.',
+      isFutureDay: false,
+    };
+  }
+
+  if (phaseLabel === 'Missed') {
+    return {
+      badgeLabel: 'Missed',
+      dayHeadline: null,
+      detail: 'This run was missed. Open it to recover or reschedule.',
+      isFutureDay: false,
+    };
+  }
+
+  const scheduledAt = alarm.scheduledFor ? new Date(alarm.scheduledFor) : null;
+  const hasValidSchedule = Boolean(scheduledAt && !Number.isNaN(scheduledAt.getTime()));
+  const reachWindow = formatReachWindow(alarm);
+  const repeatLabel = getRepeatShortLabel(alarm.repeatSchedule);
+
+  if (phaseLabel === 'Scan now') {
+    return {
+      badgeLabel: 'Live',
+      dayHeadline: null,
+      detail: `Window open · ${reachWindow}`,
+      isFutureDay: false,
+    };
+  }
+
+  if (!hasValidSchedule || !scheduledAt) {
+    return {
+      badgeLabel: phaseLabel,
+      dayHeadline: null,
+      detail: reachWindow,
+      isFutureDay: false,
+    };
+  }
+
+  const dayOffset = getLocalDayOffset(scheduledAt, now);
+
+  if (dayOffset <= 0) {
+    return {
+      badgeLabel: 'Today',
+      dayHeadline: null,
+      detail: `${formatDueDistance(scheduledAt, now)} · ${reachWindow}`,
+      isFutureDay: false,
+    };
+  }
+
+  if (dayOffset === 1) {
+    return {
+      badgeLabel: 'Scheduled',
+      dayHeadline: 'Tomorrow',
+      detail: `${scheduledAt.toLocaleDateString([], {
+        weekday: 'long',
+        month: 'short',
+        day: 'numeric',
+      })} · ${reachWindow} · ${repeatLabel}`,
+      isFutureDay: true,
+    };
+  }
+
+  const laterLabel = scheduledAt.toLocaleDateString([], {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  });
+
+  return {
+    badgeLabel: 'Scheduled',
+    dayHeadline: laterLabel,
+    detail: `${reachWindow} · ${repeatLabel}`,
+    isFutureDay: true,
+  };
 }
 
 function formatTimelineTime(timestamp: string | number | Date) {
@@ -364,6 +474,10 @@ export default function TodayScreen() {
   );
   const upcomingAlarms = useMemo(() => getUpcomingAlarms(state.alarms, primaryAlarm?.id), [primaryAlarm?.id, state.alarms]);
   const primaryPhaseLabel = getAlarmPhaseLabel(primaryAlarm);
+  const heroSchedule = useMemo(
+    () => getHeroSchedulePresentation(primaryAlarm, primaryPhaseLabel),
+    [primaryAlarm, primaryPhaseLabel]
+  );
 
   const handlePrimaryPress = useCallback(() => {
     if (primaryAlarm && primaryPhaseLabel === 'Scan now') {
@@ -452,37 +566,68 @@ export default function TodayScreen() {
                   styles.heroStatus,
                   {
                     backgroundColor:
-                      primaryPhaseLabel === 'Cleared' ? colors.successSurface : colors.primarySurface,
+                      primaryPhaseLabel === 'Cleared'
+                        ? colors.successSurface
+                        : primaryPhaseLabel === 'Scan now'
+                          ? colors.warningSurface
+                          : colors.primarySurface,
                   },
                 ]}>
                 <View
                   style={[
                     styles.heroStatusDot,
-                    { backgroundColor: primaryPhaseLabel === 'Cleared' ? colors.success : colors.primary },
+                    {
+                      backgroundColor:
+                        primaryPhaseLabel === 'Cleared'
+                          ? colors.success
+                          : primaryPhaseLabel === 'Scan now'
+                            ? colors.warning
+                            : colors.primary,
+                    },
                   ]}
                 />
                 <Text
                   style={[
                     styles.heroStatusText,
-                    { color: primaryPhaseLabel === 'Cleared' ? colors.success : colors.primary },
+                    {
+                      color:
+                        primaryPhaseLabel === 'Cleared'
+                          ? colors.success
+                          : primaryPhaseLabel === 'Scan now'
+                            ? colors.warning
+                            : colors.primary,
+                    },
                   ]}>
-                  {primaryPhaseLabel}
+                  {heroSchedule.badgeLabel}
                 </Text>
               </View>
             </View>
 
-            <Text style={[styles.heroTime, { color: colors.text }]}>
+            {heroSchedule.dayHeadline ? (
+              <Text style={[styles.heroDay, { color: colors.primary }]}>{heroSchedule.dayHeadline}</Text>
+            ) : null}
+
+            <Text
+              style={[
+                styles.heroTime,
+                { color: colors.text },
+                heroSchedule.dayHeadline ? styles.heroTimeWithDay : null,
+              ]}>
               {primaryAlarm ? formatAlarmRuntimeTime(primaryAlarm) : '—'}
             </Text>
             <Text style={[styles.heroTitle, { color: colors.text }]}>
               {primaryAlarm ? primaryAlarm.label : 'Create checkpoint'}
             </Text>
-            <Text style={[styles.heroBody, { color: colors.textSoft }]}>
-              {primaryPhaseLabel === 'Cleared' ? 'You completed this checkpoint today.' : formatDueWindow(primaryAlarm)}
-            </Text>
+            <Text style={[styles.heroBody, { color: colors.textSoft }]}>{heroSchedule.detail}</Text>
 
             <Pressable
-              accessibilityLabel={primaryPhaseLabel === 'Scan now' ? 'Check in now' : 'Open checkpoint'}
+              accessibilityLabel={
+                primaryPhaseLabel === 'Scan now'
+                  ? 'Check in now'
+                  : heroSchedule.isFutureDay
+                    ? `View checkpoint for ${heroSchedule.dayHeadline}`
+                    : 'Open checkpoint'
+              }
               accessibilityRole="button"
               onPress={handlePrimaryPress}
               style={({ pressed }) => [
@@ -719,12 +864,24 @@ const styles = StyleSheet.create({
     fontSize: 10,
     lineHeight: 13,
   },
+  heroDay: {
+    ...TextPresets.label,
+    fontFamily: Fonts.rounded,
+    fontSize: 15,
+    fontWeight: '700',
+    letterSpacing: -0.2,
+    lineHeight: 20,
+    marginBottom: 2,
+  },
   heroTime: {
     fontFamily: Fonts.rounded,
     fontSize: 42,
     fontWeight: '800',
     letterSpacing: -1.2,
     lineHeight: 46,
+  },
+  heroTimeWithDay: {
+    marginTop: 0,
   },
   heroTitle: {
     fontFamily: Fonts.rounded,
