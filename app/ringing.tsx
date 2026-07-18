@@ -23,7 +23,11 @@ import {
   updateAlarm,
 } from '@/lib/alarms';
 import { getCheckpointLiveCopy } from '@/lib/checkpoint-templates';
-import { cancelAlarmNotificationAsync, scheduleAlarmNotificationAsync } from '@/lib/notifications';
+import {
+  cancelAlarmNotificationAsync,
+  cancelAlarmNotificationsForAlarmAsync,
+  scheduleAlarmNotificationAsync,
+} from '@/lib/notifications';
 import { useAppDialog } from '@/providers/app-dialog-provider';
 import { Alarm } from '@/types/alarm';
 
@@ -424,7 +428,7 @@ export default function RingingScreen() {
 
     try {
       if (alarm.repeatSchedule === 'once') {
-        await cancelAlarmNotificationAsync(alarm.notificationIds);
+        await cancelAlarmNotificationsForAlarmAsync(alarm.id, alarm.notificationIds);
       }
       const resolvedAlarm = await resolveAlarm(alarm.id, 'confirmed', {
         scheduledFor: alarm.scheduledFor,
@@ -520,7 +524,7 @@ export default function RingingScreen() {
 
     try {
       if (alarm.repeatSchedule === 'once') {
-        await cancelAlarmNotificationAsync(alarm.notificationIds);
+        await cancelAlarmNotificationsForAlarmAsync(alarm.id, alarm.notificationIds);
       }
       const resolvedAlarm = await resolveAlarm(alarm.id, 'missed', {
         scheduledFor: alarm.scheduledFor,
