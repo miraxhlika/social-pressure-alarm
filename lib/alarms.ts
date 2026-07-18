@@ -814,6 +814,18 @@ function mergeAlarmWithRuntimeMetadata(alarm: AlarmDefinition, runtimeMetadata?:
   };
 }
 
+function getKnownAlarmNotificationIds(
+  alarm?: Pick<AlarmRuntimeMetadata, 'notificationIds' | 'notificationRegistrations'>,
+  runtimeMetadata?: AlarmRuntimeMetadata
+) {
+  return [...new Set([
+    ...(alarm?.notificationIds ?? []),
+    ...(alarm?.notificationRegistrations?.map((registration) => registration.identifier) ?? []),
+    ...(runtimeMetadata?.notificationIds ?? []),
+    ...(runtimeMetadata?.notificationRegistrations?.map((registration) => registration.identifier) ?? []),
+  ])];
+}
+
 async function writeAlarmStoreForScope(scope: string, store: AlarmStore) {
   await writeScopedStorageValueForScope(
     STORAGE_KEY,
@@ -1170,6 +1182,7 @@ async function reconcileAlarmOutcomesAndSchedules(store: AlarmStore, runtimeStor
 async function reconcileAlarmSchedules(store: AlarmStore, runtimeStore: AlarmRuntimeStore) {
   const {
     cancelAlarmNotificationAsync,
+    cancelOrphanedAlarmNotificationsAsync,
     isNotificationPermissionRequiredError,
     scheduleAlarmNotificationAsync,
   } = await import('@/lib/notifications');
@@ -1181,6 +1194,10 @@ async function reconcileAlarmSchedules(store: AlarmStore, runtimeStore: AlarmRun
   let nextAlarms = [...store.alarms];
   const alarmsToSyncRemotely = [] as AlarmDefinition[];
   const now = Date.now();
+
+  await cancelOrphanedAlarmNotificationsAsync(
+    nextAlarms.filter((alarm) => alarm.isActive).map((alarm) => alarm.id)
+  );
 
   for (const [alarmId, metadata] of Object.entries(runtimeStore.alarms)) {
     if (knownAlarmIds.has(alarmId)) {
@@ -1262,7 +1279,9 @@ async function reconcileAlarmSchedules(store: AlarmStore, runtimeStore: AlarmRun
   return {
     store: {
       ...store,
-      alarms: sortAlarms(nextAlarms),
+      alarms: sortAlarms(
+        nextAlarms.map((alarm) => mergeAlarmWithRuntimeMetadata(alarm, nextRuntimeStore.alarms[alarm.id]))
+      ),
     },
     runtimeStore: nextRuntimeStore,
   };
@@ -1755,6 +1774,9 @@ export async function getAlarms() {
 export async function resetAlarmStore() {
   const activeScope = await getActiveStorageScope();
   const defaultStore = createDefaultStore();
+  const { cancelAllCheckpointNotificationsAsync } = await import('@/lib/notifications');
+
+  await cancelAllCheckpointNotificationsAsync();
 
   hydrateAlarmRuntimeRequest = null;
   hydratedAlarmStoreCache = {
@@ -1882,6 +1904,14 @@ export async function updateAlarm(updatedAlarm: Alarm) {
     updatedAt: now,
   };
 
+  if (!alarmToSave.isActive) {
+    const { cancelAlarmNotificationsForAlarmAsync } = await import('@/lib/notifications');
+    await cancelAlarmNotificationsForAlarmAsync(
+      alarmToSave.id,
+      getKnownAlarmNotificationIds(alarmToSave, runtimeStore.alarms[alarmToSave.id])
+    );
+  }
+
   const nextStore: AlarmStore = {
     ...store,
     alarms: sortAlarms(
@@ -1938,8 +1968,8 @@ export async function restartAlarmNow(alarmOrId: Alarm | string) {
     return null;
   }
 
-  const { cancelAlarmNotificationAsync } = await import('@/lib/notifications');
-  await cancelAlarmNotificationAsync(alarm.notificationIds);
+  const { cancelAlarmNotificationsForAlarmAsync } = await import('@/lib/notifications');
+  await cancelAlarmNotificationsForAlarmAsync(alarm.id, getKnownAlarmNotificationIds(alarm));
 
   return updateAlarm({
     ...alarm,
@@ -1992,7 +2022,6 @@ export async function rescheduleAlarm(
       notificationStrategyKey: scheduled.strategyKey,
     });
 
-    await cancelAlarmNotificationAsync(alarm.notificationIds).catch(() => null);
     return nextAlarm;
   } catch (error) {
     if (scheduledNotificationIds) {
@@ -2005,6 +2034,14 @@ export async function rescheduleAlarm(
 
 export async function deleteAlarm(id: string) {
   const { store, runtimeStore } = await readLocalAlarmState();
+  const alarm = store.alarms.find((candidate) => candidate.id === id);
+  const runtimeMetadata = runtimeStore.alarms[id];
+  const { cancelAlarmNotificationsForAlarmAsync } = await import('@/lib/notifications');
+
+  await cancelAlarmNotificationsForAlarmAsync(
+    id,
+    getKnownAlarmNotificationIds(alarm, runtimeMetadata)
+  );
 
   const nextStore: AlarmStore = {
     ...store,

@@ -28,7 +28,6 @@ import {
   updateAlarm,
 } from '@/lib/alarms';
 import { formatGracePeriodLabel, getUseCaseLabel } from '@/lib/checkpoint-templates';
-import { cancelAlarmNotificationAsync } from '@/lib/notifications';
 import { getProgressSummary, ProgressSummary } from '@/lib/progress';
 import { getCheckpointSocialDescription } from '@/lib/social/settings';
 import { GUEST_STORAGE_SCOPE } from '@/lib/storage';
@@ -254,8 +253,14 @@ export default function CheckpointDetailsScreen() {
       return;
     }
 
-    await cancelAlarmNotificationAsync(alarm.notificationIds);
-    await updateAlarm({ ...alarm, isActive: false, notificationIds: undefined, scheduledFor: undefined });
+    await updateAlarm({
+      ...alarm,
+      isActive: false,
+      notificationIds: undefined,
+      notificationRegistrations: undefined,
+      notificationStrategyKey: undefined,
+      scheduledFor: undefined,
+    });
     await loadDetails();
   }, [alarm, confirm, loadDetails]);
 
@@ -276,7 +281,6 @@ export default function CheckpointDetailsScreen() {
       return;
     }
 
-    await cancelAlarmNotificationAsync(alarm.notificationIds);
     await deleteAlarm(alarm.id);
     router.replace('/(tabs)/alarms');
   }, [alarm, confirm, router]);

@@ -5,6 +5,11 @@ import { Alarm, AlarmNotificationKind, AlarmNotificationRegistration } from '@/t
 import { createNextAlarmDateForSchedule, formatAlarmTime } from '@/lib/alarms';
 import { shiftWeekdayAndTime } from '@/lib/alarm-schedule';
 import {
+  getNotificationAlarmId,
+  getNotificationIdsForAlarms,
+  getOrphanedNotificationIds,
+} from '@/lib/notification-identity';
+import {
   getCheckpointNotificationCopy,
   getCheckpointReadinessNotificationCopy,
   getWeeklyReviewNotificationCopy,
@@ -142,11 +147,6 @@ function getCheckpointNotificationId(
   return [CHECKPOINT_NOTIFICATION_ID_PREFIX, alarmId, `r${scheduleRevision}`, kind, slot].join(':');
 }
 
-function getNotificationAlarmId(notification: Notifications.NotificationRequest) {
-  const alarmId = notification.content.data?.alarmId;
-  return typeof alarmId === 'string' ? alarmId : null;
-}
-
 async function scheduleLocalNotificationAsync(
   request: Parameters<typeof Notifications.scheduleNotificationAsync>[0],
   failureMessage: string
@@ -160,17 +160,6 @@ async function scheduleLocalNotificationAsync(
 
     throw new Error(failureMessage);
   }
-}
-
-async function cancelScheduledNotificationsForAlarmAsync(alarmId: string, preservedNotificationIds: string[] = []) {
-  const preservedNotificationIdSet = new Set(preservedNotificationIds);
-  const scheduledNotifications = await Notifications.getAllScheduledNotificationsAsync();
-  const matchingNotificationIds = scheduledNotifications
-    .filter((notification) => getNotificationAlarmId(notification) === alarmId)
-    .filter((notification) => !preservedNotificationIdSet.has(notification.identifier))
-    .map((notification) => notification.identifier);
-
-  await cancelAlarmNotificationAsync(matchingNotificationIds);
 }
 
 export async function readNotificationPreferences() {
@@ -561,6 +550,78 @@ export async function cancelAlarmNotificationAsync(notificationIds?: string | st
 
   const ids = Array.isArray(notificationIds) ? notificationIds : [notificationIds];
   await Promise.all(ids.map((notificationId) => Notifications.cancelScheduledNotificationAsync(notificationId)));
+}
+
+export async function cancelAlarmNotificationPlansAsync(
+  alarmIds: Iterable<string>,
+  knownNotificationIds: Iterable<string> = [],
+  preservedNotificationIds: Iterable<string> = []
+) {
+  const alarmIdList = [...new Set(alarmIds)];
+
+  if (alarmIdList.length === 0) {
+    return;
+  }
+
+  const preservedNotificationIdSet = new Set(preservedNotificationIds);
+  const [scheduledNotifications, presentedNotifications] = await Promise.all([
+    Notifications.getAllScheduledNotificationsAsync(),
+    Notifications.getPresentedNotificationsAsync(),
+  ]);
+  const scheduledIds = getNotificationIdsForAlarms(
+    scheduledNotifications,
+    alarmIdList,
+    preservedNotificationIdSet
+  );
+  const knownIds = [...knownNotificationIds].filter(
+    (notificationId) => !preservedNotificationIdSet.has(notificationId)
+  );
+  const presentedIds = getNotificationIdsForAlarms(
+    presentedNotifications.map((notification) => notification.request),
+    alarmIdList
+  );
+
+  await Promise.all([
+    ...[...new Set([...scheduledIds, ...knownIds])].map((notificationId) =>
+      Notifications.cancelScheduledNotificationAsync(notificationId)
+    ),
+    ...[...new Set(presentedIds)].map((notificationId) =>
+      Notifications.dismissNotificationAsync(notificationId)
+    ),
+  ]);
+}
+
+export async function cancelAlarmNotificationsForAlarmAsync(
+  alarmId: string,
+  knownNotificationIds: Iterable<string> = []
+) {
+  await cancelAlarmNotificationPlansAsync([alarmId], knownNotificationIds);
+}
+
+export async function cancelOrphanedAlarmNotificationsAsync(activeAlarmIds: Iterable<string>) {
+  const activeAlarmIdList = [...new Set(activeAlarmIds)];
+  const [scheduledNotifications, presentedNotifications] = await Promise.all([
+    Notifications.getAllScheduledNotificationsAsync(),
+    Notifications.getPresentedNotificationsAsync(),
+  ]);
+  const scheduledIds = getOrphanedNotificationIds(scheduledNotifications, activeAlarmIdList);
+  const presentedIds = getOrphanedNotificationIds(
+    presentedNotifications.map((notification) => notification.request),
+    activeAlarmIdList
+  );
+
+  await Promise.all([
+    ...[...new Set(scheduledIds)].map((notificationId) =>
+      Notifications.cancelScheduledNotificationAsync(notificationId)
+    ),
+    ...[...new Set(presentedIds)].map((notificationId) =>
+      Notifications.dismissNotificationAsync(notificationId)
+    ),
+  ]);
+}
+
+export async function cancelAllCheckpointNotificationsAsync() {
+  await cancelOrphanedAlarmNotificationsAsync([]);
 }
 
 export async function syncWeeklyReviewReminderAsync(

@@ -21,7 +21,6 @@ import {
   resetAlarmStore,
 } from '@/lib/alarms';
 import { getPrimaryAlarm } from '@/lib/dashboard';
-import { cancelAlarmNotificationAsync } from '@/lib/notifications';
 import { getProgressSummary, ProgressSummary } from '@/lib/progress';
 import { SOCIAL_CIRCLES_CACHE_MAX_AGE_MS, listMySocialCircles } from '@/lib/social/circles';
 import { resetSocialSyncState } from '@/lib/social/queue';
@@ -106,7 +105,6 @@ export default function AlarmsScreen() {
       return;
     }
 
-    await cancelAlarmNotificationAsync(alarm.notificationIds);
     await deleteAlarm(alarm.id);
     await loadData();
   }, [confirm, loadData]);
@@ -199,10 +197,9 @@ export default function AlarmsScreen() {
       return;
     }
 
-    await Promise.all(state.alarms.map((alarm) => cancelAlarmNotificationAsync(alarm.notificationIds)));
     await Promise.all([resetAlarmStore(), resetSocialSyncState()]);
     await loadData();
-  }, [confirm, loadData, state.alarms]);
+  }, [confirm, loadData]);
 
   const primaryAlarm = useMemo(() => getPrimaryAlarm(state.alarms), [state.alarms]);
   const weeklyCompletionRate = state.progressSummary?.weeklyStats.attempts

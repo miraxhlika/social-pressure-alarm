@@ -24,7 +24,7 @@ import {
 import {
   DEFAULT_NOTIFICATION_PREFERENCES,
   NotificationPermissionState,
-  cancelAlarmNotificationAsync,
+  cancelAllCheckpointNotificationsAsync,
   ensureNotificationPermissionsAsync,
   getNotificationPermissionState,
   readNotificationPreferences,
@@ -403,8 +403,7 @@ export default function AccountScreen() {
     setProfileFeedback(null);
 
     try {
-      const store = await readAlarmStore();
-      await Promise.all(store.alarms.map((alarm) => cancelAlarmNotificationAsync(alarm.notificationIds)));
+      await cancelAllCheckpointNotificationsAsync();
       await signOut();
       await syncWeeklyReviewReminderAsync(undefined, { requestPermissions: false }).catch(() => null);
       setActiveSettingsPanel(null);
@@ -536,11 +535,9 @@ export default function AccountScreen() {
     setDataFeedback(null);
 
     try {
-      const store = await readAlarmStore();
       if (user) {
         await clearMyRemoteCheckpointData();
       }
-      await Promise.all(store.alarms.map((alarm) => cancelAlarmNotificationAsync(alarm.notificationIds)));
       await Promise.all([resetAlarmStore(), resetSocialSyncState()]);
       await loadReminderSettings();
       setDataFeedback({
