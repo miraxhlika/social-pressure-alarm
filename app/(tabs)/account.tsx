@@ -33,6 +33,12 @@ import {
   syncWeeklyReviewReminderAsync,
 } from '@/lib/notifications';
 import { clearMyRemoteCheckpointData } from '@/lib/social/alarms';
+import {
+  createSuggestedDisplayName,
+  createSuggestedHandle,
+  getMetadataString,
+  normalizeHandle,
+} from '@/lib/social/profile-defaults';
 import { registerSignedInDevicePushToken } from '@/lib/social/push';
 import { resetSocialSyncState } from '@/lib/social/queue';
 import { getActiveStorageScope } from '@/lib/storage';
@@ -51,24 +57,6 @@ type FormFeedback = {
 type SettingsPanel = 'account' | 'notifications' | 'camera' | 'reminders' | null;
 const DEFAULT_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-function getMetadataString(user: User | null | undefined, ...keys: string[]) {
-  const metadata = user?.user_metadata;
-
-  if (!metadata || typeof metadata !== 'object') {
-    return null;
-  }
-
-  for (const key of keys) {
-    const value = metadata[key];
-
-    if (typeof value === 'string' && value.trim()) {
-      return value.trim();
-    }
-  }
-
-  return null;
-}
-
 function getProviderLabel(user: User | null | undefined) {
   const provider = typeof user?.app_metadata?.provider === 'string' ? user.app_metadata.provider : null;
 
@@ -81,59 +69,6 @@ function getProviderLabel(user: User | null | undefined) {
   }
 
   return null;
-}
-
-function formatSeedLabel(value: string) {
-  return value
-    .replace(/[._-]+/g, ' ')
-    .replace(/\b\w/g, (letter) => letter.toUpperCase())
-    .trim();
-}
-
-function createSuggestedDisplayName(user?: User | null) {
-  const fullName = getMetadataString(user, 'full_name', 'name');
-
-  if (fullName) {
-    return fullName;
-  }
-
-  const firstName = getMetadataString(user, 'given_name', 'first_name');
-  const lastName = getMetadataString(user, 'family_name', 'last_name');
-  const combinedName = [firstName, lastName].filter(Boolean).join(' ').trim();
-
-  if (combinedName) {
-    return combinedName;
-  }
-
-  if (!user?.email) {
-    return '';
-  }
-
-  const localPart = user.email.split('@')[0] ?? '';
-  return formatSeedLabel(localPart);
-}
-
-function normalizeHandle(value: string) {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9_]/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 20);
-}
-
-function createSuggestedHandle(user?: User | null) {
-  const preferredHandle = getMetadataString(user, 'preferred_username', 'user_name', 'nickname');
-
-  if (preferredHandle) {
-    return normalizeHandle(preferredHandle);
-  }
-
-  if (user?.email) {
-    return normalizeHandle(user.email.split('@')[0] ?? '');
-  }
-
-  return normalizeHandle(createSuggestedDisplayName(user));
 }
 
 function getAccountLabel(user: User | null) {

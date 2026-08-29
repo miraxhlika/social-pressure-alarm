@@ -1,11 +1,22 @@
 import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { usePreventRemove } from '@react-navigation/native';
-import { BarcodeScanningResult, CameraView, useCameraPermissions } from 'expo-camera';
+import { BarcodeScanningResult, useCameraPermissions } from 'expo-camera';
 import { type Href, useLocalSearchParams, useRouter } from 'expo-router';
-import { type ComponentProps, type RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, AppState, ActivityIndicator, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, AppState, ActivityIndicator, Keyboard, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import Animated, {
+  Easing,
+  FadeInDown,
+  FadeOutUp,
+  interpolate,
+  LinearTransition,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+} from 'react-native-reanimated';
 
+import { ProofCodeCamera } from '@/components/proof-code-camera';
 import { AppButton } from '@/components/ui/app-button';
 import { AppIconButton } from '@/components/ui/app-icon-button';
 import { AppInput } from '@/components/ui/app-input';
@@ -50,6 +61,11 @@ import {
 } from '@/lib/notifications';
 import { markOnboardingCompleted } from '@/lib/onboarding';
 import {
+  PROOF_CODE_BARCODE_TYPES,
+  QR_BARCODE_TYPES,
+  SCANNER_DISTANCE_HINT,
+} from '@/lib/scanner-camera';
+import {
   SOCIAL_CIRCLES_CACHE_MAX_AGE_MS,
   getCachedMySocialCircles,
   listMySocialCircles,
@@ -67,28 +83,22 @@ import {
   UseCaseType,
 } from '@/types/alarm';
 
-type CameraBarcodeTypes = NonNullable<
-  NonNullable<ComponentProps<typeof CameraView>['barcodeScannerSettings']>['barcodeTypes']
->;
-
-const QR_BARCODE_TYPES: CameraBarcodeTypes = ['qr'];
-const PROOF_CODE_BARCODE_TYPES: CameraBarcodeTypes = [
-  'qr',
-  'ean13',
-  'ean8',
-  'upc_a',
-  'upc_e',
-  'code39',
-  'code93',
-  'code128',
-  'codabar',
-  'itf14',
-  'pdf417',
-  'aztec',
-  'datamatrix',
-];
-
 const SCAN_DEDUPE_WINDOW_MS = 3000;
+const DISCLOSURE_SPRING = {
+  damping: 20,
+  stiffness: 240,
+  mass: 0.72,
+} as const;
+const DISCLOSURE_LAYOUT = LinearTransition.springify().damping(22).mass(0.8).stiffness(250);
+const DISCLOSURE_ENTERING = FadeInDown.springify()
+  .damping(20)
+  .mass(0.75)
+  .stiffness(240)
+  .withInitialValues({
+    opacity: 0,
+    transform: [{ translateY: -12 }],
+  });
+const DISCLOSURE_EXITING = FadeOutUp.duration(170).easing(Easing.in(Easing.cubic));
 
 type LinkMode = 'scanQr' | 'scanBarcode' | 'saved';
 type ScannerPurpose = 'link' | 'test';
@@ -602,9 +612,15 @@ export default function CreateAlarmScreen() {
     return () => cancelAnimationFrame(frame);
   }, [activeStep, expandedField, nameFocusRequest]);
 
-  const toggleField = (field: NonNullable<ExpandedField>) => {
+  const dismissKeyboard = useCallback(() => {
+    Keyboard.dismiss();
+    nameInputRef.current?.blur();
+  }, []);
+
+  const toggleField = useCallback((field: NonNullable<ExpandedField>) => {
+    dismissKeyboard();
     setExpandedField((currentField) => (currentField === field ? null : field));
-  };
+  }, [dismissKeyboard]);
 
   const focusNameField = useCallback(() => {
     setActiveStep(1);
@@ -1163,6 +1179,9 @@ export default function CreateAlarmScreen() {
           )
         }
         keyboardAware
+        scrollProps={{
+          keyboardDismissMode: Platform.OS === 'ios' ? 'interactive' : 'on-drag',
+        }}
         scrollRef={scrollViewRef}>
       <FlowTopBar
         leftAccessibilityLabel={
@@ -1218,6 +1237,7 @@ export default function CreateAlarmScreen() {
           proofCodeVerifiedAt={proofCodeVerifiedAt}
           hasLinkedProofCode={hasLinkedProofCode}
           notes={notes}
+          onDismissKeyboard={dismissKeyboard}
           onExpectedCodePress={handleContinueToLinkCode}
           onFieldToggle={toggleField}
           onGracePeriodChange={(nextValue) => {
@@ -1230,6 +1250,7 @@ export default function CreateAlarmScreen() {
             setLabel(nextValue);
             setErrors((currentErrors) => ({ ...currentErrors, label: undefined }));
           }}
+          onNameFocus={() => setExpandedField(null)}
           onNotesChange={setNotes}
           onPlaceObjectChange={setPlaceObject}
           onRepeatScheduleChange={setRepeatSchedule}
@@ -1373,12 +1394,14 @@ function CreateDetailsStep({
   label,
   nameInputRef,
   notes,
+  onDismissKeyboard,
   onExpectedCodePress,
   onFieldToggle,
   onGracePeriodChange,
   onOpenAccount,
   onOpenCircles,
   onLabelChange,
+  onNameFocus,
   onNotesChange,
   onPlaceObjectChange,
   onRepeatScheduleChange,
@@ -1412,12 +1435,14 @@ function CreateDetailsStep({
   label: string;
   nameInputRef: RefObject<TextInput | null>;
   notes: string;
+  onDismissKeyboard: () => void;
   onExpectedCodePress: () => void;
   onFieldToggle: (field: NonNullable<ExpandedField>) => void;
   onGracePeriodChange: (value: string) => void;
   onOpenAccount: () => void;
   onOpenCircles: () => void;
   onLabelChange: (value: string) => void;
+  onNameFocus: () => void;
   onNotesChange: (value: string) => void;
   onPlaceObjectChange: (value: string) => void;
   onRepeatScheduleChange: (value: RepeatSchedule) => void;
@@ -1472,15 +1497,20 @@ function CreateDetailsStep({
         <AppInput
           autoCapitalize="words"
           error={errors.label}
+          inputStyle={styles.nameInput}
           label="Checkpoint name"
           onChangeText={onLabelChange}
-          placeholder={selectedTemplate.defaultLabel || 'Morning routine'}
+          onFocus={() => {
+            onNameFocus();
+            setShowMoreOptions(false);
+          }}
+          placeholder="Enter checkpoint name"
           ref={nameInputRef}
           value={label}
         />
       </View>
 
-      <FlowPanel style={styles.corePanel}>
+      <Animated.View layout={DISCLOSURE_LAYOUT} style={styles.corePanel}>
         <CreateFieldRow
           description={`${getRepeatLabel(repeatSchedule)} · reach window ${formatGracePeriodLabel(gracePreviewSeconds || 0)}`}
           expanded={expandedField === 'schedule'}
@@ -1550,35 +1580,23 @@ function CreateDetailsStep({
           }
           expanded={false}
           icon={hasLinkedProofCode ? (proofCodeVerifiedAt ? 'checkmark-circle-outline' : 'qr-code-outline') : 'qr-code-outline'}
-          onPress={onExpectedCodePress}
+          onPress={() => {
+            onDismissKeyboard();
+            onExpectedCodePress();
+          }}
           title="Proof code"
           value={hasLinkedProofCode ? (proofCodeVerifiedAt ? 'Tested' : 'Linked') : 'Add'}
         />
-      </FlowPanel>
+      </Animated.View>
 
-      <Pressable
-        accessibilityRole="button"
-        accessibilityState={{ expanded: showMoreOptions }}
-        onPress={() => setShowMoreOptions((currentValue) => !currentValue)}
-        style={({ pressed }) => [
-          styles.moreOptionsButton,
-          { backgroundColor: colors.panelMuted },
-          pressed && styles.pressed,
-        ]}>
-        <View style={styles.moreOptionsIcon}>
-          <Ionicons color={colors.textSoft} name="options-outline" size={18} />
-        </View>
-        <View style={styles.moreOptionsCopy}>
-          <Text style={[styles.moreOptionsTitle, { color: colors.text }]}>More options</Text>
-          <Text style={[styles.moreOptionsDescription, { color: colors.textSoft }]}>
-            {guidedFirstRun ? 'Category, location, and notes' : 'Category, sharing, location, and notes'}
-          </Text>
-        </View>
-        <Ionicons color={colors.muted} name={showMoreOptions ? 'chevron-up' : 'chevron-down'} size={18} />
-      </Pressable>
-
-      {showMoreOptions ? (
-        <FlowPanel style={styles.optionalPanel}>
+      <MoreOptionsDisclosure
+        expanded={showMoreOptions}
+        onToggle={() => {
+          onDismissKeyboard();
+          setShowMoreOptions((currentValue) => !currentValue);
+        }}
+        subtitle={guidedFirstRun ? 'Category, location, and notes' : 'Category, sharing, location, and notes'}>
+        <Animated.View layout={DISCLOSURE_LAYOUT} style={styles.optionalPanel}>
           <CreateFieldRow
             description="Helps personalize defaults"
             expanded={expandedField === 'category'}
@@ -1656,8 +1674,8 @@ function CreateDetailsStep({
               value={notes}
             />
           </CreateFieldRow>
-        </FlowPanel>
-      ) : null}
+        </Animated.View>
+      </MoreOptionsDisclosure>
     </View>
   );
 }
@@ -1713,10 +1731,17 @@ function LinkCodeStep({
   scannerPurpose: ScannerPurpose;
   shouldShowCameraFallback: boolean;
 }) {
+  const [isTorchEnabled, setIsTorchEnabled] = useState(false);
   const activeBarcodeTypes =
     scannerPurpose === 'test' || linkMode === 'scanBarcode' ? PROOF_CODE_BARCODE_TYPES : QR_BARCODE_TYPES;
   const cameraScannerKey = `${scannerPurpose}:${linkMode}`;
   const selectedSavedCodePreset = savedCodePresets.find((preset) => preset.id === selectedSavedCodePresetId) ?? null;
+
+  useEffect(() => {
+    if (!isScannerVisible) {
+      setIsTorchEnabled(false);
+    }
+  }, [isScannerVisible]);
 
   return (
     <>
@@ -1792,23 +1817,36 @@ function LinkCodeStep({
               <Text style={[TextPresets.label, { color: colors.text }]}>
                 {scannerPurpose === 'test' ? 'Test scan' : linkMode === 'scanBarcode' ? 'Scan barcode' : 'Scan QR code'}
               </Text>
-              <Text style={[TextPresets.body, styles.smallBody, { color: colors.textSoft }]}>Hold the saved code inside the frame.</Text>
+              <Text style={[TextPresets.body, styles.smallBody, { color: colors.textSoft }]}>
+                {SCANNER_DISTANCE_HINT}
+              </Text>
             </View>
-            <AppIconButton
-              accessibilityHint="Closes the camera preview"
-              accessibilityLabel="Hide scanner"
-              icon="close"
-              onPress={onHideScanner}
-              size="compact"
-              variant="ghost"
-            />
+            <View style={styles.scannerActions}>
+              {permissionGranted ? (
+                <AppIconButton
+                  accessibilityHint={isTorchEnabled ? 'Turns the flashlight off' : 'Turns the flashlight on'}
+                  accessibilityLabel={isTorchEnabled ? 'Turn flash off' : 'Turn flash on'}
+                  icon={isTorchEnabled ? 'flash' : 'flash-outline'}
+                  onPress={() => setIsTorchEnabled((currentValue) => !currentValue)}
+                  size="compact"
+                  variant="ghost"
+                />
+              ) : null}
+              <AppIconButton
+                accessibilityHint="Closes the camera preview"
+                accessibilityLabel="Hide scanner"
+                icon="close"
+                onPress={onHideScanner}
+                size="compact"
+                variant="ghost"
+              />
+            </View>
           </View>
           {permissionGranted ? (
-            <CameraView
+            <ProofCodeCamera
               key={cameraScannerKey}
-              barcodeScannerSettings={{
-                barcodeTypes: activeBarcodeTypes,
-              }}
+              barcodeTypes={activeBarcodeTypes}
+              enableTorch={isTorchEnabled}
               onBarcodeScanned={isScannerEnabled ? onBarcodeScanned : undefined}
               style={styles.camera}
             />
@@ -2084,23 +2122,137 @@ function CreateFieldRow({
   value: string;
 }) {
   const colors = getAppColors(useColorScheme());
+  const hasEditor = Boolean(children);
+  const progress = useDisclosureProgress(expanded && hasEditor);
+  const chevronStyle = useAnimatedStyle(() => ({
+    transform: [{ rotate: `${interpolate(progress.value, [0, 1], [0, 90])}deg` }],
+  }));
 
   return (
-    <View style={styles.fieldBlock}>
-      <FlowListRow
-        description={description}
-        isExpanded={expanded}
-        leading={<Ionicons color={colors.primary} name={icon} size={19} />}
-        onPress={onPress}
-        title={title}
-        trailing={
-          <Text numberOfLines={1} style={[styles.rowValue, { color: colors.textSoft }]}>
+    <Animated.View
+      layout={DISCLOSURE_LAYOUT}
+      style={[
+        styles.fieldCard,
+        {
+          backgroundColor: expanded && hasEditor ? colors.panel : colors.elevated,
+          borderColor: expanded && hasEditor ? colors.primary : colors.line,
+        },
+      ]}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded: hasEditor ? expanded : undefined }}
+        onPress={() => {
+          Keyboard.dismiss();
+          onPress();
+        }}
+        style={({ pressed }) => [styles.fieldHeader, pressed && styles.pressed]}>
+        <View
+          style={[
+            styles.fieldIconBadge,
+            { backgroundColor: expanded && hasEditor ? colors.primarySurface : colors.panelMuted },
+          ]}>
+          <Ionicons color={colors.primary} name={icon} size={22} />
+        </View>
+        <View style={styles.fieldCopy}>
+          <Text style={[styles.fieldTitle, { color: colors.text }]}>{title}</Text>
+          <Text style={[styles.fieldDescription, { color: colors.textSoft }]}>{description}</Text>
+        </View>
+        <View style={[styles.fieldValuePill, { backgroundColor: colors.panelMuted }]}>
+          <Text numberOfLines={1} style={[styles.fieldValue, { color: colors.text }]}>
             {value}
           </Text>
-        }
-      />
-      {expanded && children ? <View style={styles.fieldEditor}>{children}</View> : null}
-    </View>
+        </View>
+        <Animated.View style={chevronStyle}>
+          <Ionicons color={colors.muted} name="chevron-forward" size={18} />
+        </Animated.View>
+      </Pressable>
+      {hasEditor ? (
+        <AnimatedDisclosure expanded={expanded}>
+          <View>
+            <View style={[styles.fieldDivider, { backgroundColor: colors.line }]} />
+            <View style={styles.fieldEditor}>
+              <Text style={[styles.fieldEditorEyebrow, { color: colors.primary }]}>{title}</Text>
+              {children}
+            </View>
+          </View>
+        </AnimatedDisclosure>
+      ) : null}
+    </Animated.View>
+  );
+}
+
+function MoreOptionsDisclosure({
+  children,
+  expanded,
+  onToggle,
+  subtitle,
+}: {
+  children: React.ReactNode;
+  expanded: boolean;
+  onToggle: () => void;
+  subtitle: string;
+}) {
+  const colors = getAppColors(useColorScheme());
+  const progress = useDisclosureProgress(expanded);
+  const chevronStyle = useAnimatedStyle(() => ({
+    transform: [{ rotate: `${interpolate(progress.value, [0, 1], [0, 180])}deg` }],
+  }));
+
+  return (
+    <Animated.View layout={DISCLOSURE_LAYOUT} style={styles.moreOptionsBlock}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded }}
+        onPress={onToggle}
+        style={({ pressed }) => [
+          styles.moreOptionsButton,
+          {
+            backgroundColor: expanded ? colors.panel : colors.panelMuted,
+            borderColor: expanded ? colors.primary : colors.line,
+          },
+          pressed && styles.pressed,
+        ]}>
+        <View style={[styles.fieldIconBadge, { backgroundColor: expanded ? colors.primarySurface : colors.elevated }]}>
+          <Ionicons color={expanded ? colors.primary : colors.textSoft} name="options-outline" size={20} />
+        </View>
+        <View style={styles.moreOptionsCopy}>
+          <Text style={[styles.moreOptionsTitle, { color: colors.text }]}>More options</Text>
+          <Text style={[styles.moreOptionsDescription, { color: colors.textSoft }]}>{subtitle}</Text>
+        </View>
+        <Animated.View style={chevronStyle}>
+          <Ionicons color={colors.muted} name="chevron-down" size={20} />
+        </Animated.View>
+      </Pressable>
+      <AnimatedDisclosure expanded={expanded}>{children}</AnimatedDisclosure>
+    </Animated.View>
+  );
+}
+
+function useDisclosureProgress(expanded: boolean) {
+  const progress = useSharedValue(expanded ? 1 : 0);
+
+  useEffect(() => {
+    progress.value = withSpring(expanded ? 1 : 0, DISCLOSURE_SPRING);
+  }, [expanded, progress]);
+
+  return progress;
+}
+
+function AnimatedDisclosure({
+  children,
+  expanded,
+}: {
+  children: React.ReactNode;
+  expanded: boolean;
+}) {
+  if (!expanded) {
+    return null;
+  }
+
+  return (
+    <Animated.View entering={DISCLOSURE_ENTERING} exiting={DISCLOSURE_EXITING}>
+      {children}
+    </Animated.View>
   );
 }
 
@@ -2121,7 +2273,10 @@ function OptionChip({
     <Pressable
       accessibilityRole="button"
       accessibilityState={{ selected }}
-      onPress={onPress}
+      onPress={() => {
+        Keyboard.dismiss();
+        onPress();
+      }}
       style={({ pressed }) => [
         styles.optionChip,
         {
@@ -2234,57 +2389,63 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.xs,
     paddingTop: Spacing.sm,
   },
+  nameInput: {
+    fontSize: 18,
+    lineHeight: 24,
+    minHeight: 58,
+  },
   fieldLabel: {
     ...TextPresets.eyebrow,
-    fontSize: 10,
-    letterSpacing: 0.55,
-    lineHeight: 14,
+    fontSize: 12,
+    letterSpacing: 0.7,
+    lineHeight: 16,
   },
   corePanel: {
     backgroundColor: 'transparent',
     borderColor: 'transparent',
-    gap: 6,
+    gap: 10,
     padding: 0,
   },
   optionalPanel: {
     backgroundColor: 'transparent',
     borderColor: 'transparent',
-    gap: 6,
+    gap: 10,
     padding: 0,
+    paddingTop: Spacing.sm,
   },
   editorLabel: {
     ...TextPresets.eyebrow,
-    fontSize: 10,
-    lineHeight: 14,
+    fontSize: 12,
+    letterSpacing: 0.6,
+    lineHeight: 16,
+  },
+  moreOptionsBlock: {
+    gap: 0,
   },
   moreOptionsButton: {
     alignItems: 'center',
     borderRadius: Radius.md,
+    borderWidth: 1,
     flexDirection: 'row',
-    gap: Spacing.sm,
-    minHeight: 62,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
-  },
-  moreOptionsIcon: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: 28,
+    gap: Spacing.md,
+    minHeight: 76,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
   },
   moreOptionsCopy: {
     flex: 1,
-    gap: 1,
+    gap: 2,
     minWidth: 0,
   },
   moreOptionsTitle: {
     ...TextPresets.label,
-    fontSize: 13,
-    lineHeight: 18,
+    fontSize: 16,
+    lineHeight: 21,
   },
   moreOptionsDescription: {
     ...TextPresets.body,
-    fontSize: 11,
-    lineHeight: 15,
+    fontSize: 13,
+    lineHeight: 18,
   },
   firstUseCaseLayout: {
     gap: Spacing.lg,
@@ -2358,22 +2519,72 @@ const styles = StyleSheet.create({
   guidedBannerText: {
     ...TextPresets.body,
     flex: 1,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  fieldCard: {
+    borderRadius: Radius.md,
+    borderWidth: 1.5,
+    overflow: 'hidden',
+  },
+  fieldHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 12,
+    minHeight: 76,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+  },
+  fieldIconBadge: {
+    alignItems: 'center',
+    borderRadius: 12,
+    height: 40,
+    justifyContent: 'center',
+    width: 40,
+  },
+  fieldCopy: {
+    flex: 1,
+    gap: 2,
+    minWidth: 0,
+  },
+  fieldTitle: {
+    ...TextPresets.label,
+    flexShrink: 1,
+    fontSize: 16,
+    lineHeight: 21,
+  },
+  fieldDescription: {
+    ...TextPresets.body,
+    flexShrink: 1,
     fontSize: 13,
     lineHeight: 18,
   },
-  fieldBlock: {
-    gap: 7,
+  fieldValuePill: {
+    borderRadius: Radius.pill,
+    maxWidth: 132,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  fieldValue: {
+    ...TextPresets.label,
+    fontSize: 13,
+    lineHeight: 17,
+  },
+  fieldDivider: {
+    height: StyleSheet.hairlineWidth,
+    marginLeft: 66,
   },
   fieldEditor: {
     gap: Spacing.md,
-    paddingHorizontal: Spacing.xs,
-    paddingVertical: Spacing.xs,
+    paddingBottom: 16,
+    paddingHorizontal: 16,
+    paddingTop: 12,
   },
-  rowValue: {
-    ...TextPresets.body,
+  fieldEditorEyebrow: {
+    ...TextPresets.eyebrow,
     fontSize: 12,
+    letterSpacing: 0.7,
     lineHeight: 16,
-    maxWidth: 96,
   },
   optionGrid: {
     flexDirection: 'row',
@@ -2381,24 +2592,24 @@ const styles = StyleSheet.create({
     gap: Spacing.sm,
   },
   optionChip: {
-    borderRadius: 10,
+    borderRadius: 12,
     borderWidth: 1,
-    flexBasis: 104,
+    flexBasis: 108,
     flexGrow: 1,
     gap: 2,
-    minHeight: 50,
+    minHeight: 54,
     paddingHorizontal: Spacing.md,
     paddingVertical: Spacing.sm,
   },
   optionChipTitle: {
     ...TextPresets.label,
-    fontSize: 13,
-    lineHeight: 17,
+    fontSize: 15,
+    lineHeight: 20,
   },
   optionChipDescription: {
     ...TextPresets.body,
-    fontSize: 11,
-    lineHeight: 15,
+    fontSize: 12,
+    lineHeight: 16,
   },
   pickerPanel: {
     borderRadius: 10,
@@ -2446,9 +2657,14 @@ const styles = StyleSheet.create({
     flex: 1,
     gap: 2,
   },
+  scannerActions: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 4,
+  },
   camera: {
     borderRadius: Radius.lg,
-    height: 260,
+    height: 320,
     overflow: 'hidden',
     width: '100%',
   },

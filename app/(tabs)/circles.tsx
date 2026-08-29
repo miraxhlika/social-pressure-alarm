@@ -37,7 +37,6 @@ import { useColorScheme } from '@/hooks/use-color-scheme';
 import { trackAnalyticsEvent } from '@/lib/analytics';
 import { ALARM_RUNTIME_CACHE_MAX_AGE_MS, hydrateAlarmRuntimeForCurrentUser } from '@/lib/alarms';
 import {
-  buildCircleInviteUrl,
   createSocialCircle,
   joinSocialCircleWithInviteCode,
   SOCIAL_CIRCLES_CACHE_MAX_AGE_MS,
@@ -463,15 +462,14 @@ export default function CirclesScreen() {
 
   const handleShareCircle = async (circle: SocialCircleSummary) => {
     try {
-      const inviteUrl = buildCircleInviteUrl(circle.inviteCode);
       await Share.share({
-        message: `Join my accountability circle "${circle.name}".\n\nTap to join:\n${inviteUrl}\n\nIf the link does not open, use invite code: ${circle.inviteCode}`,
+        message: circle.inviteCode,
       });
       await trackAnalyticsEvent('invite_sent', {
         circleId: circle.id,
       });
     } catch (error) {
-      Alert.alert('Unable to share invite', getErrorMessage(error, 'The invite link could not be shared.'));
+      Alert.alert('Unable to share invite', getErrorMessage(error, 'The invite code could not be shared.'));
     }
   };
 
@@ -622,7 +620,7 @@ export default function CirclesScreen() {
           description="Sign in if you want durable invites and small-group accountability."
           eyebrow="Circles"
           icon="people-outline"
-          onAction={() => router.push('/account')}
+          onAction={() => router.push('/sync')}
           title="Sign in first"
           tone="primary"
         />

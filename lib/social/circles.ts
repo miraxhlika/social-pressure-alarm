@@ -1,5 +1,3 @@
-import * as Linking from 'expo-linking';
-
 import { getSocialSession, getSupabaseClient } from '@/lib/social/client';
 import { CreateSocialCircleInput, SocialCircleSummary } from '@/lib/social/types';
 
@@ -140,15 +138,6 @@ export function clearMySocialCirclesCache() {
   circlesCacheVersion += 1;
   circlesCache = null;
   circlesRequest = null;
-}
-
-export function buildCircleInviteUrl(inviteCode: string) {
-  return Linking.createURL('/circles', {
-    scheme: 'socialpressurealarm',
-    queryParams: {
-      inviteCode,
-    },
-  });
 }
 
 export async function listMySocialCircles(options: ListMySocialCirclesOptions = {}) {

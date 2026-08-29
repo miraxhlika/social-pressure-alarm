@@ -6,6 +6,11 @@ import { EmailOtpType } from '@supabase/supabase-js';
 import { Platform } from 'react-native';
 
 import { getSupabaseClient } from '@/lib/social/client';
+import {
+  clearPendingProfileDisplayName,
+  ensureMySocialProfile,
+  setPendingProfileDisplayName,
+} from '@/lib/social/profile';
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -159,6 +164,7 @@ export async function signInWithGoogle() {
         throw new Error('Google sign-in returned without a valid session.');
       }
 
+      await ensureMySocialProfile().catch(() => null);
       return;
     }
 
@@ -211,29 +217,35 @@ export async function signInWithApple() {
     throw new Error('Apple sign-in did not return an identity token.');
   }
 
-  const { data, error } = await client.auth.signInWithIdToken({
-    provider: 'apple',
-    token: credential.identityToken,
-    nonce: rawNonce,
-  });
-
-  if (error) {
-    throw error;
-  }
-
   const fullName = formatAppleName(credential.fullName);
+  setPendingProfileDisplayName(fullName);
 
-  if (fullName) {
-    await client.auth
-      .updateUser({
-        data: {
-          full_name: fullName,
-        },
-      })
-      .catch(() => null);
+  try {
+    const { data, error } = await client.auth.signInWithIdToken({
+      provider: 'apple',
+      token: credential.identityToken,
+      nonce: rawNonce,
+    });
+
+    if (error) {
+      throw error;
+    }
+
+    if (fullName) {
+      await client.auth
+        .updateUser({
+          data: {
+            full_name: fullName,
+          },
+        })
+        .catch(() => null);
+    }
+
+    await ensureMySocialProfile().catch(() => null);
+    return data;
+  } finally {
+    clearPendingProfileDisplayName();
   }
-
-  return data;
 }
 
 export async function signOutSocialSession() {
