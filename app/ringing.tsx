@@ -1,13 +1,14 @@
-import { type ComponentProps, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Easing, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { BarcodeScanningResult, CameraView, useCameraPermissions } from 'expo-camera';
+import { BarcodeScanningResult, useCameraPermissions } from 'expo-camera';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { StatusBar } from 'expo-status-bar';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { ProofCodeCamera } from '@/components/proof-code-camera';
 import { AppButton } from '@/components/ui/app-button';
 import { AppCard } from '@/components/ui/app-card';
 import { Fonts, Radius, Spacing, TextPresets, getAppColors, withAlpha } from '@/constants/theme';
@@ -23,6 +24,7 @@ import {
   updateAlarm,
 } from '@/lib/alarms';
 import { getCheckpointLiveCopy } from '@/lib/checkpoint-templates';
+import { PROOF_CODE_BARCODE_TYPES, SCANNER_DISTANCE_HINT } from '@/lib/scanner-camera';
 import {
   cancelAlarmNotificationAsync,
   cancelAlarmNotificationsForAlarmAsync,
@@ -32,26 +34,6 @@ import { useAppDialog } from '@/providers/app-dialog-provider';
 import { Alarm } from '@/types/alarm';
 
 type CountdownTone = 'primary' | 'warning' | 'danger';
-
-type CameraBarcodeTypes = NonNullable<
-  NonNullable<ComponentProps<typeof CameraView>['barcodeScannerSettings']>['barcodeTypes']
->;
-
-const PROOF_CODE_BARCODE_TYPES: CameraBarcodeTypes = [
-  'qr',
-  'ean13',
-  'ean8',
-  'upc_a',
-  'upc_e',
-  'code39',
-  'code93',
-  'code128',
-  'codabar',
-  'itf14',
-  'pdf417',
-  'aztec',
-  'datamatrix',
-];
 
 const SCAN_DEDUPE_WINDOW_MS = 3000;
 const PRACTICE_TO_FIRST_REMINDER_BUFFER_MS = 15 * 60 * 1000;
@@ -993,10 +975,8 @@ export default function RingingScreen() {
       <StatusBar animated style="light" />
       <View style={styles.scannerScreen}>
         {isCameraReady ? (
-          <CameraView
-            barcodeScannerSettings={{
-              barcodeTypes: PROOF_CODE_BARCODE_TYPES,
-            }}
+          <ProofCodeCamera
+            barcodeTypes={PROOF_CODE_BARCODE_TYPES}
             enableTorch={isTorchEnabled}
             onBarcodeScanned={scanEnabled ? handleBarcodeScanned : undefined}
             style={styles.camera}
@@ -1058,6 +1038,12 @@ export default function RingingScreen() {
             <View style={[styles.flowFrameCorner, styles.flowFrameCornerBottomLeft, { borderColor: scannerFrameBorderColor }]} />
             <View style={[styles.flowFrameCorner, styles.flowFrameCornerBottomRight, { borderColor: scannerFrameBorderColor }]} />
           </Animated.View>
+        ) : null}
+
+        {isCameraReady && !scanError ? (
+          <Text pointerEvents="none" style={styles.scannerHint}>
+            {SCANNER_DISTANCE_HINT}
+          </Text>
         ) : null}
 
         {scanError ? (
@@ -1413,6 +1399,18 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '600',
     lineHeight: 15,
+    textAlign: 'center',
+  },
+  scannerHint: {
+    bottom: 168,
+    color: '#C6CED8',
+    fontFamily: Fonts.sans,
+    fontSize: 13,
+    fontWeight: '600',
+    left: Spacing.xl,
+    lineHeight: 18,
+    position: 'absolute',
+    right: Spacing.xl,
     textAlign: 'center',
   },
   flowScannerFrame: {

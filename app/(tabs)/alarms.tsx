@@ -3,7 +3,6 @@ import { StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
 
 import { AlarmCard } from '@/components/alarm-card';
-import { AppButton } from '@/components/ui/app-button';
 import { AppCard } from '@/components/ui/app-card';
 import { AppScreen } from '@/components/ui/app-screen';
 import { EmptyState } from '@/components/ui/empty-state';
@@ -18,12 +17,10 @@ import {
   formatAlarmRuntimeTime,
   hydrateAlarmRuntimeForCurrentUser,
   rescheduleAlarm,
-  resetAlarmStore,
 } from '@/lib/alarms';
 import { getPrimaryAlarm } from '@/lib/dashboard';
 import { getProgressSummary, ProgressSummary } from '@/lib/progress';
 import { SOCIAL_CIRCLES_CACHE_MAX_AGE_MS, listMySocialCircles } from '@/lib/social/circles';
-import { resetSocialSyncState } from '@/lib/social/queue';
 import { useAppDialog } from '@/providers/app-dialog-provider';
 import { Alarm } from '@/types/alarm';
 
@@ -184,23 +181,6 @@ export default function AlarmsScreen() {
     router.push(`/checkpoint/${alarm.id}`);
   }, [router]);
 
-  const handleResetDemoData = useCallback(async () => {
-    const shouldReset = await confirm({
-      confirmLabel: 'Reset local data',
-      description: 'This clears every checkpoint and cancels its scheduled notifications on this device.',
-      icon: 'refresh-outline',
-      title: 'Reset local data?',
-      tone: 'danger',
-    });
-
-    if (!shouldReset) {
-      return;
-    }
-
-    await Promise.all([resetAlarmStore(), resetSocialSyncState()]);
-    await loadData();
-  }, [confirm, loadData]);
-
   const primaryAlarm = useMemo(() => getPrimaryAlarm(state.alarms), [state.alarms]);
   const weeklyCompletionRate = state.progressSummary?.weeklyStats.attempts
     ? `${state.progressSummary.weeklyStats.completionRate}%`
@@ -301,8 +281,6 @@ export default function AlarmsScreen() {
           </View>
         </>
       )}
-
-      {__DEV__ ? <AppButton label="Reset local data" onPress={handleResetDemoData} size="compact" variant="ghost" /> : null}
     </AppScreen>
   );
 }

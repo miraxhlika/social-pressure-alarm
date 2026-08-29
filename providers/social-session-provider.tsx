@@ -11,7 +11,8 @@ import {
 } from '@/lib/social/auth';
 import { getSupabaseClient, getSocialSession } from '@/lib/social/client';
 import { hasSocialBackendConfig } from '@/lib/social/config';
-import { getMySocialProfile, upsertMySocialProfile } from '@/lib/social/profile';
+import { ensureMySocialProfile, upsertMySocialProfile } from '@/lib/social/profile';
+import { isSocialProfileComplete } from '@/lib/social/profile-defaults';
 import { unregisterSignedInDevicePushToken } from '@/lib/social/push';
 import { SocialProfile, UpsertSocialProfileInput } from '@/lib/social/types';
 
@@ -62,7 +63,7 @@ export function SocialSessionProvider({ children }: { children: ReactNode }) {
     setIsProfileLoading(true);
 
     try {
-      const nextProfile = await getMySocialProfile();
+      const nextProfile = await ensureMySocialProfile();
       setProfile(nextProfile);
       setProfileError(null);
     } catch (error) {
@@ -159,21 +160,41 @@ export function SocialSessionProvider({ children }: { children: ReactNode }) {
 
   const handleContinueWithGoogle = useCallback(async () => {
     setAuthProviderInFlight('google');
+    setIsProfileLoading(true);
 
     try {
       await signInWithGoogle();
+
+      try {
+        const nextProfile = await ensureMySocialProfile();
+        setProfile(nextProfile);
+        setProfileError(null);
+      } catch (error) {
+        setProfileError(getErrorMessage(error, 'Unable to finish setting up your profile.'));
+      }
     } finally {
       setAuthProviderInFlight(null);
+      setIsProfileLoading(false);
     }
   }, []);
 
   const handleContinueWithApple = useCallback(async () => {
     setAuthProviderInFlight('apple');
+    setIsProfileLoading(true);
 
     try {
       await signInWithApple();
+
+      try {
+        const nextProfile = await ensureMySocialProfile();
+        setProfile(nextProfile);
+        setProfileError(null);
+      } catch (error) {
+        setProfileError(getErrorMessage(error, 'Unable to finish setting up your profile.'));
+      }
     } finally {
       setAuthProviderInFlight(null);
+      setIsProfileLoading(false);
     }
   }, []);
 
@@ -200,7 +221,7 @@ export function SocialSessionProvider({ children }: { children: ReactNode }) {
       user: session?.user ?? null,
       profile,
       profileError,
-      isProfileComplete: Boolean(profile?.displayName && profile?.handle),
+      isProfileComplete: isSocialProfileComplete(profile),
       refreshProfile,
       continueWithGoogle: handleContinueWithGoogle,
       continueWithApple: handleContinueWithApple,
