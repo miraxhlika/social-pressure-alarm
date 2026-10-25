@@ -302,11 +302,19 @@ export default function SuccessScreen() {
     : isFirstClear
       ? 'That’s your first clear.'
       : 'Checkpoint cleared.';
+  const wasScanned = successState.alarm?.completionMethod === 'scan';
+  const checkpointName = successState.alarm?.label ?? 'this checkpoint';
   const subtitle = isSetupComplete
-    ? 'The reminder and proof code are set.'
+    ? wasScanned
+      ? 'The reminder and proof code are set.'
+      : 'The reminder is set.'
     : isFirstClear
-      ? `You reached ${successState.alarm?.label ?? 'the checkpoint'} and matched the exact code.`
-      : `Proof verified for ${successState.alarm?.label ?? 'this checkpoint'}.`;
+      ? wasScanned
+        ? `You reached ${successState.alarm?.label ?? 'the checkpoint'} and matched the exact code.`
+        : `You checked in for ${checkpointName}.`
+      : wasScanned
+        ? `Code scanned for ${checkpointName}.`
+        : `Confirmed by you for ${checkpointName}.`;
   const completionLabel = isSetupComplete
     ? successState.alarm?.scheduledFor
       ? `Scheduled ${formatTimestampLabel(successState.alarm.scheduledFor)}`

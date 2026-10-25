@@ -119,10 +119,10 @@ async function deliverOutboxItem(admin: SupabaseClient, item: OutboxRow) {
     to: token.expo_push_token,
     sound: 'default',
     channelId: SOCIAL_PUSH_CHANNEL_ID,
-    title: isCorrection ? `${actorName} corrected a checkpoint` : `${actorName} missed a checkpoint`,
+    title: isCorrection ? `${actorName} corrected a checkpoint` : `${actorName} hasn't checked in`,
     body: isCorrection
-      ? `${event.alarm_label || 'Checkpoint'} was completed with valid offline proof.`
-      : `${event.alarm_label || 'Checkpoint'} was missed. Check in on them?`,
+      ? `${event.alarm_label || 'Checkpoint'} was completed while offline.`
+      : `No check-in received for ${event.alarm_label || 'a checkpoint'}. Check in on them?`,
     data: {
       alarmEventId: event.id,
       circleId: event.circle_id,

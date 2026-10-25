@@ -1,4 +1,5 @@
 import { Alarm } from '@/types/alarm';
+import { getCompletionMethodLabel } from '@/lib/checkpoint-completion';
 import { formatGracePeriodLabel } from '@/lib/checkpoint-templates';
 import { SocialFeedItem, SocialRuntimeSnapshot } from '@/lib/social/types';
 import { formatScheduledFor, getAlarmPhase, getNextActionableAlarm } from '@/lib/alarms';
@@ -20,8 +21,10 @@ export function formatFeedInsight(item: SocialFeedItem) {
   if (item.outcome === 'confirmed') {
     const parts = [] as string[];
 
+    parts.push(getCompletionMethodLabel(item.sharePayload.completionMethod));
+
     if (typeof item.sharePayload.timeToScanSeconds === 'number') {
-      parts.push(`${item.sharePayload.timeToScanSeconds}s scan`);
+      parts.push(`in ${item.sharePayload.timeToScanSeconds}s`);
     }
 
     parts.push(`${item.sharePayload.weeklyCompletionRate}% week`);
@@ -79,7 +82,7 @@ export function getAlarmPhaseLabel(alarm: Alarm | null) {
     case 'missed':
       return 'Missed';
     case 'ringing':
-      return 'Scan now';
+      return 'Check in now';
     case 'scheduled':
       return 'Scheduled';
     default:
@@ -96,9 +99,11 @@ export function getPrimaryAlarmCopy(alarm: Alarm | null) {
 
   switch (phase) {
     case 'ringing':
-      return 'The proof window is open. Reach the saved checkpoint and scan now.';
+      return alarm.completionMethod === 'scan'
+        ? 'The window is open. Reach the saved checkpoint and scan now.'
+        : 'The window is open. Do it, then check in.';
     case 'missed':
-      return 'This run was missed. Tighten the setup or reschedule the next attempt.';
+      return 'No check-in was received for this run. Adjust the setup or reschedule the next attempt.';
     case 'inactive':
       return 'This checkpoint already did its job. Reuse it when this commitment comes back.';
     case 'unscheduled':

@@ -222,7 +222,7 @@ function getReliabilityDelta(current: PeriodStats, previous: PeriodStats, compar
   if (previous.attempts === 0) {
     return {
       tone: 'warning' as const,
-      value: current.attempts === 0 ? 'No scans in this period yet' : 'First baseline for this period',
+      value: current.attempts === 0 ? 'No check-ins in this period yet' : 'First baseline for this period',
     };
   }
 
@@ -332,7 +332,7 @@ export default function HistoryScreen() {
         />
         <EmptyState
           actionLabel="Back to today"
-          description="Create or run a checkpoint to start building proof history."
+          description="Create or run a checkpoint to start building your history."
           onAction={() => router.replace('/')}
           title="History starts after the first live run"
           tone="primary"
@@ -491,7 +491,7 @@ export default function HistoryScreen() {
           </Text>
           <Text style={[styles.insightBody, { color: colors.textSoft }]}>
             {recoveryCategory
-              ? `${recoveryCategory.failures} of ${recoveryCategory.attempts} attempts were missed. Review its time or proof setup.`
+              ? `${recoveryCategory.failures} of ${recoveryCategory.attempts} attempts were missed. Review its time or setup.`
               : analyticPeriod === 'thisWeek'
                 ? getInsight(state.summary)
                 : reliabilityDelta.value}

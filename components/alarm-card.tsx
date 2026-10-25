@@ -30,7 +30,7 @@ type AlarmCardProps = {
 const STATUS_COPY = {
   inactive: 'Cleared',
   missed: 'Missed',
-  ringing: 'Scan now',
+  ringing: 'Check in now',
   scheduled: 'Scheduled',
   unscheduled: 'Draft',
 } as const;
@@ -51,7 +51,7 @@ function getPrimaryActionIcon(phase: keyof typeof STATUS_COPY): keyof typeof Ion
   return phase === 'missed' || phase === 'inactive'
     ? 'calendar-outline'
     : phase === 'ringing'
-      ? 'scan-outline'
+      ? 'flash-outline'
       : 'create-outline';
 }
 

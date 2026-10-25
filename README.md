@@ -1,8 +1,8 @@
 # Checkpoint Alarm
 
-Alarms you clear with real-world proof.
+Reminders you follow through on. Start easy, make it strict when you need to.
 
-Expo + Supabase mobile app for proof-code alarms, checkpoints, circles, and profile sync.
+Expo + Supabase mobile app for checkpoints, circles, and profile sync. Each checkpoint is completed by confirming in the app or, for a stricter check, by scanning a linked QR code or barcode. Checkpoints can also carry a short checklist that has to be ticked off item by item.
 
 ## Local setup
 

@@ -227,7 +227,7 @@ export default function AlarmsScreen() {
       ) : state.alarms.length === 0 ? (
         <EmptyState
           actionLabel="Create checkpoint"
-          description="Save a proof setup once, then reuse it whenever that routine needs accountability."
+          description="Set up a checkpoint once, then reuse it whenever that routine needs accountability."
           icon="albums-outline"
           onAction={handleCreateAlarmPress}
           style={styles.emptyCard}

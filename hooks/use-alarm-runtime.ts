@@ -12,6 +12,7 @@ import {
 import { advanceRecurringOccurrence, createNextOccurrenceDate } from '@/lib/alarm-schedule';
 import { getExactAlarmAccessState } from '@/lib/exact-alarm-access';
 import { configureNotificationsAsync, syncWeeklyReviewReminderAsync } from '@/lib/notifications';
+import { getSnoozedAlarmIds } from '@/lib/snooze';
 import { getSupabaseClient } from '@/lib/social/client';
 
 function getAlarmIdFromNotification(
@@ -193,7 +194,8 @@ export function useAlarmRuntime() {
       await syncWeeklyReviewReminderAsync(undefined, {
         requestPermissions: false,
       }).catch(() => null);
-      const dueAlarm = getNextActionableAlarm(store.alarms);
+      const snoozedAlarmIds = await getSnoozedAlarmIds(store.alarms).catch(() => new Set<string>());
+      const dueAlarm = getNextActionableAlarm(store.alarms.filter((alarm) => !snoozedAlarmIds.has(alarm.id)));
 
       if (dueAlarm) {
         // Managed Expo cannot force a full-screen alarm takeover when the app is killed,

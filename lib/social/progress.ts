@@ -5,6 +5,7 @@ import {
   MAX_SUCCESS_HISTORY,
   SuccessHistoryEntry,
 } from '@/types/alarm';
+import { normalizeSharedCompletionDetails } from '@/lib/checkpoint-completion';
 import { getSocialSession, getSupabaseClient } from '@/lib/social/client';
 
 type AlarmEventProgressRow = {
@@ -61,6 +62,7 @@ function mapSuccessEntry(row: AlarmEventProgressRow): SuccessHistoryEntry | null
     confirmedAt: row.resolved_at,
     timeToScanSeconds: getBoundedNumber(metadata.timeToScanSeconds),
     gracePeriodSeconds: Math.max(15, getBoundedNumber(metadata.gracePeriodSeconds) || 120),
+    completionMethod: normalizeSharedCompletionDetails(metadata).completionMethod,
   };
 }
 

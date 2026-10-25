@@ -74,14 +74,14 @@ const HOW_STEPS = [
   {
     icon: 'location-outline',
     number: '2',
-    title: 'Go to the real place/object',
-    description: 'Be at the right place or in front of the right thing.',
+    title: 'Do the thing',
+    description: 'Get up, head out, or start. Tick off a checklist if you made one.',
   },
   {
     icon: 'qr-code-outline',
     number: '3',
-    title: 'Scan the saved code',
-    description: 'Scan the QR code or barcode to clear the checkpoint.',
+    title: 'Check in',
+    description: 'Tap Done, or scan a code you placed somewhere for a stricter check.',
   },
 ] as const;
 
@@ -361,7 +361,7 @@ function WelcomeStep({ onNext, onSkipIntro, width }: { onNext: () => void; onSki
             Don’t dismiss it.{'\n'}Check in.
           </>
         }
-        description="Clear a reminder by reaching a real place or object and scanning its saved code."
+        description="Reminders that ask you to check in, with an optional code to scan when you need it stricter."
       />
 
       <View style={styles.heroArt}>
@@ -391,7 +391,7 @@ function HowItWorksStep({
 }) {
   return (
     <View style={[styles.screen, styles.howScreen, { width }]}>
-      <Header title="How it works" description="Three simple steps to confirm you reached your checkpoint." />
+      <Header title="How it works" description="Three simple steps to follow through." />
 
       <View style={styles.howList}>
         {HOW_STEPS.map((step) => (
@@ -414,7 +414,7 @@ function HowItWorksStep({
 
       <View style={styles.worksWithCard}>
         <View>
-          <Text style={styles.worksLabel}>Works with</Text>
+          <Text style={styles.worksLabel}>Optional stricter check</Text>
           <Text style={styles.worksBody}>QR codes and barcodes</Text>
         </View>
         <View style={styles.codeSamples}>
@@ -491,7 +491,7 @@ function PermissionsStep({
               : exactTimingUnavailable
                 ? 'Allow exact alarm timing in Android settings to prevent system delays.'
                 : isNotificationEnabled
-                ? 'Reminders can open the app when it is time to scan.'
+                ? 'Reminders can open the app when it is time to check in.'
                 : "We'll ask when you save your first checkpoint."
           }
           icon="notifications-outline"
@@ -506,7 +506,7 @@ function PermissionsStep({
               ? 'Blocked in system settings. Open Settings before linking a proof code.'
               : isCameraEnabled
                 ? 'Camera access is ready for scans.'
-                : "We'll ask when you scan a QR code or barcode."
+                : "Only needed if you choose to scan a code. We'll ask then."
           }
           icon="camera-outline"
           onPress={cameraDenied ? onOpenCameraSettings : undefined}

@@ -129,7 +129,7 @@ function getHeroSchedulePresentation(alarm: Alarm | null, phaseLabel: string, no
   const reachWindow = formatReachWindow(alarm);
   const repeatLabel = getRepeatShortLabel(alarm.repeatSchedule);
 
-  if (phaseLabel === 'Scan now') {
+  if (phaseLabel === 'Check in now') {
     return {
       badgeLabel: 'Live',
       dayHeadline: null,
@@ -480,7 +480,7 @@ export default function TodayScreen() {
   );
 
   const handlePrimaryPress = useCallback(() => {
-    if (primaryAlarm && primaryPhaseLabel === 'Scan now') {
+    if (primaryAlarm && primaryPhaseLabel === 'Check in now') {
       router.push(`/ringing?alarmId=${primaryAlarm.id}`);
       return;
     }
@@ -525,7 +525,7 @@ export default function TodayScreen() {
 
       {isLoading ? (
         <LoadingBlock
-          description="Checking your next checkpoint and latest proof."
+          description="Checking your next checkpoint and latest check-in."
           layout="hero"
           style={styles.loadingHero}
           title="Loading today"
@@ -555,7 +555,7 @@ export default function TodayScreen() {
           <FlowPanel style={styles.heroPanel}>
             <View style={styles.heroHeader}>
               <Text style={[styles.dueKicker, { color: colors.primary }]}>
-                {primaryPhaseLabel === 'Scan now'
+                {primaryPhaseLabel === 'Check in now'
                   ? 'READY TO CHECK IN'
                   : primaryPhaseLabel === 'Cleared'
                     ? 'COMPLETED'
@@ -568,7 +568,7 @@ export default function TodayScreen() {
                     backgroundColor:
                       primaryPhaseLabel === 'Cleared'
                         ? colors.successSurface
-                        : primaryPhaseLabel === 'Scan now'
+                        : primaryPhaseLabel === 'Check in now'
                           ? colors.warningSurface
                           : colors.primarySurface,
                   },
@@ -580,7 +580,7 @@ export default function TodayScreen() {
                       backgroundColor:
                         primaryPhaseLabel === 'Cleared'
                           ? colors.success
-                          : primaryPhaseLabel === 'Scan now'
+                          : primaryPhaseLabel === 'Check in now'
                             ? colors.warning
                             : colors.primary,
                     },
@@ -593,7 +593,7 @@ export default function TodayScreen() {
                       color:
                         primaryPhaseLabel === 'Cleared'
                           ? colors.success
-                          : primaryPhaseLabel === 'Scan now'
+                          : primaryPhaseLabel === 'Check in now'
                             ? colors.warning
                             : colors.primary,
                     },
@@ -622,7 +622,7 @@ export default function TodayScreen() {
 
             <Pressable
               accessibilityLabel={
-                primaryPhaseLabel === 'Scan now'
+                primaryPhaseLabel === 'Check in now'
                   ? 'Check in now'
                   : heroSchedule.isFutureDay
                     ? `View checkpoint for ${heroSchedule.dayHeadline}`
@@ -632,18 +632,18 @@ export default function TodayScreen() {
               onPress={handlePrimaryPress}
               style={({ pressed }) => [
                 styles.checkInButton,
-                { backgroundColor: primaryPhaseLabel === 'Scan now' ? colors.text : colors.panelMuted },
+                { backgroundColor: primaryPhaseLabel === 'Check in now' ? colors.text : colors.panelMuted },
                 pressed && styles.pressed,
               ]}>
               <Text
                 style={[
                   styles.checkInLabel,
-                  { color: primaryPhaseLabel === 'Scan now' ? colors.elevated : colors.text },
+                  { color: primaryPhaseLabel === 'Check in now' ? colors.elevated : colors.text },
                 ]}>
-                {primaryPhaseLabel === 'Scan now' ? 'Check in now' : 'View checkpoint'}
+                {primaryPhaseLabel === 'Check in now' ? 'Check in now' : 'View checkpoint'}
               </Text>
               <Ionicons
-                color={primaryPhaseLabel === 'Scan now' ? colors.elevated : colors.text}
+                color={primaryPhaseLabel === 'Check in now' ? colors.elevated : colors.text}
                 name="arrow-forward"
                 size={16}
               />

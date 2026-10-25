@@ -1,3 +1,4 @@
+import { normalizeSharedCompletionDetails } from '@/lib/checkpoint-completion';
 import { getSocialSession, getSupabaseClient } from '@/lib/social/client';
 import { hasSocialBackendConfig } from '@/lib/social/config';
 import {
@@ -144,6 +145,7 @@ function normalizeQueuedAlarmEvent(value: unknown): QueuedAlarmEvent | null {
         typeof sharePayload.timeToScanSeconds === 'number'
           ? Math.max(0, sharePayload.timeToScanSeconds)
           : undefined,
+      ...normalizeSharedCompletionDetails(sharePayload),
       weeklyCompletionRate,
       weeklySuccesses,
       weeklyFailures,

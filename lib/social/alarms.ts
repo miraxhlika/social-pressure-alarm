@@ -1,4 +1,5 @@
 import { getSocialSession, getSupabaseClient } from '@/lib/social/client';
+import { normalizeChecklistItems, normalizeCompletionMethod } from '@/lib/checkpoint-completion';
 import { normalizeUseCaseType } from '@/lib/checkpoint-templates';
 import { getDeviceTimezone, isValidTimezone } from '@/lib/alarm-schedule';
 import { AlarmDefinition, AlarmSocialSettings, RepeatSchedule } from '@/types/alarm';
@@ -13,6 +14,9 @@ type RemoteAlarmRow = {
   use_case_type: string;
   place_object?: string | null;
   notes?: string | null;
+  completion_method?: string | null;
+  proof_code_type?: string | null;
+  checklist_items?: unknown;
   repeat_schedule: RepeatSchedule;
   timezone?: string | null;
   schedule_revision?: number | null;
@@ -54,6 +58,8 @@ function mapSocialSettings(value: unknown): AlarmSocialSettings | undefined {
 }
 
 function mapRemoteAlarmRow(row: RemoteAlarmRow): AlarmDefinition {
+  const completionMethod = normalizeCompletionMethod(row.completion_method, row.expected_qr_payload ?? '');
+
   return {
     id: row.id,
     clientId: row.id,
@@ -63,7 +69,13 @@ function mapRemoteAlarmRow(row: RemoteAlarmRow): AlarmDefinition {
     useCaseType: normalizeUseCaseType(row.use_case_type),
     placeObject: row.place_object ?? undefined,
     notes: row.notes ?? undefined,
-    expectedQrPayload: row.expected_qr_payload,
+    completionMethod,
+    expectedQrPayload: completionMethod === 'scan' ? row.expected_qr_payload : '',
+    proofCodeType:
+      completionMethod === 'scan' && (row.proof_code_type === 'qr' || row.proof_code_type === 'barcode')
+        ? row.proof_code_type
+        : undefined,
+    checklistItems: normalizeChecklistItems(row.checklist_items),
     repeatSchedule: row.repeat_schedule,
     timezone: row.timezone && isValidTimezone(row.timezone) ? row.timezone : getDeviceTimezone(),
     scheduleRevision: Math.max(1, Math.trunc(row.schedule_revision ?? 1)),
@@ -82,7 +94,10 @@ function mapAlarmDefinitionForWrite(alarm: AlarmDefinition, userId: string) {
     id: alarm.id,
     user_id: userId,
     label: alarm.label,
-    expected_qr_payload: alarm.expectedQrPayload,
+    expected_qr_payload: alarm.completionMethod === 'scan' ? alarm.expectedQrPayload : '',
+    completion_method: alarm.completionMethod,
+    proof_code_type: alarm.completionMethod === 'scan' ? alarm.proofCodeType ?? null : null,
+    checklist_items: alarm.checklistItems ?? [],
     place_object: alarm.placeObject ?? null,
     notes: alarm.notes ?? null,
     hour: alarm.hour,
@@ -119,7 +134,7 @@ export async function listMyRemoteAlarms() {
   const { data, error } = await client
     .from('user_alarms')
     .select(
-      'id, user_id, label, expected_qr_payload, place_object, notes, hour, minute, use_case_type, repeat_schedule, timezone, schedule_revision, grace_period_seconds, is_active, scheduled_for, last_outcome, social_settings, created_at, updated_at'
+      'id, user_id, label, expected_qr_payload, completion_method, proof_code_type, checklist_items, place_object, notes, hour, minute, use_case_type, repeat_schedule, timezone, schedule_revision, grace_period_seconds, is_active, scheduled_for, last_outcome, social_settings, created_at, updated_at'
     )
     .eq('user_id', user.id)
     .order('created_at', { ascending: false });
@@ -139,7 +154,7 @@ export async function upsertMyRemoteAlarm(alarm: AlarmDefinition) {
       onConflict: 'user_id,id',
     })
     .select(
-      'id, user_id, label, expected_qr_payload, place_object, notes, hour, minute, use_case_type, repeat_schedule, timezone, schedule_revision, grace_period_seconds, is_active, scheduled_for, last_outcome, social_settings, created_at, updated_at'
+      'id, user_id, label, expected_qr_payload, completion_method, proof_code_type, checklist_items, place_object, notes, hour, minute, use_case_type, repeat_schedule, timezone, schedule_revision, grace_period_seconds, is_active, scheduled_for, last_outcome, social_settings, created_at, updated_at'
     )
     .single();
 
@@ -165,7 +180,7 @@ export async function upsertMyRemoteAlarms(alarms: AlarmDefinition[]) {
       }
     )
     .select(
-      'id, user_id, label, expected_qr_payload, place_object, notes, hour, minute, use_case_type, repeat_schedule, timezone, schedule_revision, grace_period_seconds, is_active, scheduled_for, last_outcome, social_settings, created_at, updated_at'
+      'id, user_id, label, expected_qr_payload, completion_method, proof_code_type, checklist_items, place_object, notes, hour, minute, use_case_type, repeat_schedule, timezone, schedule_revision, grace_period_seconds, is_active, scheduled_for, last_outcome, social_settings, created_at, updated_at'
     );
 
   if (error) {
