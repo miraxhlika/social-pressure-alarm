@@ -248,8 +248,8 @@ async function handleMissedCheckpointAlert(alarmEventId: string, callerId: strin
   const messages = pushTokens.map<ExpoPushMessage>((token) => ({
     to: token.expo_push_token,
     sound: 'default',
-    title: `${actorName} missed a checkpoint`,
-    body: `${event.alarm_label || 'Checkpoint'} was missed. Check in on them?`,
+    title: `${actorName} hasn't checked in`,
+    body: `No check-in received for ${event.alarm_label || 'a checkpoint'}. Check in on them?`,
     channelId: SOCIAL_PUSH_CHANNEL_ID,
     data: {
       alarmEventId: event.id,

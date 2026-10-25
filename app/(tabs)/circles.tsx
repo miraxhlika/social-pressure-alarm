@@ -47,7 +47,7 @@ import { sendCircleNudge } from '@/lib/social/push';
 import { getSocialQueueSummary } from '@/lib/social/queue';
 import { SocialCircleSummary, SocialFeedItem } from '@/lib/social/types';
 import { useSocialSession } from '@/providers/social-session-provider';
-import { QueuedAlarmEvent } from '@/types/alarm';
+import { CompletionMethod, QueuedAlarmEvent } from '@/types/alarm';
 
 type AppColors = ReturnType<typeof getAppColors>;
 
@@ -82,11 +82,21 @@ type CircleActivityItem = {
   circleName: string;
   isPending: boolean;
   outcome: 'confirmed' | 'missed';
+  completionMethod?: CompletionMethod;
+  checklistItemCount?: number;
   person: string;
   checkpointLabel: string;
   resolvedAt: string;
   canSendNudge: boolean;
 };
+
+function getActivityActionCopy(item: CircleActivityItem) {
+  if (item.outcome === 'missed') {
+    return ' had no check-in for ';
+  }
+
+  return item.completionMethod === 'confirm' ? ' checked in for ' : ' scanned ';
+}
 
 function formatActivityTime(timestamp: string) {
   const date = new Date(timestamp);
@@ -138,6 +148,8 @@ function buildCircleActivityFeed(
       circleName: circleNameById.get(event.socialSettings?.circleId ?? '') ?? 'Accountability circle',
       isPending: true,
       outcome: event.outcome,
+      completionMethod: event.sharePayload.completionMethod,
+      checklistItemCount: event.sharePayload.checklistItemCount,
       person: 'You',
       checkpointLabel: event.alarmLabel,
       resolvedAt: event.resolvedAt,
@@ -152,6 +164,8 @@ function buildCircleActivityFeed(
       circleName: item.circleName,
       isPending: false,
       outcome: item.outcome,
+      completionMethod: item.sharePayload.completionMethod,
+      checklistItemCount: item.sharePayload.checklistItemCount,
       person: item.isOwnEvent ? 'You' : item.actorDisplayName,
       checkpointLabel: item.alarmLabel,
       resolvedAt: item.resolvedAt,
@@ -1057,14 +1071,15 @@ function CircleActivityRow({
       <View style={styles.activityCopy}>
         <Text style={styles.activityTitle}>
           <Text style={[styles.activityPerson, { color: colors.primary }]}>{item.person}</Text>
-          <Text style={[styles.activityAction, { color: colors.textSoft }]}>
-            {item.outcome === 'confirmed' ? ' cleared ' : ' missed '}
-          </Text>
+          <Text style={[styles.activityAction, { color: colors.textSoft }]}>{getActivityActionCopy(item)}</Text>
           <Text style={[styles.activityCheckpoint, { color: colors.text }]}>{item.checkpointLabel}</Text>
         </Text>
         <Text style={[styles.activityMeta, { color: colors.textSoft }]}>
           {showCircleName ? `${item.circleName} · ` : ''}
           {formatActivityTime(item.resolvedAt)}
+          {item.outcome === 'confirmed' && item.checklistItemCount
+            ? ` · ${item.checklistItemCount} item${item.checklistItemCount === 1 ? '' : 's'}`
+            : ''}
           {item.isPending ? ' · Pending sync' : ''}
         </Text>
         {item.canSendNudge ? (

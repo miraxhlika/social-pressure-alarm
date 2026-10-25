@@ -1,3 +1,4 @@
+import { normalizeSharedCompletionDetails } from '@/lib/checkpoint-completion';
 import { getSocialSession, getSupabaseClient } from '@/lib/social/client';
 import { SocialFeedItem } from '@/lib/social/types';
 
@@ -81,6 +82,7 @@ function mapVisibleAlarmEventRow(row: VisibleAlarmEventRow): SocialFeedItem | nu
       gracePeriodSeconds,
       timeToScanSeconds:
         typeof metadata.timeToScanSeconds === 'number' ? Math.max(0, metadata.timeToScanSeconds) : undefined,
+      ...normalizeSharedCompletionDetails(metadata),
       weeklyCompletionRate,
       weeklySuccesses,
       weeklyFailures,

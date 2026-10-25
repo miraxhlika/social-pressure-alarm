@@ -141,7 +141,7 @@ function getEveningReadinessDate(scheduledFor: Date) {
 function getCheckpointNotificationId(
   alarmId: string,
   scheduleRevision: number,
-  kind: AlarmNotificationKind,
+  kind: AlarmNotificationKind | 'snooze',
   slot: string
 ) {
   return [CHECKPOINT_NOTIFICATION_ID_PREFIX, alarmId, `r${scheduleRevision}`, kind, slot].join(':');
@@ -331,7 +331,13 @@ export function buildAlarmNotificationPlan(
   preferences: NotificationPreferences,
   scheduledFor: Date
 ) {
-  const primaryCopy = getCheckpointNotificationCopy(alarm.useCaseType, alarm.label, alarm.gracePeriodSeconds);
+  const primaryCopy = getCheckpointNotificationCopy(
+    alarm.useCaseType,
+    alarm.label,
+    alarm.gracePeriodSeconds,
+    undefined,
+    alarm.completionMethod
+  );
   const titledPrimaryCopy = {
     ...primaryCopy,
     title: `${primaryCopy.title} · ${formatAlarmTime(alarm.hour, alarm.minute)}`,
@@ -361,7 +367,8 @@ export function buildAlarmNotificationPlan(
         alarm.useCaseType,
         alarm.label,
         alarm.gracePeriodSeconds,
-        alarm.gracePeriodSeconds - reminderDelaySeconds
+        alarm.gracePeriodSeconds - reminderDelaySeconds,
+        alarm.completionMethod
       );
       items.push(
         createPlanItem(
@@ -400,7 +407,8 @@ export function buildAlarmNotificationPlan(
       alarm.useCaseType,
       alarm.label,
       alarm.gracePeriodSeconds,
-      alarm.gracePeriodSeconds - urgencyDelayMinutes * 60
+      alarm.gracePeriodSeconds - urgencyDelayMinutes * 60,
+      alarm.completionMethod
     );
 
     if (alarm.repeatSchedule === 'daily') {
@@ -425,7 +433,11 @@ export function buildAlarmNotificationPlan(
   }
 
   if (preferences.eveningReadinessRemindersEnabled && scheduledFor.getHours() < 12) {
-    const readinessCopy = getCheckpointReadinessNotificationCopy(alarm.useCaseType, alarm.label);
+    const readinessCopy = getCheckpointReadinessNotificationCopy(
+      alarm.useCaseType,
+      alarm.label,
+      alarm.completionMethod
+    );
     items.push(
       ...buildRecurringItems(
         alarm,
@@ -596,6 +608,62 @@ export async function cancelAlarmNotificationsForAlarmAsync(
   knownNotificationIds: Iterable<string> = []
 ) {
   await cancelAlarmNotificationPlansAsync([alarmId], knownNotificationIds);
+}
+
+/**
+ * Schedules a one-off reminder inside the current reach window. The deadline
+ * does not move, so snoozing never turns a missed run into a completed one.
+ */
+export async function scheduleCheckpointSnoozeAsync(alarm: Alarm, delaySeconds: number, deadline: number) {
+  const remindAt = new Date(Date.now() + delaySeconds * 1000);
+  const secondsLeftAtReminder = Math.max(0, Math.round((deadline - remindAt.getTime()) / 1000));
+  const copy = getCheckpointNotificationCopy(
+    alarm.useCaseType,
+    alarm.label,
+    alarm.gracePeriodSeconds,
+    secondsLeftAtReminder,
+    alarm.completionMethod
+  );
+
+  await cancelCheckpointSnoozeAsync(alarm.id);
+  await scheduleLocalNotificationAsync(
+    {
+      identifier: getCheckpointNotificationId(alarm.id, alarm.scheduleRevision, 'snooze', remindAt.toISOString()),
+      content: {
+        title: copy.title,
+        body: copy.body,
+        sound: 'default',
+        data: {
+          alarmId: alarm.id,
+          kind: 'snooze',
+          repeatSchedule: alarm.repeatSchedule,
+          scheduleRevision: alarm.scheduleRevision,
+          timezone: alarm.timezone,
+        },
+      },
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.DATE,
+        date: remindAt,
+        channelId: ALARM_CHANNEL_ID,
+      },
+    },
+    'The reminder could not be scheduled. Check in now instead.'
+  );
+
+  return remindAt.toISOString();
+}
+
+export async function cancelCheckpointSnoozeAsync(alarmId: string) {
+  const scheduledNotifications = await Notifications.getAllScheduledNotificationsAsync();
+
+  await Promise.all(
+    scheduledNotifications
+      .filter(
+        (notification) =>
+          getNotificationAlarmId(notification) === alarmId && notification.content.data?.kind === 'snooze'
+      )
+      .map((notification) => Notifications.cancelScheduledNotificationAsync(notification.identifier))
+  );
 }
 
 export async function cancelOrphanedAlarmNotificationsAsync(activeAlarmIds: Iterable<string>) {

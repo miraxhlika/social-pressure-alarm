@@ -338,7 +338,7 @@ function buildWeeklyReview(
       strongestUseCase: null,
       recoveryUseCase: null,
       speedLabel: 'No clear-time baseline yet',
-      speedBody: 'Once a checkpoint clears, the app will show how fast you reached proof.',
+      speedBody: 'Once a checkpoint clears, the app will show how fast you checked in.',
     };
   }
 

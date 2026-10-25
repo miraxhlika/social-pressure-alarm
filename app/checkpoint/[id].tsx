@@ -326,7 +326,7 @@ export default function CheckpointDetailsScreen() {
     return (
       <AppScreen backgroundColor={colors.elevated} contentStyle={styles.screenContent}>
         <LoadingBlock
-          description="Fetching schedule, proof setup, and history."
+          description="Fetching schedule, setup, and history."
           layout="detail"
           title="Loading checkpoint"
         />
@@ -421,10 +421,21 @@ export default function CheckpointDetailsScreen() {
             value={formatScheduleLine(alarm)}
           />
           <SetupRow
-            icon="qr-code-outline"
-            label="Proof"
-            value={`${proofCodeLabel}${alarm.placeObject && alarm.placeObject !== alarm.label ? ` · ${alarm.placeObject}` : ''}`}
+            icon={alarm.completionMethod === 'scan' ? 'qr-code-outline' : 'checkmark-done-outline'}
+            label="Finish by"
+            value={
+              alarm.completionMethod === 'scan'
+                ? `${proofCodeLabel}${alarm.placeObject && alarm.placeObject !== alarm.label ? ` · ${alarm.placeObject}` : ''}`
+                : 'Confirming in the app'
+            }
           />
+          {alarm.checklistItems?.length ? (
+            <SetupRow
+              icon="list-outline"
+              label="Checklist"
+              value={alarm.checklistItems.map((item) => item.label).join(', ')}
+            />
+          ) : null}
           <SetupRow
             icon="people-outline"
             label="Accountability"

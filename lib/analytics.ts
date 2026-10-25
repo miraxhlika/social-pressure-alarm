@@ -1,5 +1,5 @@
 import { readScopedStorageValue, writeScopedStorageValue } from '@/lib/storage';
-import { RepeatSchedule, UseCaseType } from '@/types/alarm';
+import { CompletionMethod, RepeatSchedule, UseCaseType } from '@/types/alarm';
 
 const ANALYTICS_STORAGE_KEY = 'social-pressure-alarm/analytics-events';
 const MAX_ANALYTICS_EVENTS = 250;
@@ -12,6 +12,7 @@ export type AnalyticsEventName =
   | 'demo_checkpoint_cleared'
   | 'recurring_checkpoint_saved'
   | 'checkpoint_cleared'
+  | 'checkpoint_snoozed'
   | 'checkpoint_missed'
   | 'first_miss'
   | 'miss_recovery_action'
@@ -24,6 +25,8 @@ type BaseCheckpointPayload = {
   useCaseType?: UseCaseType;
   repeatSchedule?: RepeatSchedule;
   gracePeriodSeconds?: number;
+  completionMethod?: CompletionMethod;
+  checklistItemCount?: number;
 };
 
 export type AnalyticsPayloadMap = {
@@ -54,6 +57,9 @@ export type AnalyticsPayloadMap = {
   };
   checkpoint_cleared: BaseCheckpointPayload & {
     timeToClearSeconds?: number;
+  };
+  checkpoint_snoozed: BaseCheckpointPayload & {
+    snoozeMinutes: number;
   };
   checkpoint_missed: BaseCheckpointPayload & {
     failureCount: number;
@@ -107,11 +113,33 @@ export const ANALYTICS_EVENT_CATALOG: Record<
   },
   recurring_checkpoint_saved: {
     description: 'A real saved checkpoint was created.',
-    payload: ['checkpointId', 'useCaseType', 'repeatSchedule', 'gracePeriodSeconds', 'creationCountBeforeSave', 'source', 'socialMode'],
+    payload: [
+      'checkpointId',
+      'useCaseType',
+      'repeatSchedule',
+      'gracePeriodSeconds',
+      'completionMethod',
+      'checklistItemCount',
+      'creationCountBeforeSave',
+      'source',
+      'socialMode',
+    ],
   },
   checkpoint_cleared: {
     description: 'A saved checkpoint was cleared.',
-    payload: ['checkpointId', 'useCaseType', 'repeatSchedule', 'gracePeriodSeconds', 'timeToClearSeconds'],
+    payload: [
+      'checkpointId',
+      'useCaseType',
+      'repeatSchedule',
+      'gracePeriodSeconds',
+      'completionMethod',
+      'checklistItemCount',
+      'timeToClearSeconds',
+    ],
+  },
+  checkpoint_snoozed: {
+    description: 'A live checkpoint was deferred with a reminder inside its window.',
+    payload: ['checkpointId', 'useCaseType', 'completionMethod', 'snoozeMinutes'],
   },
   checkpoint_missed: {
     description: 'A saved checkpoint was missed.',

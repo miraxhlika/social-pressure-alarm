@@ -496,7 +496,7 @@ export default function AccountScreen() {
       confirmLabel: 'Delete checkpoint data',
       description: user
         ? 'Permanently clear checkpoints, history, sync state, and notifications from this device and account. Your profile and circle memberships will remain.'
-        : 'Permanently clear checkpoints, proof history, sync state, and notifications from this device.',
+        : 'Permanently clear checkpoints, check-in history, sync state, and notifications from this device.',
       icon: 'trash-outline',
       title: 'Delete checkpoint data?',
       tone: 'danger',

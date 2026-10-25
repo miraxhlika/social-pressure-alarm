@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, Easing, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { BarcodeScanningResult, useCameraPermissions } from 'expo-camera';
 import * as Haptics from 'expo-haptics';
@@ -23,19 +23,23 @@ import {
   resolveAlarm,
   updateAlarm,
 } from '@/lib/alarms';
-import { getCheckpointLiveCopy } from '@/lib/checkpoint-templates';
+import { getCheckpointLiveCopy, getCheckpointTemplate } from '@/lib/checkpoint-templates';
 import { PROOF_CODE_BARCODE_TYPES, SCANNER_DISTANCE_HINT } from '@/lib/scanner-camera';
 import {
   cancelAlarmNotificationAsync,
   cancelAlarmNotificationsForAlarmAsync,
+  cancelCheckpointSnoozeAsync,
   scheduleAlarmNotificationAsync,
+  scheduleCheckpointSnoozeAsync,
 } from '@/lib/notifications';
+import { clearAlarmSnooze, getAvailableSnoozeMinutes, recordAlarmSnooze } from '@/lib/snooze';
 import { useAppDialog } from '@/providers/app-dialog-provider';
 import { Alarm } from '@/types/alarm';
 
 type CountdownTone = 'primary' | 'warning' | 'danger';
 
 const SCAN_DEDUPE_WINDOW_MS = 3000;
+const HOLD_TO_CONFIRM_MS = 1500;
 const PRACTICE_TO_FIRST_REMINDER_BUFFER_MS = 15 * 60 * 1000;
 const TIMER_RING_SIZE = 252;
 const TIMER_RING_SEGMENT_COUNT = 72;
@@ -258,6 +262,8 @@ export default function RingingScreen() {
   const [scanEnabled, setScanEnabled] = useState(true);
   const [isScannerVisible, setIsScannerVisible] = useState(false);
   const [isTorchEnabled, setIsTorchEnabled] = useState(false);
+  const [checkedItemIds, setCheckedItemIds] = useState<Set<string>>(() => new Set());
+  const [showHoldHint, setShowHoldHint] = useState(false);
   const [permission, requestPermission] = useCameraPermissions();
   const hasResolvedRef = useRef(false);
   const hasRequestedPermissionRef = useRef(false);
@@ -344,6 +350,8 @@ export default function RingingScreen() {
     setScanError('');
     setIsScannerVisible(false);
     setIsTorchEnabled(false);
+    setCheckedItemIds(new Set());
+    setShowHoldHint(false);
   }, [alarm?.id]);
 
   const deadline = useMemo(() => {
@@ -358,6 +366,26 @@ export default function RingingScreen() {
     [alarm?.label, alarm?.useCaseType]
   );
   const placeObjectLabel = alarm?.placeObject?.trim() || alarm?.label || 'the saved place or object';
+  const isConfirmCheckpoint = alarm?.completionMethod === 'confirm';
+  const requiresHoldToConfirm = isConfirmCheckpoint && alarm?.useCaseType === 'wake_up';
+  const checklistItems = useMemo(() => alarm?.checklistItems ?? [], [alarm?.checklistItems]);
+  const checkedItemCount = checklistItems.filter((item) => checkedItemIds.has(item.id)).length;
+  const isChecklistComplete = checkedItemCount === checklistItems.length;
+
+  const toggleChecklistItem = useCallback((itemId: string) => {
+    void Haptics.selectionAsync().catch(() => null);
+    setCheckedItemIds((currentIds) => {
+      const nextIds = new Set(currentIds);
+
+      if (nextIds.has(itemId)) {
+        nextIds.delete(itemId);
+      } else {
+        nextIds.add(itemId);
+      }
+
+      return nextIds;
+    });
+  }, []);
 
   useEffect(() => {
     if (!deadline) {
@@ -398,8 +426,8 @@ export default function RingingScreen() {
     }
   }, [permission?.granted]);
 
-  const handleScanSuccess = useCallback(async () => {
-    if (!alarm || isSubmitting || hasResolvedRef.current) {
+  const handleCompletion = useCallback(async () => {
+    if (!alarm || isSubmitting || hasResolvedRef.current || !isChecklistComplete) {
       return;
     }
 
@@ -412,6 +440,8 @@ export default function RingingScreen() {
       if (alarm.repeatSchedule === 'once') {
         await cancelAlarmNotificationsForAlarmAsync(alarm.id, alarm.notificationIds);
       }
+      await cancelCheckpointSnoozeAsync(alarm.id).catch(() => null);
+      await clearAlarmSnooze(alarm.id).catch(() => null);
       const resolvedAlarm = await resolveAlarm(alarm.id, 'confirmed', {
         scheduledFor: alarm.scheduledFor,
         capturedAt: new Date().toISOString(),
@@ -436,6 +466,8 @@ export default function RingingScreen() {
         useCaseType: alarm.useCaseType,
         repeatSchedule: alarm.repeatSchedule,
         gracePeriodSeconds: alarm.gracePeriodSeconds,
+        completionMethod: alarm.completionMethod,
+        checklistItemCount: checklistItems.length,
         timeToClearSeconds: successEntry?.timeToScanSeconds,
       });
 
@@ -494,7 +526,38 @@ export default function RingingScreen() {
     } finally {
       setIsSubmitting(false);
     }
-  }, [alarm, alert, isSubmitting, router]);
+  }, [alarm, alert, checklistItems.length, isChecklistComplete, isSubmitting, router]);
+
+  const snoozeMinutes = getAvailableSnoozeMinutes(remainingSeconds);
+
+  const handleSnooze = useCallback(async () => {
+    if (!alarm || !deadline || isSubmitting || hasResolvedRef.current || snoozeMinutes < 1) {
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    try {
+      const until = await scheduleCheckpointSnoozeAsync(alarm, snoozeMinutes * 60, deadline);
+      await recordAlarmSnooze(alarm, until);
+      await trackAnalyticsEvent('checkpoint_snoozed', {
+        checkpointId: alarm.id,
+        useCaseType: alarm.useCaseType,
+        completionMethod: alarm.completionMethod,
+        snoozeMinutes,
+      });
+      router.replace('/');
+    } catch (error) {
+      await alert({
+        description: error instanceof Error ? error.message : 'The reminder could not be scheduled.',
+        icon: 'notifications-off-outline',
+        title: 'Reminder not set',
+        tone: 'warning',
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
+  }, [alarm, alert, deadline, isSubmitting, router, snoozeMinutes]);
 
   const handleMissedAlarm = useCallback(async () => {
     if (!alarm || isSubmitting || hasResolvedRef.current) {
@@ -508,6 +571,8 @@ export default function RingingScreen() {
       if (alarm.repeatSchedule === 'once') {
         await cancelAlarmNotificationsForAlarmAsync(alarm.id, alarm.notificationIds);
       }
+      await cancelCheckpointSnoozeAsync(alarm.id).catch(() => null);
+      await clearAlarmSnooze(alarm.id).catch(() => null);
       const resolvedAlarm = await resolveAlarm(alarm.id, 'missed', {
         scheduledFor: alarm.scheduledFor,
         capturedAt: new Date().toISOString(),
@@ -726,9 +791,9 @@ export default function RingingScreen() {
       }
 
       validScanInFlightRef.current = true;
-      await handleScanSuccess();
+      await handleCompletion();
     },
-    [alarm, errorFlash, handleScanSuccess, isSubmitting, liveCopy.wrongCodeDescription, scanEnabled]
+    [alarm, errorFlash, handleCompletion, isSubmitting, liveCopy.wrongCodeDescription, scanEnabled]
   );
 
   useEffect(() => {
@@ -864,7 +929,10 @@ export default function RingingScreen() {
             pointerEvents="none"
             style={[styles.ambientGlow, { backgroundColor: withAlpha(checkpointAccent, isDark ? '16' : '12') }]}
           />
-          <View style={styles.activeContent}>
+          <ScrollView
+            bounces={false}
+            contentContainerStyle={styles.activeContent}
+            showsVerticalScrollIndicator={false}>
             <View style={styles.activeHeader}>
               <View style={[styles.livePill, { borderColor: colors.border, backgroundColor: withAlpha(colors.panel, 'D9') }]}>
                 <View style={[styles.liveDot, { backgroundColor: checkpointAccent }]} />
@@ -882,7 +950,9 @@ export default function RingingScreen() {
               <Text style={[styles.activeEyebrow, { color: checkpointAccent }]}>TIME TO CHECK IN</Text>
               <Text style={[styles.activeTitle, { color: urgentText }]}>{alarm.label}</Text>
               <Text style={[styles.activeDescription, { color: urgentTextSoft }]}>
-                Go to the checkpoint and scan its saved code before time runs out.
+                {isConfirmCheckpoint
+                  ? getCheckpointTemplate(alarm.useCaseType).confirmPrompt
+                  : 'Go to the checkpoint and scan its saved code before time runs out.'}
               </Text>
             </View>
 
@@ -891,8 +961,8 @@ export default function RingingScreen() {
               accessibilityLabel="Animate countdown"
               accessibilityRole="button"
               onPress={handleTimerPlay}
-              style={styles.timerPressable}>
-              <View style={styles.timerStage}>
+              style={[styles.timerPressable, checklistItems.length > 0 && styles.timerPressableCompact]}>
+              <View style={[styles.timerStage, checklistItems.length > 0 && styles.timerStageCompact]}>
                 {timerPlayBursts.map((burst, index) => (
                   <TimerTapBurst
                     key={index}
@@ -937,34 +1007,140 @@ export default function RingingScreen() {
               </View>
             </Pressable>
 
+            {checklistItems.length > 0 ? (
+              <View style={[styles.checklistPanel, { backgroundColor: withAlpha(colors.panel, 'E6'), borderColor: colors.border }]}>
+                <View style={styles.checklistHeader}>
+                  <Text style={[styles.checklistTitle, { color: urgentText }]}>Before you finish</Text>
+                  <Text style={[styles.checklistCount, { color: urgentTextSoft }]}>
+                    {checkedItemCount}/{checklistItems.length}
+                  </Text>
+                </View>
+                {checklistItems.map((item) => {
+                  const isChecked = checkedItemIds.has(item.id);
+
+                  return (
+                    <Pressable
+                      accessibilityLabel={item.label}
+                      accessibilityRole="checkbox"
+                      accessibilityState={{ checked: isChecked, disabled: isSubmitting }}
+                      disabled={isSubmitting}
+                      key={item.id}
+                      onPress={() => toggleChecklistItem(item.id)}
+                      style={({ pressed }) => [styles.checklistRow, pressed && styles.pressed]}>
+                      <Ionicons
+                        color={isChecked ? colors.success : urgentTextSoft}
+                        name={isChecked ? 'checkmark-circle' : 'ellipse-outline'}
+                        size={24}
+                      />
+                      <Text
+                        style={[
+                          styles.checklistLabel,
+                          { color: isChecked ? urgentTextSoft : urgentText },
+                          isChecked && styles.checklistLabelChecked,
+                        ]}>
+                        {item.label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            ) : null}
+
             <View style={styles.activeActions}>
               <Pressable
-                accessibilityLabel="Scan proof code"
+                accessibilityHint={
+                  !isChecklistComplete
+                    ? 'Tick every checklist item first'
+                    : requiresHoldToConfirm
+                      ? 'Press and hold to confirm'
+                      : undefined
+                }
+                accessibilityLabel={isConfirmCheckpoint ? 'Done' : 'Scan proof code'}
                 accessibilityRole="button"
-                disabled={isSubmitting}
+                accessibilityState={{ disabled: isSubmitting || !isChecklistComplete }}
+                delayLongPress={HOLD_TO_CONFIRM_MS}
+                disabled={isSubmitting || !isChecklistComplete}
+                onLongPress={
+                  requiresHoldToConfirm
+                    ? () => {
+                        setShowHoldHint(false);
+                        void handleCompletion();
+                      }
+                    : undefined
+                }
                 onPress={() => {
-                  void handleStartScanner();
+                  if (!isConfirmCheckpoint) {
+                    void handleStartScanner();
+                    return;
+                  }
+
+                  if (requiresHoldToConfirm) {
+                    setShowHoldHint(true);
+                    return;
+                  }
+
+                  void handleCompletion();
                 }}
                 style={({ pressed }) => [
                   styles.activePrimaryButton,
-                  { opacity: isSubmitting ? 0.55 : 1 },
+                  { opacity: isSubmitting || !isChecklistComplete ? 0.55 : 1 },
                   pressed && styles.pressed,
                 ]}>
                 <LinearGradient colors={actionGradient} style={StyleSheet.absoluteFillObject} />
                 <View style={styles.scanButtonIcon}>
-                  <Ionicons color={actionForeground} name="scan-outline" size={22} />
+                  <Ionicons
+                    color={actionForeground}
+                    name={isConfirmCheckpoint ? 'checkmark-circle-outline' : 'scan-outline'}
+                    size={22}
+                  />
                 </View>
-                <Text style={[styles.activePrimaryButtonText, { color: actionForeground }]}>Scan proof code</Text>
+                <Text style={[styles.activePrimaryButtonText, { color: actionForeground }]}>
+                  {!isChecklistComplete
+                    ? 'Tick every item first'
+                    : isConfirmCheckpoint
+                      ? requiresHoldToConfirm
+                        ? 'Hold to confirm'
+                        : 'Done'
+                      : 'Scan proof code'}
+                </Text>
               </Pressable>
 
+              {snoozeMinutes >= 1 ? (
+                <Pressable
+                  accessibilityHint="Sends one more reminder before the window closes. It does not count as done."
+                  accessibilityRole="button"
+                  disabled={isSubmitting}
+                  onPress={() => {
+                    void handleSnooze();
+                  }}
+                  style={({ pressed }) => [
+                    styles.snoozeButton,
+                    { borderColor: colors.border, opacity: isSubmitting ? 0.55 : 1 },
+                    pressed && styles.pressed,
+                  ]}>
+                  <Ionicons color={urgentText} name="time-outline" size={18} />
+                  <Text style={[styles.snoozeButtonText, { color: urgentText }]}>
+                    Remind me in {snoozeMinutes} min
+                  </Text>
+                </Pressable>
+              ) : null}
+
               <View style={styles.activeLockRow}>
-                <Ionicons color={urgentTextSoft} name="lock-closed-outline" size={13} />
+                <Ionicons
+                  color={urgentTextSoft}
+                  name={isConfirmCheckpoint ? 'information-circle-outline' : 'lock-closed-outline'}
+                  size={13}
+                />
                 <Text style={[styles.activeLockText, { color: urgentTextSoft }]}>
-                  Only the linked code can clear this checkpoint
+                  {showHoldHint
+                    ? 'Keep holding the button to confirm.'
+                    : isConfirmCheckpoint
+                      ? 'Only counts once you check in. Snoozing does not.'
+                      : 'Only the linked code can clear this checkpoint'}
                 </Text>
               </View>
             </View>
-          </View>
+          </ScrollView>
         </View>
       </SafeAreaView>
     );
@@ -1126,7 +1302,7 @@ const styles = StyleSheet.create({
     width: 420,
   },
   activeContent: {
-    flex: 1,
+    flexGrow: 1,
     gap: 12,
     width: '100%',
   },
@@ -1208,11 +1384,76 @@ const styles = StyleSheet.create({
   timerPressable: {
     alignItems: 'center',
   },
+  timerPressableCompact: {
+    height: 216,
+    justifyContent: 'center',
+  },
   timerStage: {
     alignItems: 'center',
     height: 270,
     justifyContent: 'center',
     position: 'relative',
+  },
+  timerStageCompact: {
+    transform: [{ scale: 0.8 }],
+  },
+  checklistPanel: {
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    gap: 2,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    width: '100%',
+  },
+  checklistHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingBottom: 4,
+  },
+  checklistTitle: {
+    fontFamily: Fonts.rounded,
+    fontSize: 13,
+    fontWeight: '900',
+    lineHeight: 18,
+  },
+  checklistCount: {
+    fontFamily: Fonts.rounded,
+    fontSize: 12,
+    fontWeight: '800',
+    lineHeight: 16,
+  },
+  checklistRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 12,
+    minHeight: 44,
+  },
+  checklistLabel: {
+    ...TextPresets.body,
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '700',
+    lineHeight: 20,
+  },
+  checklistLabelChecked: {
+    textDecorationLine: 'line-through',
+  },
+  snoozeButton: {
+    alignItems: 'center',
+    borderRadius: 18,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'center',
+    minHeight: 52,
+    paddingHorizontal: 18,
+  },
+  snoozeButtonText: {
+    fontFamily: Fonts.rounded,
+    fontSize: 15,
+    fontWeight: '800',
+    lineHeight: 20,
   },
   timerBurstRing: {
     borderRadius: TIMER_RING_SIZE / 2,

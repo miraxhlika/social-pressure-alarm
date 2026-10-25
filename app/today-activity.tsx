@@ -19,6 +19,7 @@ import {
   getSuccessOccurrenceTimestamp,
 } from '@/lib/alarm-history';
 import { ALARM_RUNTIME_CACHE_MAX_AGE_MS, hydrateAlarmRuntimeForCurrentUser, readAlarmStore } from '@/lib/alarms';
+import { getCompletionMethodLabel } from '@/lib/checkpoint-completion';
 import { AlarmStore } from '@/types/alarm';
 
 type TodayActivityEvent = {
@@ -54,7 +55,7 @@ function getTodayActivityEvents(store: AlarmStore): TodayActivityEvent[] {
     .filter((entry) => isSameLocalDay(getSuccessOccurrenceTimestamp(entry)))
     .map<TodayActivityEvent>((entry) => ({
       alarmId: entry.alarmId,
-      description: `Cleared in ${entry.timeToScanSeconds}s`,
+      description: `${getCompletionMethodLabel(entry.completionMethod)} in ${entry.timeToScanSeconds}s`,
       id: `clear-${entry.alarmId}-${entry.confirmedAt}`,
       occurredAt: getSuccessOccurrenceTimestamp(entry),
       statusLabel: 'Cleared',
@@ -66,7 +67,7 @@ function getTodayActivityEvents(store: AlarmStore): TodayActivityEvent[] {
     .filter((entry) => isSameLocalDay(getFailureOccurrenceTimestamp(entry)))
     .map<TodayActivityEvent>((entry) => ({
       alarmId: entry.alarmId,
-      description: 'Missed before the saved proof matched',
+      description: 'No check-in received in time',
       id: `miss-${entry.alarmId}-${entry.failedAt}`,
       occurredAt: getFailureOccurrenceTimestamp(entry),
       statusLabel: 'Missed',

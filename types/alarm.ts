@@ -1,8 +1,11 @@
 export const MAX_FAILURE_HISTORY = 10;
 export const MAX_SUCCESS_HISTORY = 20;
 export const MAX_CHECKPOINT_PRESETS = 8;
+export const MAX_CHECKLIST_ITEMS = 6;
+export const MAX_CHECKLIST_ITEM_LENGTH = 60;
 
 export type AlarmOutcome = 'confirmed' | 'missed';
+export type CompletionMethod = 'confirm' | 'scan';
 export type RepeatSchedule = 'once' | 'daily' | 'weekdays';
 export type AlarmNotificationKind = 'primary' | 'urgency' | 'readiness';
 export type AlarmProofCodeType = 'qr' | 'barcode';
@@ -26,9 +29,16 @@ export type AlarmEventSharePayload = {
   longestStreak: number;
   gracePeriodSeconds: number;
   timeToScanSeconds?: number;
+  completionMethod?: CompletionMethod;
+  checklistItemCount?: number;
   weeklyCompletionRate: number;
   weeklySuccesses: number;
   weeklyFailures: number;
+};
+
+export type ChecklistItem = {
+  id: string;
+  label: string;
 };
 
 export type AlarmEventRecord = {
@@ -68,6 +78,7 @@ export type SuccessHistoryEntry = {
   confirmedAt: string;
   timeToScanSeconds: number;
   gracePeriodSeconds: number;
+  completionMethod?: CompletionMethod;
 };
 
 export type CheckpointPreset = {
@@ -87,8 +98,11 @@ export type AlarmDefinition = {
   useCaseType: UseCaseType;
   placeObject?: string;
   notes?: string;
+  completionMethod: CompletionMethod;
+  /** Empty when `completionMethod` is `confirm`. */
   expectedQrPayload: string;
   proofCodeType?: AlarmProofCodeType;
+  checklistItems?: ChecklistItem[];
   repeatSchedule: RepeatSchedule;
   timezone: string;
   scheduleRevision: number;

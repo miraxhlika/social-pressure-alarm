@@ -1,4 +1,4 @@
-import { RepeatSchedule, UseCaseType } from '@/types/alarm';
+import { CompletionMethod, RepeatSchedule, UseCaseType } from '@/types/alarm';
 
 export type CheckpointTemplate = {
   id: UseCaseType;
@@ -6,8 +6,14 @@ export type CheckpointTemplate = {
   shortTitle: string;
   description: string;
   defaultLabel: string;
+  defaultPlace: string;
   repeatSchedule: RepeatSchedule;
   gracePeriodSeconds: number;
+  defaultCompletionMethod: CompletionMethod;
+  confirmPrompt: string;
+  /** Shown under the Confirm option when tapping Done is easy to do without acting. */
+  confirmCaution?: string;
+  checklistSuggestions: string[];
   coaching: string;
 };
 
@@ -33,60 +39,85 @@ const CHECKPOINT_TEMPLATE_MAP: Record<UseCaseType, CheckpointTemplate> = {
     id: 'wake_up',
     title: 'Wake up',
     shortTitle: 'Wake-up',
-    description: 'Force yourself out of bed and all the way to a real checkpoint.',
-    defaultLabel: 'Bathroom sink',
+    description: 'Get out of bed on time. Add a code in another room to make it harder to skip.',
+    defaultLabel: 'Wake up',
+    defaultPlace: 'Bathroom sink',
     repeatSchedule: 'weekdays',
     gracePeriodSeconds: 600,
+    defaultCompletionMethod: 'confirm',
+    confirmPrompt: 'Get out of bed and onto your feet, then tap Done.',
+    confirmCaution: 'Done is easy to tap from bed. A code in another room works better for waking up.',
+    checklistSuggestions: [],
     coaching: 'Best when the code is far enough away that you must stand up and move.',
   },
   medication: {
     id: 'medication',
     title: 'Medication',
     shortTitle: 'Medication',
-    description: 'Make the proof happen where the medication actually lives.',
-    defaultLabel: 'Medicine cabinet',
+    description: 'A steady reminder to take your medication on time.',
+    defaultLabel: 'Take medication',
+    defaultPlace: 'Medicine cabinet',
     repeatSchedule: 'daily',
     gracePeriodSeconds: 600,
+    defaultCompletionMethod: 'confirm',
+    confirmPrompt: 'Take your medication, then tap Done.',
+    checklistSuggestions: [],
     coaching: 'A scan only confirms a check-in near the medication; it does not confirm that a dose was taken.',
   },
   study_start: {
     id: 'study_start',
     title: 'Study start',
     shortTitle: 'Study',
-    description: 'Turn “I should start” into a clear beginning with physical proof.',
-    defaultLabel: 'Desk',
+    description: 'Turn “I should start” into a clear beginning.',
+    defaultLabel: 'Start studying',
+    defaultPlace: 'Desk',
     repeatSchedule: 'weekdays',
     gracePeriodSeconds: 300,
+    defaultCompletionMethod: 'confirm',
+    confirmPrompt: 'Sit down and start the session, then tap Done.',
+    checklistSuggestions: ['Phone away', 'Materials out'],
     coaching: 'Place the code where starting work means you are really in position.',
   },
   deep_work: {
     id: 'deep_work',
     title: 'Deep work',
     shortTitle: 'Deep work',
-    description: 'Protect focused work with a checkpoint that starts a serious block.',
-    defaultLabel: 'Workstation',
+    description: 'Start a focused block on time.',
+    defaultLabel: 'Deep work',
+    defaultPlace: 'Workstation',
     repeatSchedule: 'weekdays',
     gracePeriodSeconds: 300,
+    defaultCompletionMethod: 'confirm',
+    confirmPrompt: 'Start the focus block, then tap Done.',
+    checklistSuggestions: ['Notifications off', 'Task chosen'],
     coaching: 'Choose a checkpoint that marks the start of a no-distraction session.',
   },
   leave_home: {
     id: 'leave_home',
     title: 'Leave on time',
     shortTitle: 'Leave on time',
-    description: 'Use the front door or bag area so leaving becomes the proof moment.',
-    defaultLabel: 'Front door',
+    description: 'Head out on time with everything you need.',
+    defaultLabel: 'Leave home',
+    defaultPlace: 'Front door',
     repeatSchedule: 'weekdays',
     gracePeriodSeconds: 300,
+    defaultCompletionMethod: 'confirm',
+    confirmPrompt: 'Get ready to head out, then tap Done.',
+    checklistSuggestions: ['Keys', 'Wallet', 'Phone', 'Badge'],
     coaching: 'Keep the code at the exit so leaving and scanning stay in one motion.',
   },
   workout: {
     id: 'workout',
     title: 'Workout',
     shortTitle: 'Workout',
-    description: 'Make the first physical step of training impossible to fake.',
-    defaultLabel: 'Gym bag',
+    description: 'Make the first step of training happen.',
+    defaultLabel: 'Workout',
+    defaultPlace: 'Gym bag',
     repeatSchedule: 'daily',
     gracePeriodSeconds: 600,
+    defaultCompletionMethod: 'confirm',
+    confirmPrompt: 'Start moving, then tap Done.',
+    checklistSuggestions: ['Shoes', 'Water bottle', 'Headphones'],
     coaching: 'Use the bag, mat, or door so the checkpoint proves you started moving.',
   },
   custom: {
@@ -95,8 +126,12 @@ const CHECKPOINT_TEMPLATE_MAP: Record<UseCaseType, CheckpointTemplate> = {
     shortTitle: 'Custom',
     description: 'Start neutral, then tune the checkpoint for your own routine.',
     defaultLabel: '',
+    defaultPlace: '',
     repeatSchedule: 'daily',
     gracePeriodSeconds: 300,
+    defaultCompletionMethod: 'confirm',
+    confirmPrompt: 'Do it, then tap Done.',
+    checklistSuggestions: [],
     coaching: 'Useful when your commitment does not fit the standard templates yet.',
   },
 };
@@ -145,8 +180,10 @@ export function getCheckpointTemplateDefaults(value: unknown) {
   return {
     useCaseType: template.id,
     label: template.defaultLabel,
+    place: template.defaultPlace,
     repeatSchedule: template.repeatSchedule,
     gracePeriodSeconds: template.gracePeriodSeconds,
+    completionMethod: template.defaultCompletionMethod,
   };
 }
 
@@ -260,12 +297,39 @@ export function getCheckpointLiveCopy(value: unknown, label: string): Checkpoint
   }
 }
 
-export function getCheckpointNotificationCopy(
+export function getConfirmNotificationCopy(
   value: unknown,
   label: string,
   gracePeriodSeconds: number,
   secondsRemaining?: number
 ) {
+  const template = getCheckpointTemplate(value);
+  const checkpointLabel = label.trim() || template.shortTitle;
+
+  if (typeof secondsRemaining === 'number') {
+    return {
+      title: `${formatGracePeriodLabel(secondsRemaining)} left: ${checkpointLabel}`,
+      body: `${template.confirmPrompt} It only counts once you check in.`,
+    };
+  }
+
+  return {
+    title: `Time to check in: ${checkpointLabel}`,
+    body: `${template.confirmPrompt} You have ${formatGracePeriodLabel(gracePeriodSeconds)}.`,
+  };
+}
+
+export function getCheckpointNotificationCopy(
+  value: unknown,
+  label: string,
+  gracePeriodSeconds: number,
+  secondsRemaining?: number,
+  completionMethod: CompletionMethod = 'scan'
+) {
+  if (completionMethod === 'confirm') {
+    return getConfirmNotificationCopy(value, label, gracePeriodSeconds, secondsRemaining);
+  }
+
   const useCaseType = normalizeUseCaseType(value);
   const targetLabel = getCheckpointTargetLabel(label);
   const windowLabel =
@@ -345,7 +409,18 @@ export function getCheckpointNotificationCopy(
   }
 }
 
-export function getCheckpointReadinessNotificationCopy(value: unknown, label: string) {
+export function getCheckpointReadinessNotificationCopy(
+  value: unknown,
+  label: string,
+  completionMethod: CompletionMethod = 'scan'
+) {
+  if (completionMethod === 'confirm') {
+    return {
+      title: `Plan tomorrow’s ${getCheckpointRoutineCopy(value)}`,
+      body: 'Set things up tonight so tomorrow’s check-in is easy.',
+    };
+  }
+
   const targetLabel = getCheckpointTargetLabel(label);
 
   switch (normalizeUseCaseType(value)) {

@@ -26,6 +26,7 @@ import {
   getDeviceTimezone,
   isValidTimezone,
 } from '@/lib/alarm-schedule';
+import { normalizeChecklistItems, normalizeCompletionMethod } from '@/lib/checkpoint-completion';
 import { normalizeUseCaseType } from '@/lib/checkpoint-templates';
 import { getWeeklyCompletionStats } from '@/lib/progress';
 import { hasSocialBackendConfig } from '@/lib/social/config';
@@ -271,6 +272,7 @@ function normalizeAlarm(rawAlarm: unknown): Alarm | null {
     getTrimmedString(legacyAlarm.qrValue) ??
     getTrimmedString(legacyAlarm.message) ??
     '';
+  const completionMethod = normalizeCompletionMethod(legacyAlarm.completionMethod, expectedQrPayload);
 
   const lastOutcome: AlarmOutcome | undefined =
     legacyAlarm.lastOutcome === 'confirmed' || legacyAlarm.lastOutcome === 'missed'
@@ -290,7 +292,13 @@ function normalizeAlarm(rawAlarm: unknown): Alarm | null {
     useCaseType: normalizeUseCaseType(legacyAlarm.useCaseType),
     placeObject: getTrimmedString(legacyAlarm.placeObject),
     notes: getTrimmedString(legacyAlarm.notes),
-    expectedQrPayload,
+    completionMethod,
+    expectedQrPayload: completionMethod === 'scan' ? expectedQrPayload : '',
+    proofCodeType:
+      completionMethod === 'scan' && (legacyAlarm.proofCodeType === 'qr' || legacyAlarm.proofCodeType === 'barcode')
+        ? legacyAlarm.proofCodeType
+        : undefined,
+    checklistItems: normalizeChecklistItems(legacyAlarm.checklistItems),
     repeatSchedule: getRepeatSchedule(legacyAlarm.repeatSchedule),
     timezone:
       getTrimmedString(legacyAlarm.timezone) && isValidTimezone(getTrimmedString(legacyAlarm.timezone) as string)
@@ -434,6 +442,10 @@ function normalizeSuccessEntry(rawEntry: unknown): SuccessHistoryEntry | null {
     confirmedAt,
     timeToScanSeconds: getBoundedNumber(rawEntry.timeToScanSeconds, 0, 86400, 0),
     gracePeriodSeconds: getBoundedNumber(rawEntry.gracePeriodSeconds, 15, 3600, 120),
+    completionMethod:
+      rawEntry.completionMethod === 'confirm' || rawEntry.completionMethod === 'scan'
+        ? rawEntry.completionMethod
+        : undefined,
   };
 }
 
@@ -605,6 +617,7 @@ export function resolveAlarmOutcomeInStore(
             Math.max(0, Math.round((resolvedTimestamp - scheduledTimestamp) / 1000))
           ),
           gracePeriodSeconds: alarm.gracePeriodSeconds,
+          completionMethod: alarm.completionMethod,
         }
       : null;
   const nextFailureHistory = failureEntry
@@ -657,6 +670,8 @@ export function resolveAlarmOutcomeInStore(
       longestStreak: nextStore.longestStreak,
       gracePeriodSeconds: alarm.gracePeriodSeconds,
       timeToScanSeconds: successEntry?.timeToScanSeconds,
+      completionMethod: alarm.completionMethod,
+      checklistItemCount: alarm.checklistItems?.length ?? 0,
       weeklyCompletionRate: weeklyStats.completionRate,
       weeklySuccesses: weeklyStats.successes,
       weeklyFailures: weeklyStats.failures,
@@ -758,7 +773,14 @@ export function reconcileOverdueAlarmOutcomesInStore(
   };
 }
 
-function upsertCheckpointPreset(existingPresets: CheckpointPreset[], alarmLike: Pick<Alarm, 'label' | 'expectedQrPayload'>) {
+function upsertCheckpointPreset(
+  existingPresets: CheckpointPreset[],
+  alarmLike: Pick<Alarm, 'label' | 'expectedQrPayload' | 'completionMethod'>
+) {
+  if (alarmLike.completionMethod !== 'scan' || !alarmLike.expectedQrPayload.trim()) {
+    return existingPresets;
+  }
+
   const now = new Date().toISOString();
   const matchingPreset =
     existingPresets.find(
@@ -1592,6 +1614,7 @@ async function enqueueRecentGuestHistoryForSync(
         longestStreak: mergedStore.longestStreak,
         gracePeriodSeconds: entry.gracePeriodSeconds,
         timeToScanSeconds: entry.timeToScanSeconds,
+        completionMethod: entry.completionMethod,
         weeklyCompletionRate: 0,
         weeklySuccesses: 0,
         weeklyFailures: 0,

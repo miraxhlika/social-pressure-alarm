@@ -42,6 +42,7 @@ import {
   updateAlarm,
 } from '@/lib/alarms';
 import { getDeviceTimezone } from '@/lib/alarm-schedule';
+import { createChecklistItemId, normalizeChecklistItems } from '@/lib/checkpoint-completion';
 import { getExactAlarmAccessState } from '@/lib/exact-alarm-access';
 import {
   CHECKPOINT_TEMPLATES,
@@ -78,7 +79,11 @@ import {
   Alarm,
   AlarmSocialSettings,
   AlarmProofCodeType,
+  ChecklistItem,
   CheckpointPreset,
+  CompletionMethod,
+  MAX_CHECKLIST_ITEMS,
+  MAX_CHECKLIST_ITEM_LENGTH,
   RepeatSchedule,
   UseCaseType,
 } from '@/types/alarm';
@@ -102,7 +107,18 @@ const DISCLOSURE_EXITING = FadeOutUp.duration(170).easing(Easing.in(Easing.cubic
 
 type LinkMode = 'scanQr' | 'scanBarcode' | 'saved';
 type ScannerPurpose = 'link' | 'test';
-type ExpandedField = 'name' | 'category' | 'schedule' | 'window' | 'recurrence' | 'accountability' | 'place' | 'notes' | null;
+type ExpandedField =
+  | 'name'
+  | 'category'
+  | 'schedule'
+  | 'window'
+  | 'recurrence'
+  | 'completion'
+  | 'checklist'
+  | 'accountability'
+  | 'place'
+  | 'notes'
+  | null;
 type SocialMode = 'private' | 'circle';
 
 type FormErrors = {
@@ -292,6 +308,8 @@ export default function CreateAlarmScreen() {
   const [useCaseType, setUseCaseType] = useState<UseCaseType>('custom');
   const [placeObject, setPlaceObject] = useState('');
   const [notes, setNotes] = useState('');
+  const [completionMethod, setCompletionMethod] = useState<CompletionMethod>('confirm');
+  const [checklistItems, setChecklistItems] = useState<ChecklistItem[]>([]);
   const [expectedQrPayload, setExpectedQrPayload] = useState('');
   const [linkMode, setLinkMode] = useState<LinkMode>('scanQr');
   const [proofCodeCapturedAt, setProofCodeCapturedAt] = useState<string | null>(null);
@@ -335,14 +353,15 @@ export default function CreateAlarmScreen() {
   const parsedGracePeriod = Number.parseInt(gracePeriodSeconds, 10);
   const gracePreviewSeconds = Number.isFinite(parsedGracePeriod) ? Math.max(parsedGracePeriod, 0) : 0;
   const hasLinkedProofCode = expectedQrPayload.trim().length > 0;
-  const canSaveLinkedProof = hasLinkedProofCode;
-  const shouldSaveFromDetailsStep = activeStep === 1 && canSaveLinkedProof;
+  const isScanCompletion = completionMethod === 'scan';
+  const canSaveCheckpoint = !isScanCompletion || hasLinkedProofCode;
+  const shouldSaveFromDetailsStep = activeStep === 1 && canSaveCheckpoint;
   let footerButtonLabel = 'Link proof code';
   let footerHelperCopy = '';
 
   if (activeStep === 0) {
     footerButtonLabel = 'Choose a starting point';
-    footerHelperCopy = 'Pick the commitment you want to prove with a real place or object.';
+    footerHelperCopy = 'Pick the routine you want to follow through on.';
   } else if (activeStep === 2) {
     if (!hasLinkedProofCode) {
       footerButtonLabel = 'Link a Code';
@@ -368,7 +387,7 @@ export default function CreateAlarmScreen() {
         ? 'Notifications are blocked in Settings. Re-enable them before saving.'
         : notificationPermissionState === 'undetermined'
           ? 'We ask for notifications when you save, so the reminder can go live.'
-          : 'Reminders open the app so you can scan. Keep notifications on.';
+          : `Reminders open the app so you can ${isScanCompletion ? 'scan' : 'check in'}. Keep notifications on.`;
   } else if (activeStep === 1) {
     footerHelperCopy =
       notificationPermissionState === 'undetermined'
@@ -508,8 +527,10 @@ export default function CreateAlarmScreen() {
         setSourceAlarm(null);
         setUseCaseType(prefilledTemplate.useCaseType);
         setLabel(typeof params.prefillLabel === 'string' ? params.prefillLabel : prefilledTemplate.label);
-        setPlaceObject(prefilledTemplate.label);
+        setPlaceObject(prefilledTemplate.place);
         setNotes('');
+        setCompletionMethod(prefilledTemplate.completionMethod);
+        setChecklistItems([]);
         setExpectedQrPayload('');
         setLinkMode('scanQr');
         setProofCodeCapturedAt(null);
@@ -537,6 +558,8 @@ export default function CreateAlarmScreen() {
         setLabel('');
         setPlaceObject('');
         setNotes('');
+        setCompletionMethod('confirm');
+        setChecklistItems([]);
         setExpectedQrPayload('');
         setLinkMode('scanQr');
         setProofCodeCapturedAt(null);
@@ -561,6 +584,8 @@ export default function CreateAlarmScreen() {
       setUseCaseType(alarm.useCaseType);
       setPlaceObject(alarm.placeObject ?? '');
       setNotes(alarm.notes ?? '');
+      setCompletionMethod(alarm.completionMethod);
+      setChecklistItems(alarm.checklistItems ?? []);
       setExpectedQrPayload(alarm.expectedQrPayload);
       setLinkMode(getLinkModeFromProofCodeType(alarm.proofCodeType));
       setProofCodeCapturedAt(alarm.createdAt);
@@ -632,7 +657,9 @@ export default function CreateAlarmScreen() {
     const defaults = getCheckpointTemplateDefaults(nextUseCaseType);
     setUseCaseType(defaults.useCaseType);
     setLabel(defaults.label);
-    setPlaceObject(defaults.label);
+    setPlaceObject(defaults.place);
+    setCompletionMethod(defaults.completionMethod);
+    setChecklistItems([]);
     setRepeatSchedule(defaults.repeatSchedule === 'once' ? 'daily' : defaults.repeatSchedule);
     setGracePeriodSeconds(String(FIRST_RUN_GRACE_SECONDS));
     setTime(createFirstRunTime(defaults.useCaseType));
@@ -923,6 +950,41 @@ export default function CreateAlarmScreen() {
     setShareSuccesses((currentValue) => !currentValue);
   }, []);
 
+  const handleAddChecklistItem = useCallback(
+    (rawLabel: string) => {
+      const nextLabel = rawLabel.trim().slice(0, MAX_CHECKLIST_ITEM_LENGTH);
+      const isDuplicate = checklistItems.some(
+        (item) => item.label.toLocaleLowerCase() === nextLabel.toLocaleLowerCase()
+      );
+
+      if (!nextLabel || isDuplicate || checklistItems.length >= MAX_CHECKLIST_ITEMS) {
+        return false;
+      }
+
+      setChecklistItems([...checklistItems, { id: createChecklistItemId(), label: nextLabel }]);
+      return true;
+    },
+    [checklistItems]
+  );
+
+  const handleRemoveChecklistItem = useCallback((itemId: string) => {
+    setChecklistItems((currentItems) => currentItems.filter((item) => item.id !== itemId));
+  }, []);
+
+  const handleMoveChecklistItemUp = useCallback((itemId: string) => {
+    setChecklistItems((currentItems) => {
+      const index = currentItems.findIndex((item) => item.id === itemId);
+
+      if (index <= 0) {
+        return currentItems;
+      }
+
+      const nextItems = [...currentItems];
+      [nextItems[index - 1], nextItems[index]] = [nextItems[index], nextItems[index - 1]];
+      return nextItems;
+    });
+  }, []);
+
   const handleSave = useCallback(async () => {
     // State updates do not disable the button until React renders again. Guard the
     // mutation synchronously so rapid presses cannot create two checkpoints.
@@ -936,6 +998,7 @@ export default function CreateAlarmScreen() {
     const trimmedPlaceObject = placeObject.trim();
     const trimmedNotes = notes.trim();
     const trimmedExpectedQrPayload = expectedQrPayload.trim();
+    const savedChecklistItems = normalizeChecklistItems(checklistItems);
     const gracePeriod = Number.parseInt(gracePeriodSeconds, 10);
     const nextErrors: FormErrors = {};
 
@@ -943,7 +1006,7 @@ export default function CreateAlarmScreen() {
       nextErrors.label = 'Enter a checkpoint name.';
     }
 
-    if (!trimmedExpectedQrPayload) {
+    if (isScanCompletion && !trimmedExpectedQrPayload) {
       nextErrors.expectedQrPayload = 'Scan or choose the exact code this checkpoint should accept.';
     }
 
@@ -1014,8 +1077,10 @@ export default function CreateAlarmScreen() {
         useCaseType,
         placeObject: trimmedPlaceObject || trimmedLabel,
         notes: trimmedNotes || undefined,
-        expectedQrPayload: trimmedExpectedQrPayload,
-        proofCodeType: getProofCodeTypeFromLinkMode(linkMode),
+        completionMethod,
+        expectedQrPayload: isScanCompletion ? trimmedExpectedQrPayload : '',
+        proofCodeType: isScanCompletion ? getProofCodeTypeFromLinkMode(linkMode) : undefined,
+        checklistItems: savedChecklistItems,
         repeatSchedule,
         timezone: getDeviceTimezone(),
         scheduleRevision: isEditMode && sourceAlarm ? sourceAlarm.scheduleRevision + 1 : 1,
@@ -1068,6 +1133,8 @@ export default function CreateAlarmScreen() {
           useCaseType,
           repeatSchedule,
           gracePeriodSeconds: gracePeriod,
+          completionMethod,
+          checklistItemCount: savedChecklistItems?.length ?? 0,
           creationCountBeforeSave: store.lifetimeAlarmCreations,
           source: isReuseMode ? 'reuse' : 'new',
           socialMode: nextSocialSettings ? 'circle' : 'private',
@@ -1125,12 +1192,15 @@ export default function CreateAlarmScreen() {
     }
   }, [
     alert,
+    checklistItems,
+    completionMethod,
     expectedQrPayload,
     focusNameField,
     gracePeriodSeconds,
     isEditMode,
     isOnboardingConversion,
     isReuseMode,
+    isScanCompletion,
     label,
     linkMode,
     notes,
@@ -1157,7 +1227,7 @@ export default function CreateAlarmScreen() {
             <View style={styles.bottomFooter}>
               <FlowFooterButton
                 disabled={isSaving}
-                icon={canSaveLinkedProof ? 'checkmark' : activeStep === 2 ? 'scan' : 'qr-code-outline'}
+                icon={canSaveCheckpoint ? 'checkmark' : activeStep === 2 ? 'scan' : 'qr-code-outline'}
                 label={footerButtonLabel}
                 onPress={
                   activeStep === 2
@@ -1199,10 +1269,12 @@ export default function CreateAlarmScreen() {
         }
         subtitle={
           activeStep === 0
-            ? 'One commitment. One real place.'
+            ? 'One routine to follow through on.'
             : activeStep === 1
               ? isOnboardingConversion
-                ? 'Then link a code and clear it once.'
+                ? isScanCompletion
+                  ? 'Then link a code and clear it once.'
+                  : 'Then clear it once to see how it works.'
                 : 'Set it up in a minute.'
               : isOnboardingConversion
                 ? 'Link a code, then clear it once.'
@@ -1225,7 +1297,9 @@ export default function CreateAlarmScreen() {
         <FirstUseCaseStep colors={colors} onSelect={(nextUseCaseType) => void handleSelectFirstUseCase(nextUseCaseType)} />
       ) : activeStep === 1 ? (
         <CreateDetailsStep
+          checklistItems={checklistItems}
           colors={colors}
+          completionMethod={completionMethod}
           errors={errors}
           expandedField={expandedField}
           formattedTime={formattedTime}
@@ -1237,9 +1311,13 @@ export default function CreateAlarmScreen() {
           proofCodeVerifiedAt={proofCodeVerifiedAt}
           hasLinkedProofCode={hasLinkedProofCode}
           notes={notes}
+          onAddChecklistItem={handleAddChecklistItem}
+          onCompletionMethodChange={setCompletionMethod}
           onDismissKeyboard={dismissKeyboard}
           onExpectedCodePress={handleContinueToLinkCode}
           onFieldToggle={toggleField}
+          onMoveChecklistItemUp={handleMoveChecklistItemUp}
+          onRemoveChecklistItem={handleRemoveChecklistItem}
           onGracePeriodChange={(nextValue) => {
             setGracePeriodSeconds(nextValue);
             setErrors((currentErrors) => ({ ...currentErrors, gracePeriodSeconds: undefined }));
@@ -1268,8 +1346,8 @@ export default function CreateAlarmScreen() {
             if (!label.trim() || label === selectedTemplate.defaultLabel) {
               setLabel(defaults.label);
             }
-            if (!placeObject.trim() || placeObject === selectedTemplate.defaultLabel) {
-              setPlaceObject(defaults.label);
+            if (!placeObject.trim() || placeObject === selectedTemplate.defaultPlace) {
+              setPlaceObject(defaults.place);
             }
             setErrors((currentErrors) => ({ ...currentErrors, gracePeriodSeconds: undefined }));
           }}
@@ -1347,7 +1425,8 @@ function FirstUseCaseStep({
   return (
     <View style={styles.firstUseCaseLayout}>
       <Text style={[styles.firstUseCaseIntro, { color: colors.textSoft }]}>
-        Choose one routine. You will link a code at a real place, then clear it once so the loop clicks.
+        Choose one routine. You will check in when it is done, then clear it once so the loop clicks. Add a
+        code later if you want it stricter.
       </Text>
       <View style={styles.firstUseCaseList}>
         {FIRST_CHECKPOINT_TEMPLATES.map((template) => (
@@ -1375,7 +1454,7 @@ function FirstUseCaseStep({
       <View style={[styles.firstUseCaseNote, { backgroundColor: colors.panel, borderColor: colors.line }]}>
         <Ionicons color={colors.primary} name="notifications-outline" size={16} />
         <Text style={[styles.firstUseCaseNoteText, { color: colors.textSoft }]}>
-          Reminders open the app so you can scan. Keep notifications on for the best result.
+          Reminders open the app so you can check in. Keep notifications on for the best result.
         </Text>
       </View>
     </View>
@@ -1383,7 +1462,9 @@ function FirstUseCaseStep({
 }
 
 function CreateDetailsStep({
+  checklistItems,
   colors,
+  completionMethod,
   errors,
   expandedField,
   formattedTime,
@@ -1394,9 +1475,13 @@ function CreateDetailsStep({
   label,
   nameInputRef,
   notes,
+  onAddChecklistItem,
+  onCompletionMethodChange,
   onDismissKeyboard,
   onExpectedCodePress,
   onFieldToggle,
+  onMoveChecklistItemUp,
+  onRemoveChecklistItem,
   onGracePeriodChange,
   onOpenAccount,
   onOpenCircles,
@@ -1424,7 +1509,9 @@ function CreateDetailsStep({
   socialSessionState,
   time,
 }: {
+  checklistItems: ChecklistItem[];
   colors: ReturnType<typeof getAppColors>;
+  completionMethod: CompletionMethod;
   errors: FormErrors;
   expandedField: ExpandedField;
   formattedTime: string;
@@ -1435,9 +1522,13 @@ function CreateDetailsStep({
   label: string;
   nameInputRef: RefObject<TextInput | null>;
   notes: string;
+  onAddChecklistItem: (label: string) => boolean;
+  onCompletionMethodChange: (value: CompletionMethod) => void;
   onDismissKeyboard: () => void;
   onExpectedCodePress: () => void;
   onFieldToggle: (field: NonNullable<ExpandedField>) => void;
+  onMoveChecklistItemUp: (itemId: string) => void;
+  onRemoveChecklistItem: (itemId: string) => void;
   onGracePeriodChange: (value: string) => void;
   onOpenAccount: () => void;
   onOpenCircles: () => void;
@@ -1543,7 +1634,11 @@ function CreateDetailsStep({
         </CreateFieldRow>
 
         <CreateFieldRow
-          description="How long you have to reach the code after the reminder"
+          description={
+            completionMethod === 'scan'
+              ? 'How long you have to reach the code after the reminder'
+              : 'How long you have to check in after the reminder'
+          }
           expanded={expandedField === 'window'}
           icon="timer-outline"
           onPress={() => onFieldToggle('window')}
@@ -1572,21 +1667,79 @@ function CreateDetailsStep({
 
         <CreateFieldRow
           description={
-            hasLinkedProofCode
-              ? proofCodeVerifiedAt
-                ? 'Tested and ready'
-                : 'Ready to use'
-              : 'Scan a QR code or barcode'
+            completionMethod === 'scan'
+              ? 'Walk to a linked code and scan it'
+              : 'Tap Done in the app when it is done'
           }
-          expanded={false}
-          icon={hasLinkedProofCode ? (proofCodeVerifiedAt ? 'checkmark-circle-outline' : 'qr-code-outline') : 'qr-code-outline'}
-          onPress={() => {
-            onDismissKeyboard();
-            onExpectedCodePress();
-          }}
-          title="Proof code"
-          value={hasLinkedProofCode ? (proofCodeVerifiedAt ? 'Tested' : 'Linked') : 'Add'}
-        />
+          expanded={expandedField === 'completion'}
+          icon={completionMethod === 'scan' ? 'scan-outline' : 'checkmark-done-outline'}
+          onPress={() => onFieldToggle('completion')}
+          title="How you finish"
+          value={completionMethod === 'scan' ? 'Scan a code' : 'Confirm'}>
+          <View style={styles.optionGrid}>
+            <OptionChip
+              description="Tap Done when it is done"
+              onPress={() => onCompletionMethodChange('confirm')}
+              selected={completionMethod === 'confirm'}
+              title="Confirm"
+            />
+            <OptionChip
+              description="Harder to skip. Walk to a QR code or barcode"
+              onPress={() => onCompletionMethodChange('scan')}
+              selected={completionMethod === 'scan'}
+              title="Scan a code"
+            />
+          </View>
+          {completionMethod === 'confirm' && selectedTemplate.confirmCaution ? (
+            <View style={[styles.completionCaution, { backgroundColor: colors.warningSurface, borderColor: colors.line }]}>
+              <Ionicons color={colors.warning} name="alert-circle-outline" size={16} />
+              <Text style={[styles.completionCautionText, { color: colors.textSoft }]}>
+                {selectedTemplate.confirmCaution} You will hold the button to confirm.
+              </Text>
+            </View>
+          ) : null}
+        </CreateFieldRow>
+
+        {completionMethod === 'scan' ? (
+          <CreateFieldRow
+            description={
+              hasLinkedProofCode
+                ? proofCodeVerifiedAt
+                  ? 'Tested and ready'
+                  : 'Ready to use'
+                : 'Scan a QR code or barcode'
+            }
+            expanded={false}
+            icon={hasLinkedProofCode ? (proofCodeVerifiedAt ? 'checkmark-circle-outline' : 'qr-code-outline') : 'qr-code-outline'}
+            onPress={() => {
+              onDismissKeyboard();
+              onExpectedCodePress();
+            }}
+            title="Proof code"
+            value={hasLinkedProofCode ? (proofCodeVerifiedAt ? 'Tested' : 'Linked') : 'Add'}
+          />
+        ) : null}
+
+        <CreateFieldRow
+          description="Things to tick off before you finish"
+          expanded={expandedField === 'checklist'}
+          icon="list-outline"
+          onPress={() => onFieldToggle('checklist')}
+          title="Checklist"
+          value={
+            checklistItems.length > 0
+              ? `${checklistItems.length} item${checklistItems.length === 1 ? '' : 's'}`
+              : 'Optional'
+          }>
+          <ChecklistEditor
+            colors={colors}
+            items={checklistItems}
+            onAdd={onAddChecklistItem}
+            onMoveUp={onMoveChecklistItemUp}
+            onRemove={onRemoveChecklistItem}
+            suggestions={selectedTemplate.checklistSuggestions}
+          />
+        </CreateFieldRow>
       </Animated.View>
 
       <MoreOptionsDisclosure
@@ -2104,6 +2257,125 @@ function AccountabilityEditor({
   );
 }
 
+function ChecklistEditor({
+  colors,
+  items,
+  onAdd,
+  onMoveUp,
+  onRemove,
+  suggestions,
+}: {
+  colors: ReturnType<typeof getAppColors>;
+  items: ChecklistItem[];
+  onAdd: (label: string) => boolean;
+  onMoveUp: (itemId: string) => void;
+  onRemove: (itemId: string) => void;
+  suggestions: string[];
+}) {
+  const [draft, setDraft] = useState('');
+  const isFull = items.length >= MAX_CHECKLIST_ITEMS;
+  const existingLabels = new Set(items.map((item) => item.label.toLocaleLowerCase()));
+  const availableSuggestions = suggestions.filter(
+    (suggestion) => !existingLabels.has(suggestion.toLocaleLowerCase())
+  );
+
+  const submitDraft = () => {
+    if (onAdd(draft)) {
+      setDraft('');
+    }
+  };
+
+  return (
+    <View style={styles.checklistEditor}>
+      <Text style={[TextPresets.body, styles.smallBody, { color: colors.textSoft }]}>
+        When the reminder goes off, you tick each item separately before you can finish.
+      </Text>
+
+      {items.length > 0 ? (
+        <View style={styles.checklistEditorList}>
+          {items.map((item, index) => (
+            <View
+              key={item.id}
+              style={[styles.checklistEditorRow, { backgroundColor: colors.elevated, borderColor: colors.line }]}>
+              <Ionicons color={colors.muted} name="ellipse-outline" size={18} />
+              <Text numberOfLines={1} style={[styles.checklistEditorLabel, { color: colors.text }]}>
+                {item.label}
+              </Text>
+              {index > 0 ? (
+                <AppIconButton
+                  accessibilityLabel={`Move ${item.label} up`}
+                  icon="arrow-up"
+                  onPress={() => onMoveUp(item.id)}
+                  size="compact"
+                  variant="ghost"
+                />
+              ) : null}
+              <AppIconButton
+                accessibilityLabel={`Remove ${item.label}`}
+                icon="close"
+                onPress={() => onRemove(item.id)}
+                size="compact"
+                variant="ghost"
+              />
+            </View>
+          ))}
+        </View>
+      ) : null}
+
+      {!isFull && availableSuggestions.length > 0 ? (
+        <>
+          <Text style={[styles.editorLabel, { color: colors.textSoft }]}>SUGGESTIONS</Text>
+          <View style={styles.checklistSuggestionRow}>
+            {availableSuggestions.map((suggestion) => (
+              <Pressable
+                accessibilityLabel={`Add ${suggestion}`}
+                accessibilityRole="button"
+                key={suggestion}
+                onPress={() => {
+                  onAdd(suggestion);
+                }}
+                style={({ pressed }) => [
+                  styles.checklistSuggestion,
+                  { backgroundColor: colors.elevated, borderColor: colors.line },
+                  pressed && styles.pressed,
+                ]}>
+                <Ionicons color={colors.primary} name="add" size={15} />
+                <Text style={[styles.checklistSuggestionText, { color: colors.text }]}>{suggestion}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </>
+      ) : null}
+
+      {isFull ? (
+        <Text style={[TextPresets.body, styles.smallBody, { color: colors.textSoft }]}>
+          {MAX_CHECKLIST_ITEMS} items is the limit. Short lists are easier to take seriously.
+        </Text>
+      ) : (
+        <View style={styles.checklistAddRow}>
+          <AppInput
+            containerStyle={styles.checklistAddInput}
+            label="Add item"
+            maxLength={MAX_CHECKLIST_ITEM_LENGTH}
+            onChangeText={setDraft}
+            onSubmitEditing={submitDraft}
+            placeholder="Keys in pocket"
+            returnKeyType="done"
+            value={draft}
+          />
+          <AppButton
+            disabled={!draft.trim()}
+            label="Add"
+            onPress={submitDraft}
+            size="compact"
+            variant="secondary"
+          />
+        </View>
+      )}
+    </View>
+  );
+}
+
 function CreateFieldRow({
   children,
   description,
@@ -2590,6 +2862,70 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: Spacing.sm,
+  },
+  completionCaution: {
+    alignItems: 'flex-start',
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    marginTop: Spacing.sm,
+    padding: Spacing.sm,
+  },
+  completionCautionText: {
+    ...TextPresets.body,
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  checklistEditor: {
+    gap: Spacing.sm,
+  },
+  checklistEditorList: {
+    gap: Spacing.xs,
+  },
+  checklistEditorRow: {
+    alignItems: 'center',
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    minHeight: 48,
+    paddingLeft: Spacing.sm,
+    paddingRight: Spacing.xs,
+  },
+  checklistEditorLabel: {
+    ...TextPresets.body,
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  checklistSuggestionRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.xs,
+  },
+  checklistSuggestion: {
+    alignItems: 'center',
+    borderRadius: Radius.pill,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 4,
+    minHeight: 36,
+    paddingHorizontal: 12,
+  },
+  checklistSuggestionText: {
+    fontFamily: Fonts.rounded,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  checklistAddRow: {
+    alignItems: 'flex-end',
+    flexDirection: 'row',
+    gap: Spacing.sm,
+  },
+  checklistAddInput: {
+    flex: 1,
   },
   optionChip: {
     borderRadius: 12,
